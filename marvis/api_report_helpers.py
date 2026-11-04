@@ -8,7 +8,8 @@ from typing import Any
 
 from marvis.errors import conflict
 
-from marvis.agent.service import agent_conclusions_confirmed
+from marvis.agent.presenters.display_labels import recipe_label, report_role_suffix
+from marvis.agent.service import agent_conclusions_confirmed, missing_agent_conclusion_labels
 from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskRecord
 from marvis.files import sha256_file
@@ -44,7 +45,36 @@ def require_confirmed_agent_conclusions(repo: TaskRepository, task: TaskRecord) 
     values, _ = repo.get_report_values(task.id)
     if agent_conclusions_confirmed(values):
         return
-    raise conflict("请先确认三段报告结论，确认后将生成 Word 报告")
+    missing = "、".join(missing_agent_conclusion_labels(values))
+    raise conflict(f"请先确认三段报告结论，确认后将生成 Word 报告（尚未填写：{missing}）")
+
+
+def report_preview_unavailable_html(message: object) -> str:
+    """A readable page for the preview iframe instead of a raw JSON error."""
+    from html import escape
+    from marvis.ui_locale import current_ui_locale
+
+    english = current_ui_locale() == "en"
+    title = "Report preview unavailable" if english else "报告暂不可预览"
+    raw_message = str(message or "")
+    if english:
+        if raw_message.startswith("请先确认三段报告结论"):
+            raw_message = "Confirm the report conclusions before generating the Word report."
+        elif not raw_message or raw_message.startswith("报告尚未生成"):
+            raw_message = "The report has not been generated. Confirm the report conclusions and wait for generation to finish."
+        elif any("\u3400" <= char <= "\u9fff" for char in raw_message):
+            raw_message = "The report preview is currently unavailable. Return to the task to check the report status."
+    text = escape(raw_message or "报告暂不可预览。")
+    language = "en" if english else "zh-CN"
+    return (
+        f'<!doctype html><html lang="{language}"><head><meta charset="utf-8">'
+        f"<title>{title}</title><style>"
+        "body{margin:0;font:14px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;"
+        "color:#1d1d1f;background:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh}"
+        "main{max-width:420px;padding:24px;text-align:center}h1{font-size:16px;margin:0 0 8px}"
+        "p{margin:0;color:#6e6e73}</style></head><body><main>"
+        f"<h1>{title}</h1><p>{text}</p></main></body></html>"
+    )
 
 
 def driver_report_id(plan_id: str, step_id: str, index: int) -> str:
@@ -73,15 +103,21 @@ def driver_report_download_metadata(
         report_id = driver_report_id(plan_id, step_id, index)
         recipe = str(candidate.get("recipe") or "").strip()
         experiment_id = str(candidate.get("experiment_id") or "").strip()
-        label_detail = recipe or experiment_id
+        # Readable name for the reader; experiment_id stays alongside for code.
+        detail_label = (
+            f"实验 {index + 1}"
+            + (f" · {recipe_label(recipe)}" if recipe else "")
+            + report_role_suffix(output, experiment_id)
+        )
         label = (
-            f"下载 {label_detail} 模型报告"
-            if multiple and label_detail
+            f"下载{detail_label}模型报告"
+            if multiple
             else default_label
         )
         items.append({
             "report_id": report_id,
             "label": label,
+            "detail_label": detail_label,
             "download_url": (
                 f"/api/tasks/{task_id}/driver-reports/{report_id}/download"
             ),

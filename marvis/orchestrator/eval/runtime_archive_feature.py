@@ -11,7 +11,7 @@ import sqlite3
 import tempfile
 import unicodedata
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from .runtime_archive_datasets import _dataset, _source_input
 from .runtime_archive_reader import _Unsupported, _file, _json, _authenticated_snapshot, _public_source_identity, _original_path
@@ -29,7 +29,12 @@ _CHECKS = ("archive_integrity", "recomputation_snapshot", "external_bindings", "
            "feature_contract", "registered_dataset", "source_material", "independent_metrics",
            "report_inputs", "artifact_record", "workbook_cells", "download_binding")
 _DEFAULT_METRICS = ["iv", "ks", "auc", "coverage"]
-_QUALITY_COLUMNS = [("coverage", "覆盖率"), ("missing_rate", "缺失率"), ("mode_rate", "单一值率"),
+# Optional metrics with an installed independent reference (importance retrains
+# the same third-party learner and is reported as library dependent).
+_PSI_LABELS = {"psi_month_first": "月度PSI(首月基准)", "psi_month_last": "月度PSI(末月基准)",
+               "psi_month_previous": "月度PSI(逐月环比)", "psi_split": "样本集PSI"}
+_OPTIONAL_METRICS = ["importance", "vif", "head_tail_lift", "meaning_consistency", *_PSI_LABELS]
+_QUALITY_COLUMNS = [("coverage", "覆盖率"), ("missing_rate", "缺失率"), ("mode_rate", "最常见值占比"),
     ("zero_rate", "零值率"), ("valid_count", "有效样本数"), ("unique_count", "唯一值数"), ("unique_rate", "唯一值率"),
     ("mean", "均值"), ("std", "标准差"), ("min", "最小值"), ("q25", "P25"), ("median", "中位数"), ("q75", "P75"), ("max", "最大值")]
 
@@ -49,13 +54,28 @@ class FrozenFeatureBinding(BaseModel):
     expected_sha256: str = Field(pattern=_HASH)
     source: dict
     model_connection_sha256: str = Field(pattern=_HASH)
+    dictionary_id: str | None = Field(default=None, pattern=_ID)
+    dictionary_sha256: str | None = Field(default=None, pattern=_HASH)
+    meaning_directions: dict = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_identity(self, handler):
+        value = handler(self)
+        for name in ("dictionary_id", "dictionary_sha256", "meaning_directions"):
+            if not value.get(name):
+                value.pop(name, None)
+        return value
 
     @model_validator(mode="after")
     def required_bindings(self):
-        if (self.case.task.task_type != "feature_analysis" or len(self.case.materials) != 1
-                or self.case.materials[0].role != "sample" or not self.case.task.feature_columns
+        roles = [m.role for m in self.case.materials]
+        if (self.case.task.task_type != "feature_analysis" or roles not in (["sample"], ["sample", "dictionary"])
+                or not self.case.task.feature_columns
                 or len(set(self.case.task.feature_columns)) != len(self.case.task.feature_columns)
-                or not any(a.kind == "approve_step" and a.tool == _TOOLS["bins"] for a in self.case.actions)
+                # The binning gate is confirmed either by an approval or by a
+                # human binning choice message; native confirmation is checked separately.
+                or not any((a.kind == "approve_step" and a.tool == _TOOLS["bins"]) or a.kind == "message"
+                           for a in self.case.actions)
                 or not any(a.kind == "download_feature_report" for a in self.case.actions)):
             raise ValueError("explicit feature task, sample, selection and download required")
         if (set(self.step_ids) != set(_TOOLS) or len(set(self.step_ids.values())) != 3
@@ -64,6 +84,10 @@ class FrozenFeatureBinding(BaseModel):
                 or any(not re.fullmatch(_HASH, v) for v in self.output_sha256.values())
                 or not re.fullmatch(_HASH, self.source.get("source_sha256", ""))):
             raise ValueError("complete external native execution bindings required")
+        if (bool(self.dictionary_id) != bool(self.dictionary_sha256)
+                or bool(self.dictionary_id) != ("dictionary" in roles)
+                or set(self.meaning_directions) - set(self.case.task.feature_columns)):
+            raise ValueError("dictionary and semantic decisions require complete frozen bindings")
         return self
 
 
@@ -133,14 +157,98 @@ def _native(conn, binding):
 
 def _contract(binding, inputs):
     selected = binding.case.task.metrics if binding.case.task.metrics is not None else _DEFAULT_METRICS
-    if not selected or set(selected) - set(_DEFAULT_METRICS):
+    if not selected or set(selected) - set(_DEFAULT_METRICS) - set(_OPTIONAL_METRICS):
         raise _Unsupported("additional selected feature metrics require independent calculators")
     _equal(inputs["metrics"], {"dataset_id": binding.dataset_id, "features": binding.case.task.feature_columns,
-        "target_col": binding.case.task.target_col, "metrics": selected, "meaning_directions": {}, "bins": 10})
-    if inputs["bins"].get("features"):
-        raise _Unsupported("selected optional binning requires independent row and workbook checks")
-    _equal(inputs["bins"], {"dataset_id": binding.dataset_id, "features": [], "target_col": binding.case.task.target_col, "bins": 10})
-    return selected
+        "target_col": binding.case.task.target_col, "metrics": selected,
+        "meaning_directions": binding.meaning_directions, "bins": 10})
+    chosen = inputs["bins"].get("features")
+    if (not isinstance(chosen, list) or len(set(chosen)) != len(chosen)
+            or set(chosen) - set(binding.case.task.feature_columns)):
+        raise ValueError("binning choice outside the declared feature set")
+    _equal(inputs["bins"], {"dataset_id": binding.dataset_id, "features": chosen, "target_col": binding.case.task.target_col, "bins": 10})
+    return selected, chosen
+
+
+def _dictionary(conn, archive, manifest, binding, scratch):
+    rows = conn.execute("SELECT * FROM datasets WHERE task_id=? AND role IN ('feature_dictionary','data_dictionary')",
+                        (binding.task_id,)).fetchall()
+    if not binding.dictionary_id:
+        if rows:
+            raise ValueError("undeclared dictionary participates in feature semantics")
+        return {}
+    if len(rows) != 1 or rows[0]["id"] != binding.dictionary_id:
+        raise ValueError("ambiguous or missing frozen dictionary")
+    source, frame = _dataset(conn, archive, binding.task_id, binding.dictionary_id, binding.dictionary_sha256)
+    _source_input(archive, manifest, binding, source, frame, scratch, material_index=1)
+    key = next((k for k in ("特征名", "字段名", "列名", "feature", "feature_name", "column") if k in frame), None)
+    meaning = next((k for k in ("业务名称", "含义", "meaning", "description", "业务含义") if k in frame), None)
+    if key is None or meaning is None:
+        return {}
+    result = {}
+    for name, text in zip(frame[key], frame[meaning], strict=True):
+        if len(result) >= 2000:
+            break
+        if name is None or name != name or text is None or text != text:
+            continue
+        if str(text).strip():
+            result[str(name)] = str(text).strip()
+    return result
+
+
+def _missing(key, code, dependency, message):
+    return {key: None, f"{key}_reason": {"code": code, "metric_dependency": dependency, "message": message}}
+
+
+def _optional_metrics(frame, source, name, target, selected, meanings, decisions):
+    from .runtime_feature_extended_reference import (head_tail_lift_reference, meaning_consistency_reference,
+        month_labels_reference, psi_pairs, psi_series_reference, split_role)
+
+    extra = {}
+    values, labels = frame[name].tolist(), frame[target].tolist()
+    if "head_tail_lift" in selected:
+        extra.update(head_tail_lift_reference(values, labels))
+    profiles = json.loads(source["columns_json"])
+    time_col = next((p["name"] for p in profiles if p.get("semantic_role") == "date"), "")
+    if not time_col:
+        time_col = next((p["name"] for p in profiles if p["name"].lower().replace("-", "_") in
+                         {"month", "apply_month", "data_month", "date", "dt", "apply_date"}), "")
+    split_cols = [c for c in frame if c.strip().lower().replace("-", "_") in
+                  {"split", "data_split", "dataset_split", "sample_split", "sample_type", "dataset_type", "data_type"}]
+    # The reader's 100k-row bound stays below the backend's large-data reservoir
+    # branch; independently reconstruct its deterministic pandas probe.
+    probe = frame if len(frame) <= 1000 else frame.sample(n=1000, random_state=0)
+    split_col = next((c for c in split_cols if "train" in {split_role(v) for v in probe[c]}
+                      and {split_role(v) for v in probe[c]} & {"test", "oot"}), "")
+    for view in _PSI_LABELS:
+        if view not in selected:
+            continue
+        dependency = "split_col" if view == "psi_split" else "time_col"
+        column = split_col if view == "psi_split" else time_col
+        if not column or column not in frame:
+            extra.update(_missing(view, "missing_dependency", dependency, f"未提供可用{dependency}；{view} 无法计算。"))
+            continue
+        groups = [split_role(v) for v in frame[column]] if view == "psi_split" else month_labels_reference(frame[column])
+        if not psi_pairs(groups, view):
+            extra.update(_missing(view, "insufficient_groups", dependency, f"{column} 未形成该 PSI 视角所需的至少两个有效分组。"))
+            continue
+        reference = psi_series_reference(values, groups, view)
+        if not reference["series"]:
+            extra.update({view: None, f"{view}_reason": {"code": "insufficient_feature_values",
+                "message": "各对比分组中的有效特征值不足，无法形成 PSI 分布。"}})
+        else:
+            extra.update({view: reference["psi"], f"{view}_series": reference["series"]})
+    if "meaning_consistency" in selected:
+        if not meanings:
+            extra.update(_missing("meaning_consistency", "data_dictionary_required", "data_dictionary",
+                                  "未提供可解析的数据字典，无法判断业务含义方向。"))
+        elif not meanings.get(name):
+            extra.update(_missing("meaning_consistency", "dictionary_entry_missing", "data_dictionary",
+                                  f"数据字典中没有 {name} 的业务含义。"))
+        else:
+            extra.update(meaning_consistency_reference(values, labels, feature=name, meaning=meanings[name],
+                                                       decision=decisions.get(name, {})))
+    return extra
 
 
 def _report_artifact(conn, archive, manifest, binding, output, report_inputs):
@@ -169,6 +277,10 @@ def _cell(value):
         return "n/a"
     if isinstance(value, float):
         return round(value, 6)
+    if isinstance(value, dict):
+        value = str(value["message"]) if value.get("message") not in (None, "") else json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if isinstance(value, (list, tuple, set)):
+        value = json.dumps(list(value), ensure_ascii=False, default=str)
     if isinstance(value, str):
         text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", value)
         significant = next((c for c in text if not c.isspace() and not unicodedata.category(c).startswith("C")), "")
@@ -176,7 +288,51 @@ def _cell(value):
     return value
 
 
-def _workbook(path, rows, selected):
+_BINNING_COLUMNS = [("feature", "特征"), ("requested_bins", "请求箱数"), ("actual_bins", "实际箱数"), ("bin_index", "箱号"),
+    ("risk_rank", "风险排序"), ("interval", "区间"), ("count", "样本数"), ("bad_count", "坏样本数"), ("good_count", "好样本数"),
+    ("bad_rate", "坏率"), ("cumulative_bad_rate", "累计坏率"), ("lift", "单箱Lift"), ("cumulative_lift", "累计Lift"), ("ks", "KS"),
+    ("woe", "WOE"), ("iv_contribution", "IV贡献"), ("total_iv", "总IV"), ("direction", "风险方向"), ("degraded_reason", "分箱说明")]
+
+
+def _sheet_cells(sheet, expected):
+    if sheet.max_row != len(expected) or sheet.max_column != max(len(row) for row in expected):
+        raise ValueError("feature report dimensions mismatch")
+    count = 0
+    for actual_row, expected_row in zip(sheet.iter_rows(), expected, strict=True):
+        for index, cell in enumerate(actual_row):
+            value = expected_row[index] if index < len(expected_row) else None
+            if cell.data_type in {"f", "e"}:
+                raise ValueError("feature report contains executable or error cells")
+            # An empty string cell is stored as an empty cell.
+            _numbers(cell.value, None if value == "" else value)
+            count += 1
+    return count
+
+
+def _extra_sheets(collinear, binning, metrics=()):
+    sheets = {}
+    if collinear is not None:
+        rows = [["特征", "VIF"]] + [[_cell(name), _cell(value)] for name, value in collinear["vif"].items()]
+        if collinear["collinear_pairs"]:
+            rows += [[], ["特征A", "特征B", "相关系数"]] + [[_cell(a), _cell(b), _cell(c)] for a, b, c in collinear["collinear_pairs"]]
+        sheets["共线性(VIF)"] = rows
+    if any(isinstance(row.get(f"{view}_series"), list) for row in metrics for view in _PSI_LABELS):
+        rows = [["特征", "PSI口径", "基准", "对比", "PSI"]]
+        for row in metrics:
+            for view, label in _PSI_LABELS.items():
+                rows.extend([_cell(row["feature"]), label, _cell(point["base"]), _cell(point["compare"]), _cell(point["psi"])]
+                            for point in row.get(f"{view}_series", []))
+        sheets["PSI明细"] = rows
+    if binning:
+        rows = [[label for _, label in _BINNING_COLUMNS]]
+        for result in binning:
+            common = {key: result[key] for key in ("feature", "requested_bins", "actual_bins", "total_iv", "direction", "degraded_reason")}
+            rows += [[_cell({**common, **row}.get(key)) for key, _ in _BINNING_COLUMNS] for row in result["rows"]]
+        sheets["分箱分析"] = rows
+    return sheets
+
+
+def _workbook(path, rows, selected, *, collinear=None, binning=()):
     from openpyxl import load_workbook
     from .runtime_archive_validation import _ooxml
 
@@ -185,22 +341,31 @@ def _workbook(path, rows, selected):
     columns += [(key, key.upper()) for key in ("iv", "ks", "auc") if key in selected]
     if "coverage" in selected:
         columns += _QUALITY_COLUMNS
+    if "head_tail_lift" in selected:
+        columns += [("lift_head_5", "头部lift5%"), ("lift_head_10", "头部lift10%"),
+                    ("lift_tail_5", "尾部lift5%"), ("lift_tail_10", "尾部lift10%"), ("lift_reason", "Lift说明")]
+    if "importance" in selected:
+        columns += [("importance", "重要性")]
+    reason_labels = ["月度PSI(首月)说明", "月度PSI(末月)说明", "月度PSI(环比)说明", "样本集PSI说明"]
+    for (view, label), reason_label in zip(_PSI_LABELS.items(), reason_labels, strict=True):
+        if view in selected:
+            columns += [(view, label), (f"{view}_reason", reason_label)]
+    if "meaning_consistency" in selected:
+        columns += [("business_meaning", "业务含义"), ("expected_direction", "预期方向"), ("actual_direction", "实际方向"),
+                    ("meaning_consistency", "含义方向一致性"), ("meaning_consistency_reason", "含义方向说明"),
+                    ("meaning_judgement_source", "判断来源")]
     expected = [[label for _, label in columns]] + [[_cell(row.get(key)) for key, _ in columns] for row in rows]
-    book = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+    extra = _extra_sheets(collinear, binning, rows)
+    book = load_workbook(path, read_only=False, data_only=False, keep_links=False)
     try:
-        if book.sheetnames != ["特征指标"]:
+        if book.sheetnames != ["特征指标", *extra]:
             raise ValueError("feature report worksheet selection mismatch")
-        sheet = book["特征指标"]
-        if sheet.max_row != len(expected) or sheet.max_column != len(columns):
-            raise ValueError("feature report dimensions mismatch")
-        for actual_row, expected_row in zip(sheet.iter_rows(), expected, strict=True):
-            for cell, value in zip(actual_row, expected_row, strict=True):
-                if cell.data_type in {"f", "e"}:
-                    raise ValueError("feature report contains executable or error cells")
-                _numbers(cell.value, value)
+        count = _sheet_cells(book["特征指标"], expected)
+        for title, sheet_rows in extra.items():
+            count += _sheet_cells(book[title], sheet_rows)
     finally:
         book.close()
-    return len(expected) * len(columns)
+    return count
 
 
 def revalidate_feature_archive(archive: Path, *, expected_manifest_sha256: str, frozen_binding: FrozenFeatureBinding):
@@ -223,7 +388,8 @@ def revalidate_feature_archive(archive: Path, *, expected_manifest_sha256: str, 
               "unsupported": {"native_signature_authentication": "original_key_not_available",
                   "business_outcome_truth": "requires_independent_source_verification",
                   "actor_authorization_time_travel_and_duplicate_side_effect_safety": "not_established_by_feature_arithmetic",
-                  "optional_metrics_binning_join_and_recovery": "require_separate_domain_checks",
+                  "join_and_recovery": "require_separate_domain_checks",
+                  "semantic_direction_truth": "only_consistency_with_authenticated_dictionary_and_frozen_decision_is_verified",
                   "recommendation_business_suitability": "only_declared_deterministic_policy_consistency_is_verified",
                   "original_runtime_cost_and_timing": "not_recomputed"}}
     checks, current = result["checks"], "archive_integrity"
@@ -252,8 +418,8 @@ def revalidate_feature_archive(archive: Path, *, expected_manifest_sha256: str, 
         outputs, inputs = _native(conn, binding)
         checks[current] = {"status": "verified", "steps": 3, "scope": "native_runs_versioned_outputs_and_parent_bindings"}
         current = "feature_contract"
-        selected = _contract(binding, inputs)
-        checks[current] = {"status": "verified", "scope": "frozen_columns_target_metric_selection_and_default_optional_skip"}
+        selected, bin_features = _contract(binding, inputs)
+        checks[current] = {"status": "verified", "scope": "frozen_columns_target_metric_selection_and_binning_choice"}
         current = "registered_dataset"
         source, frame = _dataset(conn, archive, binding.task_id, binding.dataset_id, binding.dataset_sha256)
         if source["role"] != "sample":
@@ -261,29 +427,49 @@ def revalidate_feature_archive(archive: Path, *, expected_manifest_sha256: str, 
         checks[current] = {"status": "verified", "rows": len(frame)}
         current = "source_material"
         _source_input(archive, manifest, binding, source, frame, scratch)
+        meanings = _dictionary(conn, archive, manifest, binding, scratch)
         checks[current] = {"status": "verified", "scope": "frozen_upload_and_registered_source_values"}
         current = "independent_metrics"
+        from .runtime_feature_extended_reference import bin_analysis_reference, correlation_reference, importance_reference
+
+        features, target = binding.case.task.feature_columns, binding.case.task.target_col
+        base = [m for m in selected if m in _DEFAULT_METRICS]
+        importance = importance_reference(frame, list(features), target) if "importance" in selected else {}
         rows = []
-        for name in binding.case.task.feature_columns:
-            row = feature_reference(frame[name].tolist(), frame[binding.case.task.target_col].tolist(), feature=name, selected=selected)
+        for name in features:
+            row = feature_reference(frame[name].tolist(), frame[target].tolist(), feature=name, selected=base) if base else {"feature": name}
+            if "importance" in selected:
+                row["importance"] = importance.get(name)
+            row.update(_optional_metrics(frame, source, name, target, selected, meanings, binding.meaning_directions))
+            # Neither importance nor VIF enters the deterministic recommendation policy.
             rows.append({**row, **feature_recommendation_reference(row)})
+        collinear = (correlation_reference(frame[list(features)].to_dict("records"), list(features))
+                     if "vif" in selected else None)
+        binning = [bin_analysis_reference(frame[name].tolist(), frame[target].tolist(), feature=name, requested_bins=10)
+                   for name in bin_features]
         _numbers(outputs["metrics"], {"dataset_id": binding.dataset_id, "metrics": rows,
-            "collinear": None, "nan_labels_dropped": 0, "selected_metrics": sorted(selected)})
-        _equal(outputs["bins"], {"dataset_id": binding.dataset_id, "selected_features": [], "requested_bins": 10,
-                                "binning": [], "nan_labels_dropped": 0})
-        checks[current] = {"status": "verified", "scope": "selected_numeric_metrics_and_default_recommendation_policy", "features": len(rows)}
+            "collinear": collinear, "nan_labels_dropped": 0, "selected_metrics": sorted(selected)})
+        _numbers(outputs["bins"], {"dataset_id": binding.dataset_id, "selected_features": bin_features, "requested_bins": 10,
+                                   "binning": binning, "nan_labels_dropped": 0})
+        checks[current] = {"status": "verified", "features": len(rows), "binned_features": len(binning),
+                           "scope": "selected_metrics_psi_views_lift_semantic_consistency_binning_and_recommendation_policy",
+                           "library_dependent": ["importance"] if "importance" in selected else []}
         current = "report_inputs"
-        _equal(inputs["report"], {"metrics": outputs["metrics"]["metrics"], "collinear": None, "binning": []})
+        _equal(inputs["report"], {"metrics": outputs["metrics"]["metrics"], "collinear": outputs["metrics"]["collinear"],
+                                  "binning": outputs["bins"]["binning"]})
         _numbers(outputs["report"]["metrics"], rows)
         _equal(outputs["report"]["feature_count"], len(rows))
-        _equal(outputs["report"]["binning"], [])
+        _numbers(outputs["report"]["binning"], binning)
+        if collinear is not None or "collinear" in outputs["report"]:
+            _numbers(outputs["report"].get("collinear"), collinear)
         checks[current] = {"status": "verified", "scope": "recomputed_metrics_to_report_input_and_output_echo"}
         current = "artifact_record"
         path = _report_artifact(conn, archive, manifest, binding, outputs["report"], inputs["report"])
         checks[current] = {"status": "verified", "scope": "registered_owner_kind_provenance_and_actual_bytes"}
         current = "workbook_cells"
-        cells = _workbook(path, rows, selected)
-        checks[current] = {"status": "verified", "cells_compared": cells, "sheets": 1}
+        cells = _workbook(path, rows, selected, collinear=collinear, binning=binning)
+        checks[current] = {"status": "verified", "cells_compared": cells,
+                           "sheets": 1 + len(_extra_sheets(collinear, binning, rows))}
         current = "download_binding"
         _equal(digest(path.read_bytes()), binding.download_sha256)
         if not any(e.get("stage") == "download_feature_report" and e.get("status_code") == 200

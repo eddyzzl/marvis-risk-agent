@@ -27,6 +27,7 @@ def _validation_protocol(request, answer, payload):
     return answer
 
 
+@pytest.mark.pmml_runtime
 def test_compatibility_workflow_executes_notebook_pmml_and_real_reports(tmp_path):
     paths = write_synthetic_suite(tmp_path / "suite", normal_validation_only=True)
     with fixture_model(answer_factory=_validation_protocol) as (model, calls):
@@ -155,6 +156,7 @@ def test_manual_compatibility_does_not_fill_standard_validation_agent_coverage()
     assert runtime_task_coverage([record])["cells"]["validation"]["normal"]["denominator"] == 0
 
 
+@pytest.mark.pmml_runtime
 def test_real_notebook_consistency_rejects_different_pmml_model(tmp_path):
     from marvis.domain import TaskCreate
     from marvis.plugins.manifest import ToolRef

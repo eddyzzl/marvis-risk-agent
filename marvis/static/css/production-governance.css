@@ -42,7 +42,7 @@
 }
 .production-card {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 0 14px 12px;
   min-width: 0;
 }
@@ -67,13 +67,13 @@
   min-width: 0;
   padding: 8px 10px;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   color: var(--text);
   background: var(--surface);
   font: inherit;
 }
 .production-workspace small {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .production-actions {
@@ -101,7 +101,7 @@
   overflow-wrap: anywhere;
 }
 .production-row span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   overflow-wrap: anywhere;
 }
@@ -123,19 +123,19 @@
   overflow: auto;
   background: var(--surface-soft);
   padding: 12px;
-  border-radius: 7px;
-  font-size: 11px;
+  border-radius: var(--radius-control);
+  font-size: 12px;
 }
 .production-workspace form {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 16px;
   margin: 16px 0;
 }
 
 .production-field {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   margin: 0;
   padding: 12px;
   min-width: 0;

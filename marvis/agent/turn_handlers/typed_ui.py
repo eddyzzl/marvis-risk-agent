@@ -181,7 +181,7 @@ def _append_successful_ui_action_messages(
         "confirm_features": "收到特征选择确认，开始执行下一步。",
         "adjust_screen_thresholds": "收到筛选阈值调整，正在重新计算。",
         "confirm_feature_binning": "收到分箱选择，开始生成分箱结果和特征分析报告。",
-        "apply_modeling_setup": "收到建模设置，开始重算后续步骤。",
+        "apply_modeling_setup": "收到建模方案，按你的设置重算并继续执行。",
         "confirm_adoption": "收到采纳确认，开始绑定理由并生成审计记录。",
         "confirm_gate": "收到确认，开始执行下一步。",
         "start_plan": "收到确认，开始按计划执行。",

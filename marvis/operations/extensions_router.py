@@ -172,6 +172,34 @@ def confirm(proposal_id: str, payload: ProposalConfirmation, request: Request):
         _reject(exc)
 
 
+class ConversationScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=128)
+    form: dict
+
+
+@router.post("/conversation/schedules", status_code=201)
+def conversation_schedule(payload: ConversationScheduleRequest, request: Request):
+    """Create a schedule from the user-confirmed conversation form (D-8)."""
+    from marvis.operations.conversation_schedule import ScheduleFormError, create_schedule_from_form
+    from marvis.repositories.tasks import TaskRepository
+
+    principal = _human(request)
+    settings = request.app.state.settings
+    authorize(settings.db_path, "task", payload.task_id, "execute")
+    try:
+        message, replayed = create_schedule_from_form(
+            _runtime(request), TaskRepository(settings.db_path), payload.task_id,
+            message_id=payload.message_id, form=payload.form, actor_id=str(principal["id"]),
+        )
+    except ScheduleFormError as exc:
+        raise HTTPException(422, detail={"code": "operations_schedule_form_invalid", "fields": exc.fields}) from exc
+    except (ValueError, KeyError, DataLayerError, ScheduleRevisionConflict) as exc:
+        _reject(exc)
+    return {"state": "published", "message": message, "replayed": replayed, "automatic_action_permitted": False}
+
+
 @router.post("/schedules/{schedule_id}/dispositions")
 def disposition(schedule_id: str, payload: DispositionRequest, request: Request):
     _human(request)

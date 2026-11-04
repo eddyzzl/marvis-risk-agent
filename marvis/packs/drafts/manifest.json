@@ -36,6 +36,7 @@
             }
           },
           "offline": {"type": "boolean"},
+          "refused": {"type": "boolean"},
           "guidance": {"type": "string"}
         },
         "required": ["results"],

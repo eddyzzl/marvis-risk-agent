@@ -123,6 +123,18 @@ def test_project_context_runs_without_workspace_and_binds_message_and_external_f
     assert "策略项目上下文已创建" in assistant_text
     assert "外部材料按原始字节快照" in assistant_text
     assert "不会填成 0" in assistant_text
+    # The content hash moved from the prose into the 「上下文产物摘要」 table.
+    artifact = output["context_artifact"]
+    assert artifact["content_hash"] not in assistant_text.replace(
+        artifact["download_url"], ""
+    )
+    assert "content hash" not in assistant_text
+    _, context_tables = render_tool_output("materialize_project_context", output)
+    summary = next(
+        table for table in context_tables if table["title"] == "上下文产物摘要"
+    )
+    assert ["content hash", artifact["content_hash"]] in summary["rows"]
+    assert ["文件", artifact["filename"]] in summary["rows"]
 
     tampered = copy.deepcopy(output)
     tampered["revision"]["state"]["as_of"] = "2026-07-01"

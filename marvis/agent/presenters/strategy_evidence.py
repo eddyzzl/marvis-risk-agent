@@ -10,6 +10,11 @@ from marvis.agent.presenters._shared import (
     format_percent as _pct,
     format_value as _fmt,
 )
+from marvis.agent.strategy_control_labels import (
+    SAMPLE_MATURITY_LABELS,
+    SAMPLE_SCOPE_LABELS,
+    value_label,
+)
 
 
 def _strategy_report_integrity_failure() -> tuple[str, list[dict]]:
@@ -98,11 +103,11 @@ def _render_materialize_project_context(o: dict):
     artifact = o["context_artifact"]
     action = "已创建" if o["created"] else "未变化，已复用"
     text = (
-        f"**策略项目上下文{action}**：revision **{revision['revision']}**，"
+        f"**策略项目上下文{action}**：第 **{revision['revision']}** 版，"
         f"截止 `{state['as_of']}`；绑定 {len(state['source_refs'])} 个可校验证据引用、"
         f"{len(histories)} 个历史策略版本，当前有 {len(missing)} 项缺失信息。\n"
-        f"上下文 artifact：[{artifact['filename']}]({artifact['download_url']})，"
-        f"content hash `{artifact['content_hash']}`。"
+        f"上下文文件：[{artifact['filename']}]({artifact['download_url']})；"
+        "文件校验值见下方「上下文产物摘要」。"
     )
     if o["external_artifacts"]:
         text += (
@@ -132,7 +137,16 @@ def _render_materialize_project_context(o: dict):
             "title": "当前项目状态证据",
             "columns": ["字段", "状态", "值", "截至", "说明"],
             "rows": status_rows,
-        }
+        },
+        {
+            "title": "上下文产物摘要",
+            "columns": ["项目", "值"],
+            "rows": [
+                ["revision", str(revision["revision"])],
+                ["文件", artifact["filename"]],
+                ["content hash", artifact["content_hash"]],
+            ],
+        },
     ]
     if histories:
 
@@ -212,42 +226,43 @@ def _render_materialize_sample_design(o: dict):
     lifecycle = design["lifecycle"]
     artifact = o["artifact"]
     performance_text = (
-        f"provided / {performance['days']} 天"
+        f"{performance['days']} 天"
         if performance["status"] == "provided"
-        else "unavailable"
+        else "未提供"
     )
     observation_text = (
-        f"provided / {observation['start']} 至 {observation['end']}"
+        f"{observation['start']} 至 {observation['end']}"
         if observation["status"] == "provided"
-        else "unavailable"
+        else "未提供"
     )
+    maturity_text = value_label(SAMPLE_MATURITY_LABELS, design["maturity"])
+    split_text = "已提供" if split["status"] == "available" else "未提供"
+    # The validator pins lifecycle to development/unvalidated; the raw codes,
+    # design ID and content hash stay in the 「样本设计口径」 table.
     text = (
-        f"**策略样本设计已固化**：`{o['sample_design_id']}`，content hash "
-        f"`{o['content_hash']}`；活动样本 **{_num(boundary['population_count'])}** 行。"
-        f"表现窗 `{performance_text}`，观察窗 `{observation_text}`，"
-        f"成熟度 `{design['maturity']}`，目标列 `{target['column']}`（坏样本值 "
+        f"**策略样本设计已固化**：活动样本 **{_num(boundary['population_count'])}** 行。"
+        f"表现期 {performance_text}，观察期 {observation_text}，"
+        f"风险样本成熟度：{maturity_text}，目标列 `{target['column']}`（坏样本值 "
         f"`{target['bad_value']}`，好样本值 `{target['good_value']}`），"
-        f"样本切分 `{split['status']}`。\n"
-        f"当前生命周期 `{lifecycle['candidate_stage']} / "
-        f"{lifecycle['validation_status']}`；**只生成样本证据，未创建或修改策略、"
+        f"开发/验证/OOT 切分{split_text}。\n"
+        "当前处于开发阶段、尚未验证；**只生成样本证据，未创建或修改策略、"
         "未建模、未建树、未入池、未采纳、未部署。**"
     )
     if design["scope"] == "exploration_only":
-        text += "\n- 当前为 `exploration-only`：不能声称样本已成熟或已完成独立验证。"
+        text += "\n- 当前仅用于探索分析：不能声称样本已成熟或已完成独立验证。"
     if split["status"] == "unavailable":
-        text += "\n- 开发/验证/OOT 切分 unavailable；仅展示 overall 样本证据。"
+        text += "\n- 开发/验证/OOT 切分未提供；仅展示整体样本证据。"
+    optional_fields = (
+        ("month_field", "月份列"),
+        ("weight_field", "权重列"),
+        ("loan_amount_field", "放款金额列"),
+        ("overdue_amount_field", "逾期金额列"),
+    )
     missing_optional = [
-        label
-        for field, label in (
-            ("month_field", "月份列"),
-            ("weight_field", "权重列"),
-            ("loan_amount_field", "放款金额列"),
-            ("overdue_amount_field", "逾期金额列"),
-        )
-        if optional[field] is None
+        label for field, label in optional_fields if optional[field] is None
     ]
     if missing_optional:
-        text += "\n- 可选口径 unavailable：" + "、".join(missing_optional) + "。"
+        text += "\n- 可选口径未提供：" + "、".join(missing_optional) + "。"
     if artifact.get("download_url"):
         text += (
             "\n\n**样本设计证据**："
@@ -287,7 +302,34 @@ def _render_materialize_sample_design(o: dict):
         "分母",
         "维度样本数",
     ]
-    tables: list[dict] = []
+    tables: list[dict] = [
+        {
+            "title": "样本设计口径",
+            "columns": ["项目", "状态/值", "补充说明"],
+            "rows": [
+                ["样本设计 ID", o["sample_design_id"], ""],
+                ["content hash", o["content_hash"], "样本设计内容校验值"],
+                [
+                    "样本用途",
+                    design["scope"],
+                    value_label(SAMPLE_SCOPE_LABELS, design["scope"]),
+                ],
+                ["表现期", performance["status"], performance_text],
+                ["观察期", observation["status"], observation_text],
+                ["风险样本成熟度", design["maturity"], maturity_text],
+                ["开发/验证/OOT 切分", split["status"], split_text],
+                [
+                    "生命周期",
+                    f"{lifecycle['candidate_stage']} / {lifecycle['validation_status']}",
+                    "开发阶段、尚未验证",
+                ],
+                *(
+                    [label, optional[field] or "unavailable", ""]
+                    for field, label in optional_fields
+                ),
+            ],
+        }
+    ]
     if rows_by_kind["overall"]:
         tables.append(
             {
@@ -373,6 +415,26 @@ def _render_materialize_sample_design_v2_native(o: dict):
     )
 
 
+# Business wording for authenticated sample-design facts (2026-10-14 redesign,
+# batch 3b). The prose uses these labels; the raw values stay in the
+# 「样本设计口径」 and 「样本产物摘要」 evidence tables.
+_SAMPLE_RELATIONSHIP_LABELS = {
+    "nested_same_cohort": "风险人群嵌套在审批人群里（同一批客户）",
+    "parallel_time_cohorts": "审批和风险是两批不同时间的客户",
+}
+_SCORE_DIRECTION_LABELS = {
+    "higher_is_riskier": "分数越高风险越高",
+    "lower_is_riskier": "分数越低风险越高",
+}
+
+
+def _historical_score_label(historical: dict) -> str:
+    if historical["status"] == "available":
+        direction = value_label(_SCORE_DIRECTION_LABELS, historical["direction"])
+        return f"可用（字段 {historical['column']}，{direction}）"
+    return f"不可用（{historical['reason']}）"
+
+
 def _render_validated_sample_design_v2(
     o: dict,
     *,
@@ -395,16 +457,17 @@ def _render_validated_sample_design_v2(
         score_detail += f" / {historical['reason']}"
 
     text = (
-        f"**策略样本设计 V2 已固化**：范围 `{semantics['scope']}`，"
-        f"人群关系 `{design['relationship']}`；已锁定 approval/risk 两个人群的 "
-        "development、validation、OOT 分区。\n"
-        f"- 风险样本成熟度：`{maturity['status']}`；历史评分：`{score_detail}`。\n"
+        f"**策略样本设计已固化**：用于{value_label(SAMPLE_SCOPE_LABELS, semantics['scope'])}，"
+        f"{value_label(_SAMPLE_RELATIONSHIP_LABELS, design['relationship'])}；"
+        "审批和风险两个人群都已分好开发、验证、OOT 三段。\n"
+        f"- 风险样本成熟度：{value_label(SAMPLE_MATURITY_LABELS, maturity['status'])}；"
+        f"历史评分：{_historical_score_label(historical)}。\n"
         "- 本步骤只固化样本与诊断证据，未创建策略、未采纳、未部署。"
     )
     if native_source:
-        text += f"\n- 样本来源：原生活动数据集 `{o['source_binding']['source_mode']}`。"
+        text += "\n- 样本来源：平台登记的原生数据集。"
     if semantics["scope"] == "exploration_only":
-        text += "\n- 当前范围为 exploration-only，不可声称已完成成熟样本验证。"
+        text += "\n- 当前只用于探索分析，不能当作已完成成熟样本验证。"
     if o["warnings"]:
         text += "\n- 诊断提示：" + "；".join(o["warnings"]) + "。"
     else:
@@ -413,14 +476,8 @@ def _render_validated_sample_design_v2(
     bundle_artifact = o["artifacts"]["bundle"]
     membership_artifact = o["artifacts"]["membership"]
     text += (
-        "\n\n**样本产物摘要（非 registry 身份认证）**："
-        f"bundle `{bundle_artifact['filename']}`，canonical content hash "
-        f"`{bundle_artifact['content_hash']}`；membership "
-        f"`{membership_artifact['filename']}`，membership semantic content hash "
-        f"`{o['membership_content_hash']}`。\n"
-        "- 下载请使用任务页统一产物栏。当前 Tool v2 envelope 不包含可信 "
-        "download_url、registry artifact id 或 membership binary artifact hash，"
-        "本渲染器不会自行拼接链接。"
+        "\n- 样本文件和校验值见下方「样本产物摘要」；下载请用任务页的统一产物栏，"
+        "这里不会自行拼接下载链接。"
     )
 
     tables: list[dict] = [
@@ -440,10 +497,10 @@ def _render_validated_sample_design_v2(
             "title": "样本设计口径",
             "columns": ["项目", "状态/值", "补充说明"],
             "rows": [
-                ["scope", semantics["scope"], "样本使用范围"],
-                ["relationship", design["relationship"], "双人群关系"],
-                ["risk maturity", maturity["status"], maturity["reason"] or ""],
-                ["historical score", historical["status"], score_detail],
+                ["样本用途", semantics["scope"], value_label(SAMPLE_SCOPE_LABELS, semantics["scope"])],
+                ["双人群关系", design["relationship"], value_label(_SAMPLE_RELATIONSHIP_LABELS, design["relationship"])],
+                ["风险样本成熟度", maturity["status"], maturity["reason"] or value_label(SAMPLE_MATURITY_LABELS, maturity["status"])],
+                ["历史评分", historical["status"], score_detail],
             ],
         },
         {
@@ -524,14 +581,12 @@ def _render_materialize_model_evidence_v2(o: dict):
     evidence = bundle["univariate_evidence"]
     artifact = o["artifact"]
     text = (
-        f"**策略分析证据 V2 已固化**：已认证 **{len(evidence)}** 条单变量证据，"
-        "证据范围为 `risk/development`。\n"
-        "- 当前是 **univariate-only**：未创建模型、未进行模型比较、未采纳、"
+        f"**策略分析证据已固化**：已认证 **{len(evidence)}** 条单变量证据，"
+        "证据范围为风险人群的开发集。\n"
+        "- 当前**只有单变量证据**：未创建模型、未进行模型比较、未采纳、"
         "未部署。\n"
-        f"- 证据文件 `{artifact['filename']}`，content hash "
-        f"`{artifact['content_hash']}`；下载请使用任务页统一产物栏。当前 Tool v3 "
-        "envelope 不包含可信 download_url 或 registry artifact id，本渲染器不会"
-        "自行拼接链接。"
+        "- 证据文件和校验值见下方「证据产物摘要」；下载请用任务页的统一产物栏，"
+        "这里不会自行拼接下载链接。"
     )
     tables = [
         {
@@ -547,7 +602,18 @@ def _render_materialize_model_evidence_v2(o: dict):
                 "not_applicable",
             ],
             "rows": _strategy_model_v2_evidence_rows(bundle),
-        }
+        },
+        {
+            "title": "证据产物摘要",
+            "columns": ["项目", "值"],
+            "rows": [
+                ["证据范围", "risk/development"],
+                ["证据类型", "univariate-only"],
+                ["文件", artifact["filename"]],
+                ["产物类型", artifact["kind"]],
+                ["content hash", artifact["content_hash"]],
+            ],
+        },
     ]
     return text, tables
 

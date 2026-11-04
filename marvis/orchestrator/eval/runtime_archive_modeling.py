@@ -1,4 +1,4 @@
-"""Independent native LR/XGB/LGB fit closure for binary, regression and multiclass."""
+"""Independent native model, dependency, fit and metric archive closure."""
 import base64
 import hashlib
 import json
@@ -8,14 +8,28 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .runtime_archive_domain import FrozenDomainBinding, DomainArchive, HASH, ID, equal, numbers, one_step
 from .runtime_archive_datasets import _dataset, _source_input
-from .runtime_archive_reader import _Unsupported, _file
-from .runtime_modeling_native_reference import read_linear_reference, independent_linear_fit
-from .runtime_modeling_tree_reference import PROFILES, read_tree_reference, independent_tree_fit
-from .runtime_modeling_reference import membership_reference, metrics_reference
+from .runtime_archive_domain import (
+    HASH,
+    ID,
+    DomainArchive,
+    FrozenDomainBinding,
+    equal,
+    numbers,
+    one_step,
+)
+from .runtime_archive_reader import _file, _Unsupported
 from .runtime_modeling_baseline_reference import baseline_reference, validate_baseline
-
+from .runtime_modeling_profile_reference import (
+    EXTRA_PROFILES,
+    independent_profile_fit,
+    read_profile,
+)
+from .runtime_modeling_reference import (
+    edges_reference,
+    membership_reference,
+    metrics_reference,
+)
 
 # Independent fixed contracts for the native complete metric record and the
 # binary comparison projection. Undefined metrics remain explicit None in the
@@ -45,13 +59,20 @@ _BINARY_COMPARISON_METRICS = (
 )
 
 
+_WEIGHTED_COMPARISON_METRICS = (
+    "weighted_train_ks", "weighted_test_ks", "weighted_oot_ks", "weighted_train_auc", "weighted_test_auc",
+    "weighted_oot_auc", "weighted_psi_test_vs_train", "weighted_psi_oot_vs_train",
+)
+
+
 def _selection_metrics(actual, values, *, allow_projection=False, rel_tol=1e-9, abs_tol=1e-11):
     if not isinstance(actual, dict) or not isinstance(values, dict):
-        raise ValueError("selection metric object mismatch")
+        raise ValueError("selection metric object mismatch")  # noqa: TRY004 - malformed archive evidence
     if set(values) - set(_FULL_MODEL_METRICS):
         raise ValueError("independent selection metric contract mismatch")
     complete = {key: values.get(key) for key in _FULL_MODEL_METRICS}
-    projection = {key: values[key] for key in _BINARY_COMPARISON_METRICS
+    # A weighted fit's comparison row also carries its weighted metrics.
+    projection = {key: values[key] for key in (*_BINARY_COMPARISON_METRICS, *_WEIGHTED_COMPARISON_METRICS)
                   if key in values and values[key] is not None}
     if set(actual) == set(complete):
         expected = complete
@@ -65,7 +86,7 @@ def _selection_metrics(actual, values, *, allow_projection=False, rel_tol=1e-9, 
 
 
 def _heldout_binary_comparison(scope, values):
-    return (scope.get("profile") in {"lr", "xgb", "lgb"}
+    return (scope.get("profile") in {"lr", "xgb", "lgb", *EXTRA_PROFILES}
             and scope.get("fit_scope") == "outer_train"
             and scope.get("test_evaluation") == "independent_heldout"
             and scope.get("parent_experiment_id") is None
@@ -181,7 +202,8 @@ def authenticated_model(session, experiment_id, artifact_id):
         raise ValueError("native model ownership closure mismatch")
     metadata = artifact_metadata(artifact)
     records = [dict(r) for r in conn.execute("SELECT * FROM task_artifacts WHERE task_id=? AND kind='modeling_native_model_closure'", (binding.task_id,))
-               if json.loads(r["provenance_json"]).get("artifact_id") == artifact_id]
+               if json.loads(r["provenance_json"]).get("artifact_id") == artifact_id
+               and json.loads(r["provenance_json"]).get("scoring_metadata_hash") == native_hash(metadata)]
     if len(records) != 1:
         raise ValueError("unique native model receipt required")
     record = records[0]
@@ -189,31 +211,53 @@ def authenticated_model(session, experiment_id, artifact_id):
     if (record["origin_tool"] != "modeling.native_model_producer.v1" or proof.get("schema_version") != record["origin_tool"]
             or proof["experiment_id"] != experiment_id or proof["scoring_metadata_hash"] != native_hash(metadata)):
         raise ValueError("native model metadata does not match closure")
-    if metadata["params"].get("calibration") or proof["members"]:
-        raise _Unsupported("calibrated/ensemble native profiles require their independent readers")
-    if len(proof["files"]) != 1 or proof["files"][0]["path"] != metadata["model_path"]:
-        raise ValueError("native linear dependency closure mismatch")
-    member = proof["files"][0]
-    if Path(member["path"]).name != member["path"]:
-        raise ValueError("native model member path invalid")
-    path = _file(session.archive, Path("workspace/tasks") / binding.task_id / "modeling_artifacts" / member["path"])
-    if (len(path.read_bytes()) != member["size"] or hashlib.sha256(path.read_bytes()).hexdigest() != member["sha256"]
-            or record["content_hash"] != member["sha256"] or record["path"] != f"modeling_artifacts/{metadata['model_path']}"):
-        raise ValueError("native model bytes differ from registered receipt")
+    paths = _model_dependencies(session, metadata, proof, record)
     config, metrics = json.loads(experiment["config_json"]), json.loads(experiment["metrics_json"])
     if metadata["feature_list"] != config["features"] or metadata["params"].get("preprocessing_steps"):
         raise _Unsupported("external preprocessing requires its independent source transformation reader")
-    reader = read_tree_reference if metadata["algorithm"] in PROFILES else read_linear_reference
-    model, predict = reader(path, metadata["algorithm"], metadata["feature_list"])
-    learner = model.steps[-1][1] if hasattr(model, "steps") else model
+    if config["recipe_id"] != metadata["algorithm"]:
+        raise ValueError("native recipe and artifact algorithm differ")
+    model, predict = read_profile(paths[metadata["model_path"]], metadata["algorithm"], metadata["feature_list"],
+                                  metadata=metadata, dependency_paths=paths)
+    if metadata["algorithm"] == "ensemble":
+        equal([{k: m[k] for k in ("algorithm", "model_path", "artifact_id")} for m in model["members"]], proof["members"])
+    learner = (model.steps[-1][1] if hasattr(model, "steps") else model.get("model") if isinstance(model, dict) else model)
     for key, value in config["params"].items():
-        if hasattr(learner, "get_params") and key in learner.get_params() and learner.get_params()[key] != value:
+        if (hasattr(learner, "get_params") and key in learner.get_params()
+                and json.dumps(learner.get_params()[key], sort_keys=True) != json.dumps(value, sort_keys=True)):
             raise ValueError("frozen native learner hyperparameters mismatch")
     if config["target_type"] != "continuous" and hasattr(learner, "random_state") and learner.random_state != config["seed"]:
         raise ValueError("native learner seed mismatch")
-    if config["early_stopping_rounds"] is not None and metadata["algorithm"] not in PROFILES:
-        raise _Unsupported("native early-stopping fit profile requires independent membership replay")
+    if metadata["algorithm"] == "catboost" and learner.get_params().get("random_seed") != config["seed"]:
+        raise ValueError("native CatBoost seed mismatch")
     return dict(experiment), dict(artifact), metadata, config, metrics, record, model, predict
+
+
+def _model_dependencies(session, metadata, proof, record):
+    members = proof["members"]
+    if not isinstance(members, list) or len(members) > 100 or (metadata["algorithm"] != "ensemble" and members):
+        raise ValueError("native model dependency membership mismatch")
+    names = {metadata["model_path"], *(m["model_path"] for m in members)}
+    calibration = metadata["params"].get("calibration") or {}
+    if calibration:
+        names.add(calibration["path"])
+    if len(proof["files"]) != len(names) or {f["path"] for f in proof["files"]} != names:
+        raise ValueError("native model dependency closure mismatch")
+    paths, anchors = {}, []
+    for member in proof["files"]:
+        name = member["path"]
+        if not isinstance(name, str) or Path(name).name != name or name in {".", ".."}:
+            raise ValueError("native model member path invalid")
+        path = _file(session.archive, Path("workspace/tasks") / session.binding.task_id / "modeling_artifacts" / name)
+        raw = path.read_bytes()
+        if type(member["size"]) is not int or len(raw) != member["size"] or hashlib.sha256(raw).hexdigest() != member["sha256"]:
+            raise ValueError("native model bytes differ from registered receipt")
+        if record["path"] == f"modeling_artifacts/{name}" and record["content_hash"] == member["sha256"]:
+            anchors.append(name)
+        paths[name] = path
+    if len(anchors) != 1 or anchors[0] != (calibration["path"] if calibration else metadata["model_path"]):
+        raise ValueError("native model closure anchor mismatch")
+    return paths
 
 
 def membership_bytes(mask):
@@ -275,7 +319,7 @@ def fold_reference(session, metadata, config, frame):
 
 
 def _model_values(session, experiment_id, artifact_id, frame):
-    experiment, artifact, metadata, config, metrics, receipt, model, predict = authenticated_model(session, experiment_id, artifact_id)
+    _, artifact, metadata, config, metrics, receipt, model, predict = authenticated_model(session, experiment_id, artifact_id)
     if config["dataset_id"] != session.binding.dataset_id:
         raise ValueError("native model source dataset changed")
     proof_id = (metadata["params"].get("fitted_input_time_evidence") or {}).get("development_refit_receipt_id")
@@ -310,39 +354,70 @@ def _model_values(session, experiment_id, artifact_id, frame):
         fold_reference(session, metadata, config, frame)
     fit_mask = masks["development"] if development else masks["train"]
     weight = config["params"].get("sample_weight_col")
-    if weight:
-        raise _Unsupported("weighted native model requires independent weighted metric profile")
+    if weight and config.get("target_type", "binary") != "binary":
+        raise _Unsupported("non-binary weighted metric contract requires its independent reference")
     fit_frame = frame.iloc[[i for i, yes in enumerate(fit_mask) if yes]]
     classes = metadata["params"].get("classes", [])
-    if metadata["algorithm"] in PROFILES:
-        independent_tree_fit(model, fit_frame, config, classes=classes, frozen_params=native_learner_params(metadata["params"]))
-    else:
-        independent_linear_fit(model, fit_frame, config["features"], config["target_col"], classes=classes)
+    weights = None
+    if weight:
+        weights = [float(v) for v in frame[weight]]
+        if any(not math.isfinite(v) or v <= 0 for v in weights):
+            raise ValueError("native sample weights must be finite and positive")
+    test_frame = frame.iloc[[i for i, yes in enumerate(masks["test"]) if yes]]
+    independent_profile_fit(model, fit_frame, config, metadata=metadata, test_frame=test_frame,
+                            classes=classes, frozen_params=native_learner_params(metadata["params"]))
+    calibration_scope = None
+    if metadata["params"].get("calibration"):
+        from .runtime_modeling_calibration_reference import revalidate_calibration
+        paths = _model_dependencies(session, metadata, json.loads(receipt["provenance_json"]), receipt)
+        calibration_scope = revalidate_calibration(paths[metadata["params"]["calibration"]["path"]],
+                                                   metadata, config, original_frame, predict)
     values, _ = metrics_reference(frame, config, predict, development=development, classes=classes)
+    if weights is not None:
+        import numpy as np
+
+        from .runtime_modeling_extended_reference import (
+            weighted_split_metrics_reference,
+        )
+        profiles, role_weights = {}, {}
+        for role in ("train", "test", "oot"):
+            positions = [i for i, yes in enumerate(masks[role]) if yes]
+            part = frame.iloc[positions]
+            labels = part[config["target_col"]].tolist()
+            labelled = bool(positions) and all(v is not None and not (isinstance(v, float) and math.isnan(v)) for v in labels)
+            profiles[role] = (np.asarray(predict(part)).tolist() if positions else [], labels if labelled and not (development and role == "test") else None)
+            role_weights[role] = [weights[i] for i in positions]
+        values.update(weighted_split_metrics_reference(profiles, role_weights, edges_reference(profiles["train"][0])))
     compact = session.binding.fit_representations[experiment_id]
     compact = FrozenFitRepresentation.model_validate(compact).representation == "compact_float32"
     tolerance = {"rel_tol": 1e-6, "abs_tol": 1e-7} if compact or metadata["algorithm"].startswith("xgb") else {}
     numbers(metrics, values, **tolerance)
     baseline = json.loads(artifact["baseline_distributions_json"]) if artifact["baseline_distributions_json"] else None
-    if development:
-        if proof.get("baseline_sha256") != native_hash(baseline) or proof.get("baseline_scope") != "development_fit":
-            raise ValueError("development baseline is missing or unbound to its producer proof")
+    if development and (proof.get("baseline_sha256") != native_hash(baseline) or proof.get("baseline_scope") != "development_fit"):
+        raise ValueError("development baseline is missing or unbound to its producer proof")
     if baseline is not None:
         source = session.conn.execute("SELECT id, content_hash FROM datasets WHERE id=?", (config["dataset_id"],)).fetchone()
         expected_baseline = baseline_reference(original_frame, predict, config,
             development_mask=masks["development"] if development else None,
             source=source, membership_sha256=proof["memberships"]["development_fit"]["sha256"] if development else None)
         validate_baseline(baseline, expected_baseline, tolerance=tolerance)
+    # CatBoost's no-early-stop recipe passes test as eval_set and lets its
+    # default use_best_model select the retained trees. Preserve that fact.
+    cats = [model] if metadata["algorithm"] == "catboost" else [child for child, _ in model["independent_children"]] if metadata["algorithm"] == "ensemble" and model["base_recipe"] == "catboost" else []
+    test_used = not config.get("early_stopping_rounds") and any(
+        child.get_all_params().get("use_best_model") or child.get_all_params().get("od_type") for child in cats)
     return values, {"profile": metadata["algorithm"], "fit_scope": "full_development" if development else "outer_train",
         "fit_rows": sum(fit_mask), "test_evaluation": "unavailable_consumed_in_fit" if development else "independent_heldout",
         "historical_availability": "unknown", "parent_experiment_id": parent_id if development else None,
         "metric_numeric_tolerance": tolerance or {"rel_tol": 1e-9, "abs_tol": 1e-11},
-        "baseline_verification": "independently_recomputed" if baseline is not None else "unavailable"}
+        "baseline_verification": "independently_recomputed" if baseline is not None else "unavailable",
+        **({"calibration": calibration_scope} if calibration_scope is not None else {}),
+        **({"test_evaluation": "used_for_model_selection"} if test_used and not development else {})}
 
 
 def revalidate_modeling_archive(archive: Path, *, expected_manifest_sha256: str, frozen_binding: FrozenModelingBinding):
     if not isinstance(frozen_binding, FrozenModelingBinding):
-        raise ValueError("explicit FrozenModelingBinding required")
+        raise ValueError("explicit FrozenModelingBinding required")  # noqa: TRY004 - public archive validation contract
     binding = FrozenModelingBinding.model_validate(frozen_binding.model_dump())
     with DomainArchive(archive, expected_manifest_sha256, binding, family="modeling",
                        checks=("registered_dataset", "source_material", "model_closure_fit_and_metrics", "selection_evidence")) as session:
@@ -389,8 +464,11 @@ def revalidate_modeling_archive(archive: Path, *, expected_manifest_sha256: str,
                 **parent_scope["metric_numeric_tolerance"])
         elif parent is not None:
             raise ValueError("unexpected pre-refit held-out selection reference")
-        session.mark("selection_evidence", scope="explicit_candidate_and_authenticated_pre_refit_heldout_metrics")
+        selection_scope = ("explicit_candidate_and_authenticated_pre_refit_heldout_metrics" if parent else
+                           "explicit_candidate_and_independent_heldout_metrics" if scope["test_evaluation"] == "independent_heldout" else
+                           "explicit_candidate_with_non_independent_test_metrics")
+        session.mark("selection_evidence", scope=selection_scope)
         session.result["values"] = {"metrics": values, "scope": scope,
             "selection_evidence": parent if parent else {"experiment_id": binding.selected_experiment_id, "metrics": values}}
-        session.result["unsupported"]["model_profiles"] = "weighted_calibrated_transformed_ensemble_catboost_mlp_scorecard_require_declared_independent_profiles"
+        session.result["unsupported"]["model_profiles"] = "external_preprocessing_categorical_catboost_and_nonbinary_weighted_metrics_require_declared_independent_profiles"
     return session.result

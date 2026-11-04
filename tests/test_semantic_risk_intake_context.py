@@ -81,13 +81,6 @@ def test_actual_api_intake_context_never_overrides_independent_review_flags(
     _install_semantic_client(monkeypatch, llm)
     source = tmp_path / "workspace" / "materials"
     source.mkdir(parents=True)
-    pd.DataFrame(
-        {
-            "cohort": ["2025-01", "2025-01", "2025-02", "2025-02"],
-            "mob": [0, 1, 0, 1],
-            "bad": [0, 1, 0, 0],
-        }
-    ).to_csv(source / "panel.csv", index=False)
     with TestClient(create_app(tmp_path / "workspace")) as client:
         created = client.post(
             "/api/tasks",
@@ -111,6 +104,15 @@ def test_actual_api_intake_context_never_overrides_independent_review_flags(
             json={"content": "做标准 Vintage，bad 是 incremental，不是 snapshot。"},
         )
         assert first.status_code == 202, first.text
+        # The panel arrives only after the goal turn, so the second message is
+        # a real materials-phase answer judged by the independent reviewer.
+        pd.DataFrame(
+            {
+                "cohort": ["2025-01", "2025-01", "2025-02", "2025-02"],
+                "mob": [0, 1, 0, 1],
+                "bad": [0, 1, 0, 0],
+            }
+        ).to_csv(source / "panel.csv", index=False)
         before = client.get(f"/api/tasks/{task['id']}/plans").json()["plans"]
         second = client.post(
             url + "/messages",

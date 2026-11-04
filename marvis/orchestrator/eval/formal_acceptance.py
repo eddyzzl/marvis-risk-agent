@@ -145,14 +145,19 @@ def _assignment_inventory(inputs, execution, benchmark):
             seen_carriers.add(carrier)
             telemetry = assignment["telemetry"]
             if telemetry is not None:
-                _keys(telemetry, {"path", "sha256"})
+                _keys(telemetry, {"path", "sha256"} | ({"concurrency"} if "concurrency" in telemetry else set()))
                 _require(_hash(telemetry["sha256"]), "invalid_telemetry_identity")
+                if "concurrency" in telemetry:
+                    _keys(telemetry["concurrency"], {"path", "sha256"})
+                    _require(_hash(telemetry["concurrency"]["sha256"]), "invalid_concurrency_identity")
             observation = {
                     "attempt_id": identity,
                     "case_id": assignment["case_id"],
                     "run_id": entry["run_id"],
                     "telemetry_sha256": telemetry["sha256"] if telemetry else None,
                 }
+            if telemetry is not None and "concurrency" in telemetry:
+                observation["concurrency_sha256"] = telemetry["concurrency"]["sha256"]
             if "safety_evidence" in assignment:
                 safety = assignment["safety_evidence"]
                 _keys(safety, {"case_id", "archive", "manifest_sha256", "binding"})
@@ -287,10 +292,20 @@ def _telemetry(root, record, reference, benchmark, attempt, run, definition):
     """Check an externally signed process observation; never infer missing spans."""
     if reference is None:
         return {}, "process_telemetry_unavailable"
-    value = _json(_record_bound(root, record, reference, "artifact_hashes"))
-    _keys(
-        value,
-        {
+    concurrency = reference.get("concurrency")
+    _keys(reference, {"path", "sha256"} | ({"concurrency"} if "concurrency" in reference else set()))
+    if attempt.load_mode == "concurrent":
+        if concurrency is None:
+            return {}, "concurrent_originals_unavailable"
+        from .runtime_concurrency import verify_concurrency_evidence
+        verify_concurrency_evidence(root, _json(_record_bound(root, record, concurrency, "artifact_hashes")),
+                                    artifact_hashes=record["artifact_hashes"], benchmark=benchmark, attempt=attempt, run=run)
+    else:
+        _require(concurrency is None, "concurrency_reference_outside_concurrent_mode")
+    value = _json(_record_bound(root, record, {key: reference[key] for key in ("path", "sha256")}, "artifact_hashes"))
+    if attempt.load_mode == "steady" and value.get("schema") == "marvis.formal-process-observation.v1":
+        return {}, "steady_warmup_originals_unavailable"
+    fields = {
             "schema",
             "attempt_id",
             "run_id",
@@ -301,10 +316,12 @@ def _telemetry(root, record, reference, benchmark, attempt, run, definition):
             "segments",
             "human_action_sha256s",
             "replans",
-        },
-    )
+        }
+    if value.get("schema") == "marvis.formal-process-observation.v2":
+        fields.add("measurement_window")
+    _keys(value, fields)
     _require(
-        value["schema"] == "marvis.formal-process-observation.v1"
+        value["schema"] in {"marvis.formal-process-observation.v1", "marvis.formal-process-observation.v2"}
         and value["attempt_id"] == attempt.id
         and value["run_id"] == run["manifest"]["run_id"]
         and value["case_id"] == attempt.case_id
@@ -316,6 +333,20 @@ def _telemetry(root, record, reference, benchmark, attempt, run, definition):
     observed = run["executions"][attempt.case_id]
     duration = observed.get("duration_ms")
     _require(type(duration) is int and duration >= 0, "original_duration_unavailable")
+    if value["schema"] == "marvis.formal-process-observation.v2":
+        from .process_timing_collector import build_formal_observation
+        _require(observed.get("load_originals", {}).get("binding") == run.get("report", {}).get("load_binding"),
+                 "formal_load_binding_mismatch")
+        try:
+            rebuilt, coverage = build_formal_observation(
+                observed, attempt_id=attempt.id, case_id=attempt.case_id,
+                run_id=run["manifest"]["run_id"], load_mode=attempt.load_mode,
+                model=benchmark.model.model_dump(), environment=benchmark.environment.model_dump(),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TrustInputError("formal_measurement_window_unavailable") from exc
+        _require(value == rebuilt, "formal_measurement_window_or_segments_changed")
+        duration = coverage["duration_ms"]
     segments = value["segments"]
     _require(
         isinstance(segments, list) and 0 < len(segments) <= 10000,
@@ -584,13 +615,18 @@ def _labeling_domain(case, expected, item, root, record, run):
 
 def _expected_portfolio(expected, observed, recomputed):
     from .runtime_archive_portfolio import _TOOLS
+    from .formal_domain_adapters import _predicate_value
 
     if not recomputed["supported_checks_verified"]:
         return False
     values, answers = recomputed["values"], []
+    tools = {*_TOOLS.values(), *(["analysis.score_stability_trend"] if values.get("trend") is not None else [])}
     for assertion in expected.assertions:
-        if assertion.kind == "tool_succeeded" and assertion.tool in _TOOLS.values():
+        if assertion.kind == "tool_succeeded" and assertion.tool in tools:
             answers.append(recomputed["checks"]["native_steps"]["status"] == "verified")
+        elif (assertion.kind in {"output_close", "output_equals", "output_length"}
+              and assertion.tool == "analysis.score_stability_trend" and values.get("trend") is not None):
+            answers.append(_predicate_value(assertion, values["trend"]))
         elif (assertion.kind == "output_length" and assertion.tool == "analysis.segment_profile"
               and assertion.path == ["segments"]):
             answers.append(type(assertion.value) is int and values["segment_count"] == assertion.value)
@@ -614,7 +650,9 @@ def _expected_portfolio(expected, observed, recomputed):
 
 
 def _portfolio_domain(case, expected, item, root, record, run):
-    from .runtime_archive_portfolio import FrozenPortfolioBinding, revalidate_portfolio_archive, _TOOLS
+    from .runtime_archive_portfolio import revalidate_portfolio_archive, _tools
+    from .runtime_archive_vintage import FrozenVintageBinding
+    from .formal_risk_adapters import FrozenRiskBinding, vintage_domain
 
     if case.family != "risk_portfolio":
         return None, "deterministic_family_revalidator_not_implemented"
@@ -623,11 +661,13 @@ def _portfolio_domain(case, expected, item, root, record, run):
     if item is None:
         return None, "portfolio_original_evidence_unavailable"
     _require(item["case_id"] == case.id, "formal_domain_case_binding_mismatch")
-    archive, binding, observed = _original_case_binding(item, root, record, run, FrozenPortfolioBinding)
+    archive, binding, observed = _original_case_binding(item, root, record, run, FrozenRiskBinding)
     _require(digest(binding.case.model_dump()) == case.case_sha256, "formal_domain_definition_mismatch")
+    if isinstance(binding, FrozenVintageBinding):
+        return vintage_domain(case, expected, item, archive, binding, observed)
     plans = [plan for plan in observed["execution"].get("plans", []) if plan.get("id") == binding.plan_id]
     _require(len(plans) == 1 and plans[0]["status"] == "done", "final_portfolio_plan_binding_mismatch")
-    for key, tool in _TOOLS.items():
+    for key, tool in _tools(binding).items():
         steps = [step for step in observed["execution"].get("steps", []) if step.get("id") == binding.step_ids[key]]
         _require(len(steps) == 1 and steps[0]["tool"] == tool and steps[0]["status"] == "done"
                  and steps[0].get("output_sha256") == binding.output_sha256[key], "final_portfolio_step_binding_mismatch")

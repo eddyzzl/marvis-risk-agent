@@ -30,6 +30,7 @@ from marvis.model_algorithms import normalize_algorithm
 from marvis.notebook_contract import RuntimeContract
 from marvis.notebooks import _notebook_worker_env
 from marvis.pipeline_errors import PipelineError
+from marvis.process_timing import timed
 from marvis.validation.results import validation_results_from_dict
 
 if TYPE_CHECKING:
@@ -168,6 +169,7 @@ def _load_arrow_sample(
         return result
 
 
+@timed("subprocess", "arrow_sample_process")
 def _load_arrow_sample_with_python(
     sample_path: Path,
     *,
@@ -223,7 +225,10 @@ def _execution_kernel_name(settings: PipelineSettings) -> str:
     ))
     if not validation.ok:
         logger.error("execution environment invalid: %s", validation.message)
-        raise PipelineError(f"execution environment invalid: {validation.message}")
+        detail = validation.message
+        if (validation.network_capability or {}).get("status") == "settings_unreadable":
+            detail = f"{detail} {validation.network_capability.get('next_action', '')}".strip()
+        raise PipelineError(f"execution environment invalid: {detail}")
     return validation.kernel_name or settings.notebook_kernel_name
 
 

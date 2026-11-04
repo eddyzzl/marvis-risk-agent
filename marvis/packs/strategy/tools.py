@@ -125,6 +125,11 @@ from marvis.packs.strategy.apply_projection import (
     serialize_strategy_decisions,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.diagnostics_tools import (
+    run_diagnose_selection_bias,
+    run_diagnose_time_leakage,
+    run_segment_disparity_evidence,
+)
 from marvis.packs.strategy.candidate_stability_tools import (
     run_measure_candidate_monthly_stability,
 )
@@ -1097,6 +1102,24 @@ def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
     return run_measure_pool_impact(inputs, ctx, _runtime(ctx))
 
 
+def tool_diagnose_time_leakage(inputs: dict, ctx) -> dict:
+    """Evidence-only feature observation time vs label window diagnostics."""
+
+    return run_diagnose_time_leakage(inputs, ctx, _runtime(ctx))
+
+
+def tool_diagnose_selection_bias(inputs: dict, ctx) -> dict:
+    """Evidence-only approval-vs-risk population distribution comparison."""
+
+    return run_diagnose_selection_bias(inputs, ctx, _runtime(ctx))
+
+
+def tool_segment_disparity_evidence(inputs: dict, ctx) -> dict:
+    """Evidence-only per-segment volume, approval, bad rate and reason codes."""
+
+    return run_segment_disparity_evidence(inputs, ctx, _runtime(ctx))
+
+
 def tool_measure_candidate_monthly_stability(inputs: dict, ctx) -> dict:
     """Publish governed monthly hit-distribution stability for one candidate."""
 
@@ -1878,6 +1901,12 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
 
 
 def _sample_score_direction(inputs, sample_binding, score_col):
+    """D-3: the frozen sample contract or the declared slot; never a default.
+
+    The declared slot carries the direction the user stated or the workspace
+    confirmed.  Data only checks it (see ``check_score_direction``); with
+    neither source the tool stops instead of assuming ``higher_is_better``.
+    """
     declared = normalize_score_direction(_optional_str(inputs.get("score_direction")))
     frozen = sample_binding.score_direction_for(score_col)
     if frozen is not None and declared is not None and frozen != declared:
@@ -1885,7 +1914,13 @@ def _sample_score_direction(inputs, sample_binding, score_col):
             "score_direction contradicts the frozen historical score direction; "
             "review and materialize a new sample contract before changing it"
         )
-    return frozen or declared
+    direction = frozen or declared
+    if direction is None:
+        raise StrategyError(
+            f"评分列 {score_col} 的分数方向还没有确认（分数越高风险越高，还是越低风险越高）。"
+            "平台不按默认方向或样本数据推断方向；请在请求里说明，或在数据工作区确认该字段的风险方向后重试。"
+        )
+    return direction
 
 
 def tool_tradeoff_view(inputs: dict, ctx) -> dict:
@@ -1929,7 +1964,7 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     score_direction = _sample_score_direction(inputs, sample_binding, score_col)
-    effective_direction = score_direction or "higher_is_better"
+    effective_direction = score_direction
     points = tradeoff_view(
         frame,
         score_col=score_col,
@@ -2035,7 +2070,7 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     score_direction = _sample_score_direction(inputs, sample_binding, score_col)
-    effective_direction = score_direction or "higher_is_better"
+    effective_direction = score_direction
     red_flags: list[dict] = []
     # Direction self-check (S1a): a conflict is a red flag and blocks unless the
     # caller confirms, mirroring tradeoff_view's confirm_direction_conflict gate.

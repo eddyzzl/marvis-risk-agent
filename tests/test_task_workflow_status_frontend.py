@@ -36,12 +36,14 @@ def test_workflow_status_snapshot_maps_backend_fallback_for_task_pills():
     )
 
     assert payload["failed"]["label"] == "失败"
-    assert payload["failed"]["tone"] == "danger"
+    # Batch 4 (2026-10-14 redesign): snapshots use the shared tone set (ok|fail|run|review|neutral).
+    assert payload["failed"]["tone"] == "fail"
     assert payload["waiting"]["label"] == "待确认"
     assert payload["running"]["label"] == "执行中"
     assert payload["running"]["tone"] == "run"
     assert payload["done"]["label"] == "已完成"
-    assert payload["done"]["tone"] == "success"
+    # Batch 4 (2026-10-14 redesign): success -> ok in the shared tone set.
+    assert payload["done"]["tone"] == "ok"
 
 
 def test_task_status_rendering_prefers_plan_then_workflow_then_task_status():
@@ -56,13 +58,15 @@ def test_task_status_rendering_prefers_plan_then_workflow_then_task_status():
     assert helper.index("planRailController.statusSnapshot") < helper.index(
         "workflowStatusSnapshot(task?.workflow_status)"
     )
-    assert "taskPlanWorkflowStatusSnapshot(task)" in label
-    assert "return statusLabel(task?.status);" in label
-    assert label.index("taskPlanWorkflowStatusSnapshot(task)") < label.index(
-        "return statusLabel(task?.status);"
-    )
-    assert "taskPlanWorkflowStatusSnapshot(task)" in tone
-    assert "return statusTone(task?.status);" in tone
-    assert tone.index("taskPlanWorkflowStatusSnapshot(task)") < tone.index(
-        "return statusTone(task?.status);"
+    # Batch 4 (2026-10-14 redesign): the row label/tone come from the shared resolver;
+    # the plan/workflow snapshot is its planStatus input, ahead of task.status.
+    context = app_js[app_js.index("function taskStatusContext"):label_start]
+    assert "planStatus: taskPlanWorkflowStatusSnapshot(task)" in context
+    assert "resolveTaskStatus(task, taskStatusContext(task))" in context
+    assert "taskResolvedStatus(task).label" in label
+    assert "taskResolvedStatus(task).tone" in tone
+    status_js = (STATIC_DIR / "js" / "task-status.js").read_text(encoding="utf-8")
+    resolver = status_js[status_js.index("export function resolveTaskStatus"):]
+    assert resolver.index("if (planKey) return statusPresentation(planKey);") < resolver.index(
+        "V1_TASK_KEYS[status]"
     )

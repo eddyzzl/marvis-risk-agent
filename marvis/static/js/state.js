@@ -1,7 +1,8 @@
 const petCatalog = globalThis.MarvisPetCatalog;
 if (!petCatalog) throw new Error("MARVIS pet catalog must load before state.js");
 
-export const defaultPetPreference = petCatalog.defaultId;
+// The pet companion is off until the user picks one (2026-10-14 redesign).
+export const defaultPetPreference = petCatalog.noneId;
 export const petPreferenceStorageKey = petCatalog.storageKeys.preference;
 export const explicitPetNoneStorageKey = petCatalog.storageKeys.explicitNone;
 export const petPositionStorageKey = petCatalog.storageKeys.position;
@@ -18,7 +19,7 @@ export const defaultBranding = {
   browserTitle: "MARVIS-全能风控智能体",
   primaryColor: "#303034",
   logoUrl: "static/brand/marvis-logo.png?v=20260624-gauge",
-  workspaceLogoUrl: "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+  workspaceLogoUrl: "static/brand/marvis-home-hero.png?v=20261016-hero",
   faviconUrl: "static/brand/marvis-favicon.png?v=20260624-gauge",
   // Real validator name -> display alias, supplied per-workspace by brand.json.
   validatorAliases: {},
@@ -95,18 +96,6 @@ export const workflowSteps = [
   { id: "metrics", title: "模型效果&稳定性验证", hint: "指标概览", target: "metricSection", action: "metrics", actionLabel: "生成" },
   { id: "report", title: "报告输出", hint: "Word报告与Excel分析", target: "reportSection", action: "report", actionLabel: "生成" },
 ];
-
-export const statusLabels = {
-  created: "已创建",
-  scanned: "已扫描",
-  running: "运行中",
-  executed: "已执行",
-  computing_metrics: "计算指标",
-  writing_artifacts: "写入产物",
-  succeeded: "已出报告",
-  failed: "失败",
-  review_required: "待复核",
-};
 
 export const roleLabels = {
   notebook: "Notebook",

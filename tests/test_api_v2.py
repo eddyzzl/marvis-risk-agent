@@ -1272,7 +1272,8 @@ def test_create_task_without_algorithm_keeps_algorithm_pending(tmp_path: Path, m
 
     assert fields.status_code == 200
     description = fields.json()["text_values"]["TEXT:model_training_description"]
-    assert "RMC_ALGORITHM" in description
+    # The placeholder names no notebook variable (eval round 1 display cleanup).
+    assert description == "待确认模型算法后自动生成模型训练说明。"
     assert "LightGBM" not in description
 
 

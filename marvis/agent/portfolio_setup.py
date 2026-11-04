@@ -17,6 +17,7 @@ import math
 from pathlib import Path
 import re
 
+from marvis.agent.setup_context import dataset_file_name
 from marvis.agent.setup_context import resolve_named_col as _resolve_named_col
 from marvis.data.authenticated_snapshot import (
     AuthenticatedSnapshotError,
@@ -262,7 +263,7 @@ def build_portfolio_proposal(
     return PortfolioProposal(
         dataset_id=dataset.id,
         dataset_content_hash=dataset_content_hash,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         id_col=resolved_id_col,
         snapshot_col=resolved_snapshot_col,
         bucket_col=resolved_bucket_col,
@@ -388,11 +389,6 @@ def _resolve_performance_dataset(registry, task_id: str, source_dir):
     if not datasets:
         raise PortfolioSetupError(f"组合分析未找到表现期数据文件:{source_dir}")
     return sorted(datasets, key=lambda d: -int(getattr(d, "row_count", 0) or 0))[0]
-
-
-def _dataset_name(dataset) -> str:
-    source = getattr(dataset, "source_path", None)
-    return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
 __all__ = [

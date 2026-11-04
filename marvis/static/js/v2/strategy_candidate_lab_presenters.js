@@ -19,7 +19,8 @@ import {
   stablePrimitiveText,
 } from "./strategy_candidate_lab_contracts.js";
 
-const COLLECTION_DEFINITIONS = Object.freeze([
+// Exported for the collapsed summary card (strategy_candidate_lab_fold.js).
+export const COLLECTION_DEFINITIONS = Object.freeze([
   {
     key: "univariate",
     title: "单变量候选",
@@ -1016,7 +1017,6 @@ function candidateCollectionHtml(candidates, definition) {
     '<header class="candidate-lab-result-head">',
     "<div>",
     `<h4>${escapeHtml(definition.title)}</h4>`,
-    `<p>${escapeHtml(definition.description)}</p>`,
     "</div>",
     countText ? `<strong>${escapeHtml(countText)}</strong>` : "",
     "</header>",
@@ -1093,7 +1093,7 @@ function poolCollectionHtml(pools) {
   return [
     '<section class="candidate-lab-result-group">',
     '<header class="candidate-lab-result-head">',
-    "<div><h4>Strategy Pool</h4><p>当前 task-scoped Pool revision、顺序、动作与来源证据</p></div>",
+    "<div><h4>Strategy Pool</h4></div>",
     total === null ? "" : `<strong>${escapeHtml(total)} 个</strong>`,
     "</header>",
     collection.truncated
@@ -1108,7 +1108,7 @@ function poolCollectionHtml(pools) {
   ].join("");
 }
 
-const WORKFLOW_STAGE_STATUS_LABELS = Object.freeze({
+export const WORKFLOW_STAGE_STATUS_LABELS = Object.freeze({
   complete: "已完成",
   stale: "需刷新",
   missing: "待补充",
@@ -1532,7 +1532,7 @@ function strategyHistoryHtml(collection) {
   return [
     '<section class="candidate-lab-result-group candidate-lab-strategy-history">',
     '<header class="candidate-lab-result-head">',
-    "<div><h4>策略版本历史</h4><p>仅展示当前任务受认证的策略快照、物化关系、运行阻塞和已验证产物。</p></div>",
+    "<div><h4>策略版本历史</h4></div>",
     "</header>",
     championSummary,
     '<p class="candidate-lab-boundary-note">本地采纳会先提交回测并等待人工确认，不是生产部署，也不会自动启动监控。</p>',
@@ -1713,7 +1713,7 @@ function strategyEvidenceDrawerHtml(drawer) {
   return [
     `<details class="candidate-lab-result-group candidate-lab-evidence-drawer"${artifactItems.length || hasRedFlags ? " open" : ""}><summary>证据详情 · ${artifactItems.length} 份产物${hasRedFlags ? " · 有风险提示" : ""}</summary>`,
     '<header class="candidate-lab-result-head">',
-    "<div><h4>证据详情</h4><p>查看数据来源、产物、工具版本、风险提示和记忆引用。</p></div>",
+    "<div><h4>证据详情</h4></div>",
     "</header>",
     '<p class="candidate-lab-boundary-note">仅展示当前任务且已经过对应领域 loader 重验的投影；不读取原始客户行，不把对话自由文本当成业务事实。缺少 Tool 原生输入 hash 时会明确标为 provenance 派生绑定摘要。</p>',
     '<details class="candidate-lab-evidence-card" open>',
@@ -1737,7 +1737,7 @@ function strategyEvidenceDrawerHtml(drawer) {
     "</div>",
     "</details>",
     '<details class="candidate-lab-evidence-card">',
-    "<summary><span class=\"candidate-lab-card-title\"><strong>Agent 记忆引用</strong><small>最近一条回复的 metadata 审计指针</small></span><span class=\"candidate-lab-card-state\">查看</span></summary>",
+    "<summary><span class=\"candidate-lab-card-title\"><strong>Agent 记忆引用</strong></span><span class=\"candidate-lab-card-state\">查看</span></summary>",
     `<div class="candidate-lab-card-body">${evidenceDrawerMemoryHtml(value.memory_references)}</div>`,
     "</details>",
     "</details>",

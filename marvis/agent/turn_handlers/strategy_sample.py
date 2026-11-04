@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections.abc import Sequence
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
 from marvis.agent.strategy_request_compiler import CompiledStrategyRequestDraft
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.strategy_setup import StrategySetupError
@@ -788,6 +789,9 @@ def _confirm_manual_sample_design_time_semantics(
                     target_col=snapshot.semantic_mapping.target_col,
                     field_roles=roles,
                     business_names=(snapshot.semantic_mapping.business_names),
+                    # Confirmed field directions are user facts; a role
+                    # confirmation must not erase them.
+                    risk_directions=snapshot.semantic_mapping.risk_directions,
                 ),
             ),
             expected_revision=snapshot.revision,
@@ -1063,28 +1067,33 @@ def _append_strategy_nan_label_clarification(
             f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行{missing_description}。"
             f"这些样本行仍会保留在{retained_statistics}中，只从坏账率/风险率分母中排除；"
             "本次尚未创建计划，平台不会默认采用该口径。"
-            "如果确实允许，请明确回复「确认将空标签仅从风险分母排除并继续」；"
-            "仅回复「确认」不会执行。"
+            "如果确实允许，点「确认将空标签仅从风险分母排除并继续」；"
+            "只说「确认」不会执行。"
         )
+        explicit_command = "确认将空标签仅从风险分母排除并继续"
     else:
         message = (
             f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行空或非有限标签。"
             "本次尚未创建计划，平台不会默认丢弃。"
-            "如果确实允许，请明确回复「确认丢弃空标签并继续」；"
-            "仅回复「确认」不会执行。"
+            "如果确实允许，点「确认丢弃空标签并继续」；"
+            "只说「确认」不会执行。"
         )
+        explicit_command = "确认丢弃空标签并继续"
     repo.add_agent_message(
         task.id,
         role="assistant",
         stage="chat",
         content=message,
-        metadata={
-            "intent": "strategy_drop_nan_labels_confirmation",
-            "kind": "clarification",
-            "code": "strategy_drop_nan_labels_confirmation_required",
-            "fields": ["drop_nan_labels"],
-            strategy_contracts_lane._STRATEGY_NAN_LABEL_META_KEY: state,
-        },
+        metadata=with_quick_replies(
+            {
+                "intent": "strategy_drop_nan_labels_confirmation",
+                "kind": "clarification",
+                "code": "strategy_drop_nan_labels_confirmation_required",
+                "fields": ["drop_nan_labels"],
+                strategy_contracts_lane._STRATEGY_NAN_LABEL_META_KEY: state,
+            },
+            quick_reply(explicit_command),
+        ),
     )
     return {
         "task_id": task.id,

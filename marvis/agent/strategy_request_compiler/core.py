@@ -9,6 +9,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from marvis.agent.json_reply import load_json_object
+from marvis.agent.strategy_control_labels import (
+    ECONOMICS_LABELS as _ECONOMICS_LABELS,
+    STRATEGY_TYPE_LABELS as _TYPE_LABELS,
+    join_control_labels as _join_control_labels,
+)
 from marvis.agent.strategy_workflows import (
     FRESH_STANDARD_STRATEGY_WORKFLOWS,
     REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS,
@@ -124,16 +129,6 @@ _ECONOMICS_VALUE_MAXIMUMS = {
     "lgd": 1.0,
     "utilization": 1.0,
     "funding_rate": 1.0,
-}
-
-_ECONOMICS_LABELS = {
-    "ead": "EAD",
-    "pd": "PD",
-    "lgd": "LGD",
-    "utilization": "额度使用率",
-    "funding_rate": "资金成本率",
-    "term_months": "期限",
-    "operating_cost_per_loan": "单笔运营成本",
 }
 
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
@@ -704,20 +699,15 @@ def _sample_design_v2_correction_prompt(
     format_repair: bool,
     aliases: list[dict] | None = None,
 ) -> str:
-    from marvis.llm_outbound import _mint_prompt
-    from marvis.llm_outbound_instructions import column_identifiers, user_instruction
-    columns = column_identifiers(list(whitelist))
-    if target_col is not None:
-        column_identifiers([target_col])
-    return _mint_prompt({
-        "instruction": str(user_instruction(utterance)),
-        "instruction_origin": "interactive_user",
-        "allowed_columns": columns,
-        "target_col": target_col,
-        **({"field_aliases": aliases} if aliases else {}),
-        "repair": "format" if format_repair else "sample_design_semantics",
-        "contract": _installed_sample_design_correction_contract(format_repair=format_repair),
-    })
+    from marvis.llm_outbound_strategy import strategy_sample_design_correction_prompt
+    return strategy_sample_design_correction_prompt(
+        utterance,
+        whitelist,
+        target_col=target_col,
+        format_repair=format_repair,
+        aliases=aliases,
+        contract=_installed_sample_design_correction_contract(format_repair=format_repair),
+    )
 
 
 def _installed_sample_design_correction_contract(*, format_repair: bool) -> str:
@@ -1080,8 +1070,10 @@ def _validate_payload(
         field for field in ("operation", "strategy_type") if field not in payload
     ]
     if missing:
-        rendered = "、".join(missing)
-        return _contracts._invalid(f"没有识别到必需字段 {rendered}，请补充策略操作和策略类型。")
+        return _contracts._invalid(
+            f"没有识别到{_join_control_labels(missing)}，请补充后重新说明。",
+            fields=missing,
+        )
 
     operation = payload["operation"]
     if not isinstance(operation, str) or operation not in STRATEGY_OPERATIONS:
@@ -1128,7 +1120,7 @@ def _validate_payload(
                 )
             except CandidateDesignError as exc:
                 raise _contracts._DraftValidationError(
-                    str(exc),
+                    _candidate_economics_message(strategy_type, exc),
                     code=exc.code,
                     fields=exc.fields,
                 ) from exc
@@ -1172,7 +1164,10 @@ def _validate_standard_workflow_payload(
         field for field in ("workflow", "workflow_inputs") if field not in payload
     ]
     if missing:
-        return _contracts._invalid("标准 Workflow 请求缺少字段：" + "、".join(missing) + "。")
+        return _contracts._invalid(
+            "没有识别到" + _join_control_labels(missing) + "，请重新说明要执行的分析。",
+            fields=missing,
+        )
     workflow = payload["workflow"]
     allowed_workflows = (
         REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS
@@ -1271,7 +1266,10 @@ def _optional_profit(
     missing = sorted(_PROFIT_FIELDS - set(profit))
     unexpected = sorted(set(profit) - _PROFIT_FIELDS)
     if missing:
-        raise _contracts._DraftValidationError("利润参数缺少字段：" + "、".join(missing) + "。")
+        raise _contracts._DraftValidationError(
+            "利润测算参数不完整，缺少：" + _join_control_labels(missing) + "。",
+            fields=missing,
+        )
     if unexpected:
         raise _contracts._DraftValidationError(
             "利润参数包含不支持的字段：" + "、".join(unexpected) + "。"
@@ -1402,7 +1400,8 @@ def _optional_economics_inputs(
         has_value = value_key in raw_inputs
         if has_column and has_value:
             raise _contracts._DraftValidationError(
-                f"经济参数 {name} 必须在 {column_key} 和 {value_key} 中二选一，不能同时提供。",
+                f"经济参数 {_ECONOMICS_LABELS[name]} 只能给数据列或固定数值二选一，"
+                "不能同时提供。",
                 code="candidate_economics_ambiguous",
                 fields=(column_key, value_key),
             )
@@ -1410,14 +1409,16 @@ def _optional_economics_inputs(
             missing.append(f"{column_key}/{value_key}")
             continue
         if has_column:
+            label = _ECONOMICS_LABELS[name]
             column = _required_text(
                 raw_inputs[column_key],
-                name=f"经济参数 {column_key}",
+                name=f"经济参数 {label} 的数据列",
             )
             if column not in whitelist:
                 raise _contracts._DraftValidationError(
-                    f"经济参数 {column_key} 使用了数据集中不存在或不可用于策略的列"
-                    f"「{column}」，请从列白名单选择。"
+                    f"经济参数 {label} 使用了数据集中不存在或不可用于策略的列"
+                    f"「{column}」，请从列白名单选择。",
+                    fields=(column_key,),
                 )
             normalized[column_key] = column
             continue
@@ -1426,12 +1427,24 @@ def _optional_economics_inputs(
     if missing:
         raise _contracts._DraftValidationError(
             f"{_TYPE_LABELS[strategy_type]}经济参数不完整，缺少："
-            + "、".join(missing)
-            + "。",
+            + _join_control_labels(missing)
+            + "。每项请给出数据列或固定数值。",
             code="candidate_economics_incomplete",
             fields=missing,
         )
     return normalized
+
+def _candidate_economics_message(strategy_type: str, exc: CandidateDesignError) -> str:
+    # The pack error text names raw economics_inputs keys; the clarification
+    # the user reads names the same controls in business terms while code and
+    # fields keep the raw keys.
+    if exc.code == "candidate_economics_incomplete":
+        return (
+            f"{_TYPE_LABELS[strategy_type]}经济参数不完整，缺少："
+            + _join_control_labels(exc.fields)
+            + "。每项请给出数据列或固定数值。"
+        )
+    return str(exc)
 
 def _economics_value(name: str, value: object) -> float:
     label = _ECONOMICS_LABELS[name]
@@ -1638,20 +1651,15 @@ def _user_prompt(
     aliases: list[dict] | None = None,
     directions: dict | None = None,
 ) -> str:
-    from marvis.llm_outbound import _mint_prompt
-    from marvis.llm_outbound_instructions import column_identifiers, user_instruction
-    columns = column_identifiers(list(whitelist))
-    if target_col is not None:
-        column_identifiers([target_col])
-    return _mint_prompt({
-        "instruction": str(user_instruction(utterance)),
-        "instruction_origin": "interactive_user",
-        "allowed_columns": columns,
-        "target_col": target_col,
-        **({"field_aliases": aliases} if aliases else {}),
-        **({"field_directions": directions} if directions is not None else {}),
-        "contract": _installed_user_contract(),
-    })
+    from marvis.llm_outbound_strategy import strategy_request_prompt
+    return strategy_request_prompt(
+        utterance,
+        whitelist,
+        target_col=target_col,
+        aliases=aliases,
+        directions=directions,
+        contract=_installed_user_contract(),
+    )
 
 
 def _outbound_error_type():
@@ -1941,18 +1949,16 @@ def _installed_user_contract() -> str:
     )
 
 def _repair_prompt(prompt: str, *, raw: object, error: str) -> str:
-    from marvis.llm_outbound import StructuralPrompt, _mint_prompt
-    if not isinstance(prompt, StructuralPrompt):
-        raise _outbound_error_type()("策略修复缺少冻结结构请求，未发送。")
-    payload = json.loads(prompt)
-    payload["repair"] = {
-        "failure_code": ("roll_rate_column_binding_not_grounded"
-                         if error.startswith("roll_rate_column_binding_not_grounded")
-                         else "platform_validation_failed"),
-        "instruction": "这是唯一一次修复机会。按完整原始指令、字段目录和输出契约重新生成；不要猜测缺失值。不能确定时只返回 clarification。禁止输出指标。",
-    }
+    from marvis.llm_outbound_strategy import strategy_repair_prompt
     # Rejected provider prose, source code and exception bodies remain local.
-    return _mint_prompt(payload)
+    return strategy_repair_prompt(
+        prompt,
+        failure_code=(
+            "roll_rate_column_binding_not_grounded"
+            if error.startswith("roll_rate_column_binding_not_grounded")
+            else "platform_validation_failed"
+        ),
+    )
 
 def _chinese_clarification(message: str) -> str:
     normalized = message.strip()
@@ -1972,10 +1978,34 @@ _OPERATION_LABELS = {
     "mine_rules": "规则挖掘",
 }
 
-_TYPE_LABELS = {
-    "approval": "审批策略",
-    "reject": "拒绝策略",
-    "limit": "额度策略",
-    "pricing": "定价策略",
-    "segmentation": "分群策略",
-}
+def ground_sample_design_command(
+    command: str,
+    workflow_inputs: Mapping[str, object],
+    *,
+    allowed_columns: Iterable[str],
+    target_col: str | None,
+):
+    """Validate and ground a composed sample-design command without an LLM.
+
+    This is the compiler's own post-model path (schema validation, then
+    word-by-word grounding against the command), so a confirmed proposal and
+    the same sentence typed by the user are accepted or refused identically.
+    """
+
+    whitelist = _column_whitelist(allowed_columns)
+    target = _normalized_target_col(target_col)
+    outcome = _validate_payload(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": dict(workflow_inputs),
+        },
+        whitelist,
+        target_col=target,
+        allow_legacy_replay=False,
+    )
+    if not outcome.accepted:
+        return outcome.result
+    return _refinement_report._ground_refinement_request(
+        command.strip(), outcome.result, whitelist=whitelist, target_col=target
+    )

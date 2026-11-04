@@ -1,0 +1,335 @@
+/* Workbench chrome (2026-10-14 redesign, batch 2).
+   Toolbar buttons in the task header, the Inspector popover that holds the
+   governance and extension panels (D8), the collapsible plan rail (D9) and the
+   draggable sidebar edge (D10). Glass is used only where a control floats over
+   content; everything inside stays flat. */
+
+/* ---------- toolbar buttons in the task header ---------- */
+
+.task-toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.task-toolbar-button[hidden] {
+  display: none;
+}
+
+.task-toolbar-button:hover,
+.task-toolbar-button[aria-expanded="true"]#taskInspectorToggle {
+  background: var(--fill-2);
+}
+
+.task-toolbar-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.task-toolbar-icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--text-secondary);
+}
+
+.task-toolbar-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--fill-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-toolbar-count[hidden] {
+  display: none;
+}
+
+/* The capsule carries the collapsed rail's status tone (js/task-status.js). */
+.task-plan-capsule[data-rail-state="run"] .task-toolbar-icon { color: var(--accent); }
+.task-plan-capsule[data-rail-state="review"] .task-toolbar-icon { color: var(--warning); }
+.task-plan-capsule[data-rail-state="fail"] .task-toolbar-icon { color: var(--danger); }
+.task-plan-capsule[data-rail-state="ok"] .task-toolbar-icon { color: var(--success); }
+
+/* ---------- Inspector popover ---------- */
+
+.task-inspector {
+  position: absolute;
+  z-index: 7;
+  top: calc(var(--workspace-head-space) + 8px);
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  /* Wide enough for the data workspace's two-column field editor (batch 3b). */
+  width: min(720px, calc(100% - 24px));
+  max-height: calc(100% - var(--workspace-head-space) - 24px);
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-glass);
+  /* Dense content (forms, tables) needs a calmer material than toolbar glass. */
+  background: var(--glass-bg-dense);
+}
+
+.task-inspector[hidden] {
+  display: none;
+}
+
+.task-inspector-head {
+  display: grid;
+  gap: 2px;
+  padding: 16px 20px 10px;
+}
+
+.task-inspector-head b {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.task-inspector-head small {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+.task-inspector-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 12px 14px;
+}
+
+/* Panels keep their natural height; the body scrolls (some panels clip their
+   own overflow, which would otherwise let the popover squash them). */
+.task-inspector-body > [data-inspector-item] {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+/* Outputs use the same header popover pattern as the Inspector. Existing
+   preview/download buttons keep their original delegated actions. */
+#taskArtifacts {
+  width: max-content;
+  max-width: min(420px, calc(100% - 24px));
+}
+
+.task-artifacts-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 14px;
+}
+
+#taskArtifacts .step-download-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  margin: 0;
+  padding: 0;
+}
+
+#taskArtifacts .rail-artifacts-label {
+  display: none;
+}
+
+#taskArtifacts .rail-artifact {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
+  padding: 10px 6px;
+}
+
+#taskArtifacts .rail-artifact-name {
+  max-width: none;
+}
+
+#taskArtifacts .rail-artifact > .step-action-button:only-of-type {
+  grid-column: 3 / -1;
+  justify-self: end;
+}
+
+#taskArtifacts .rail-artifact .step-action-button {
+  flex: none;
+  min-width: 0;
+  min-height: 30px;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+#taskArtifacts .rail-artifact .step-action-button:hover:not(:disabled) {
+  background: var(--fill);
+}
+
+/* Keep names readable when the popover is narrower than one action row. */
+@media (max-width: 600px) {
+  #taskArtifacts .rail-artifact-name {
+    grid-column: 2 / -1;
+  }
+
+  #taskArtifacts .rail-artifact > .step-action-button {
+    grid-row: 2;
+    margin-left: 0;
+  }
+
+  #taskArtifacts .rail-artifact > .step-action-button:first-of-type {
+    grid-column: 3;
+  }
+
+  #taskArtifacts .rail-artifact > .step-action-button:last-of-type {
+    grid-column: 4;
+  }
+
+  #taskArtifacts .rail-artifact > .step-action-button:only-of-type {
+    grid-column: 3 / -1;
+  }
+}
+
+#taskArtifactsToggle[aria-expanded="true"] {
+  background: var(--fill-2);
+}
+
+/* The progress capsule lives in the adjacent grid track. Use the toolbar's
+   same 10px interval at that boundary instead of adding a 24px grid gutter
+   and another 16px of header padding. */
+.validation-workspace:not(.is-empty) {
+  --task-toolbar-gap: 10px;
+  --workspace-rail-gap: var(--task-toolbar-gap);
+}
+
+.validation-workspace:not(.is-empty) #resultWorkspace .workspace-head {
+  padding-right: 0;
+}
+
+/* Floating toolbar shadows extend into the adjacent rail gutter. Scrolling
+   conversation content keeps its own clipping in .result-scroll-content. */
+.validation-workspace:not(.is-empty) #resultWorkspace {
+  overflow: visible;
+}
+
+.validation-workspace .task-hero-top-right {
+  gap: var(--task-toolbar-gap, 10px);
+}
+
+/* ---------- plan rail: floating glass card that folds into the capsule ---------- */
+
+.step-rail-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-rail-collapse {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px -4px -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.step-rail-collapse:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+
+.step-rail-collapse:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.step-rail-collapse svg {
+  width: 17px;
+  height: 17px;
+}
+
+.validation-workspace.rail-collapsed .progress-rail,
+.validation-workspace.rail-collapsed .resize-handle-right {
+  display: none;
+}
+
+@media (min-width: 861px) {
+  .validation-workspace.rail-collapsed:not(.is-empty) {
+    grid-template-columns: minmax(0, 1fr) var(--workspace-main-gutter) 0;
+  }
+}
+
+/* ---------- sidebar edge: drag 200-380px, double-click resets ---------- */
+
+.app-shell {
+  position: relative;
+}
+
+.resize-handle-left {
+  display: block;
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width) - 6px);
+}
+
+.resize-handle-left::after {
+  top: 0;
+  bottom: 0;
+}
+
+.app-shell.sidebar-collapsed .resize-handle-left,
+body.sidebar-sliding .resize-handle-left {
+  display: none;
+}
+
+@media (max-width: 1180px) {
+  .resize-handle-left {
+    left: calc(min(var(--sidebar-width), 314px) - 6px);
+  }
+}
+
+@media (max-width: 860px) {
+  .resize-handle-left {
+    display: none;
+  }
+}
+
+/* ---------- sidebar toggle joins the task header (macOS toolbar placement) ---------- */
+
+/* With the sidebar open, the toggle used to straddle the header card's left
+   edge. It now sits inside the card, centred on the title row, and the title
+   moves over to make room. The collapsed-sidebar placement is unchanged. */
+@media (min-width: 861px) {
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) > .sidebar-collapse-button {
+    top: 31px;
+    left: calc(var(--workspace-main-gutter) + 10px);
+  }
+
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) .task-hero-top {
+    padding-left: 36px;
+  }
+}

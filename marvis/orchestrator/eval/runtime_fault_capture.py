@@ -62,6 +62,10 @@ def dispatch_fault(journey, action, workspace, plan, step, body, *, actor=None):
     """Return true iff one declared fault was actually dispatched and retained."""
     if action.fault is None:
         return False
+    from .runtime_process_faults import KINDS
+    if action.fault.kind in KINDS:
+        from .runtime_process_fault_dispatch import dispatch_process_fault
+        return dispatch_process_fault(journey, action, workspace, plan, step, body, actor=actor)
     index = journey.current_action_index
     rows = getattr(journey, "runtime_faults", [])
     if any(row["action_index"] == index for row in rows):
@@ -101,6 +105,13 @@ def dispatch_fault(journey, action, workspace, plan, step, body, *, actor=None):
 
 def recover_fault(journey, action, workspace):
     sources = [row for row in getattr(journey, "runtime_faults", ()) if row["action_index"] == action.fault_source_action]
+    from .runtime_process_faults import KINDS
+    if len(sources) == 1 and sources[0]["kind"] in KINDS:
+        from .runtime_process_fault_dispatch import recover_process_fault
+        return recover_process_fault(journey, action, workspace, sources[0])
+    if len(sources) == 1 and sources[0]["kind"] == "stale_step_cas_once":
+        from .runtime_stale_recovery import recover_stale
+        return recover_stale(journey, action, workspace, sources[0])
     if len(sources) != 1 or sources[0]["kind"] != "discard_success_response_once" or sources[0]["tool"] != action.tool or action.fault_source_action >= journey.current_action_index:
         raise ValueError("recovery_requires_exact_prior_discarded_native_action")
     fault = sources[0]

@@ -185,7 +185,7 @@ def test_model_insight_uses_selected_candidate_metrics_before_selection_output_e
     )
 
     assert context is not None
-    assert any("当前推荐模型为 lgb" in item for item in context["facts"])
+    assert any("当前推荐模型为 LightGBM" in item for item in context["facts"])
     assert any("OOT KS=0.4200" in item for item in context["facts"])
     assert any("Test/OOT KS" in item for item in context["risks"])
     assert not any("当前没有 OOT KS" in item for item in context["risks"])

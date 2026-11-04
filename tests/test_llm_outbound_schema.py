@@ -38,7 +38,7 @@ def test_all_installed_intent_enums_reach_exact_protocol_contract(monkeypatch, o
     allowed = sorted(ALL_SEMANTIC_INTENTS)
     _send(wire, application_schema("semantic_intent", allowed_intents=allowed))
     assert _contract_on_wire(wire) == _schema(allowed)
-    assert len(_contract_on_wire(wire)["schema"]["properties"]["intent"]["enum"]) == 15
+    assert len(_contract_on_wire(wire)["schema"]["properties"]["intent"]["enum"]) == 17  # + sql_query, monitoring_schedule (V3 D-6/D-8)
 
 
 @pytest.mark.parametrize("contract,expected", [

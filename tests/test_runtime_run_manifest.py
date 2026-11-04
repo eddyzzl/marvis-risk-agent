@@ -65,6 +65,7 @@ def _rewrite_inventory(root, *, update_case_hashes=True):
     return digest(path.read_bytes())
 
 
+@pytest.mark.pmml_runtime
 def test_actual_final_records_are_bound_after_custody_and_scoring(actual_run):
     root, report, frozen_paths = actual_run
     final_path = root / FINAL_MANIFEST_NAME
@@ -97,6 +98,7 @@ def test_actual_final_records_are_bound_after_custody_and_scoring(actual_run):
     assert before == {p.relative_to(root): digest(p.read_bytes()) for p in root.rglob("*") if p.is_file()}
 
 
+@pytest.mark.pmml_runtime
 def test_rehashed_summary_cannot_change_original_measured_time(actual_run, tmp_path):
     root, _, case_id = _copy(actual_run, tmp_path)
     execution_path = root / case_id / "execution.json"
@@ -114,6 +116,7 @@ def test_rehashed_summary_cannot_change_original_measured_time(actual_run, tmp_p
         verify_run_manifest(root, expected_manifest_sha256=new_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("change", ["summary", "snapshot"])
 def test_rehashed_revision_claim_cannot_change_native_observation(actual_run, tmp_path, change):
     root, _, case_id = _copy(actual_run, tmp_path)
@@ -135,6 +138,7 @@ def test_rehashed_revision_claim_cannot_change_native_observation(actual_run, tm
         verify_run_manifest(root, expected_manifest_sha256=new_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("change", ["summary", "binding", "missing_end"])
 def test_rehashed_confirmation_wait_claim_cannot_change_native_observation(actual_run, tmp_path, change):
     root, _, case_id = _copy(actual_run, tmp_path)
@@ -162,6 +166,7 @@ def test_rehashed_confirmation_wait_claim_cannot_change_native_observation(actua
         verify_run_manifest(root, expected_manifest_sha256=new_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("file", ["report.json", "manifest.json", "execution.json", "score.json", "llm-attempts.jsonl"])
 def test_original_bytes_cannot_change_under_external_digest(actual_run, tmp_path, file):
     root, expected_digest, case_id = _copy(actual_run, tmp_path)
@@ -174,6 +179,7 @@ def test_original_bytes_cannot_change_under_external_digest(actual_run, tmp_path
         verify_run_manifest(root, expected_manifest_sha256=expected_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("file", ["execution.json", "score.json", "llm-attempts.jsonl"])
 def test_redone_inventory_cannot_hide_inconsistent_final_records(actual_run, tmp_path, file):
     root, _, case_id = _copy(actual_run, tmp_path)
@@ -189,6 +195,7 @@ def test_redone_inventory_cannot_hide_inconsistent_final_records(actual_run, tmp
         verify_run_manifest(root, expected_manifest_sha256=new_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("damage", ["deleted_case", "removed_report_case", "extra_file", "extra_directory", "symlink", "hardlink"])
 def test_complete_denominator_and_exact_safe_file_set_are_required(actual_run, tmp_path, damage):
     root, expected_digest, case_id = _copy(actual_run, tmp_path)
@@ -218,6 +225,7 @@ def test_complete_denominator_and_exact_safe_file_set_are_required(actual_run, t
         verify_run_manifest(root, expected_manifest_sha256=expected_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("field", ["source", "cases_sha256", "expected_sha256", "price_book_sha256", "baseline_sha256"])
 def test_manifest_frozen_bindings_cannot_contradict_original_records(actual_run, tmp_path, field):
     root, _, _ = _copy(actual_run, tmp_path)
@@ -229,6 +237,7 @@ def test_manifest_frozen_bindings_cannot_contradict_original_records(actual_run,
         verify_run_manifest(root, expected_manifest_sha256=digest(path.read_bytes()))
 
 
+@pytest.mark.pmml_runtime
 def test_missing_legacy_manifest_is_explicitly_unavailable_and_not_created(actual_run, tmp_path):
     root, expected_digest, _ = _copy(actual_run, tmp_path)
     (root / FINAL_MANIFEST_NAME).unlink()
@@ -237,6 +246,7 @@ def test_missing_legacy_manifest_is_explicitly_unavailable_and_not_created(actua
     assert not (root / FINAL_MANIFEST_NAME).exists()
 
 
+@pytest.mark.pmml_runtime
 def test_finalize_rejects_collision_and_changed_initial_manifest(actual_run, tmp_path):
     root, report, _ = actual_run
     kwargs = {"initial_manifest_sha256": digest((root / "manifest.json").read_bytes()),
@@ -251,6 +261,7 @@ def test_finalize_rejects_collision_and_changed_initial_manifest(actual_run, tmp
     assert not (copy / FINAL_MANIFEST_NAME).exists()
 
 
+@pytest.mark.pmml_runtime
 def test_verifier_returns_authenticated_parsed_values_instead_of_paths(actual_run, tmp_path):
     root, expected_digest, case_id = _copy(actual_run, tmp_path)
     checked = verify_run_manifest(root, expected_manifest_sha256=expected_digest)
@@ -346,6 +357,7 @@ def _rewrite_consistent_case(root, case_id, *, mutate):
     return _rewrite_inventory(root)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("contradiction", ["unknown_status", "budget_pass", "interrupted_pass", "eligible_without_pass", "fixture_eligible"])
 def test_repeated_consistent_flags_do_not_override_necessary_failure_conditions(actual_run, tmp_path, contradiction):
     root, _, case_id = _copy(actual_run, tmp_path)
@@ -362,6 +374,7 @@ def test_repeated_consistent_flags_do_not_override_necessary_failure_conditions(
         verify_run_manifest(root, expected_manifest_sha256=_rewrite_consistent_case(root, case_id, mutate=mutate))
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("event", [
     {"event": "budget_blocked"},
     {"event": "finished", "attempt_id": "extra", "output_limit_exceeded": True},
@@ -382,6 +395,7 @@ def test_transport_failure_cannot_be_recorded_as_completed_even_with_self_consis
         verify_run_manifest(root, expected_manifest_sha256=new_digest)
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("field", ["transport_attempts", "logical_calls", "retry_attempts", "prompt_tokens", "completion_tokens", "known_prompt_tokens_subtotal", "incomplete_attempts", "token_budget_status", "cost_budget_status"])
 def test_usage_summary_is_recomputed_from_attempt_bytes(actual_run, tmp_path, field):
     root, _, case_id = _copy(actual_run, tmp_path)
@@ -394,6 +408,7 @@ def test_usage_summary_is_recomputed_from_attempt_bytes(actual_run, tmp_path, fi
         verify_run_manifest(root, expected_manifest_sha256=new_digest)
 
 
+@pytest.mark.pmml_runtime
 def test_final_digest_and_inventory_limits_are_required_before_original_reads(actual_run, tmp_path, monkeypatch):
     import marvis.orchestrator.eval.runtime_run_manifest as module
 
@@ -419,6 +434,7 @@ def test_final_digest_and_inventory_limits_are_required_before_original_reads(ac
     assert reads == [FINAL_MANIFEST_NAME]
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("contradiction", ["terminal_check", "assertion", "empty_assertions", "active_job"])
 def test_passing_flag_cannot_contradict_its_own_reported_checks(actual_run, tmp_path, contradiction):
     root, _, case_id = _copy(actual_run, tmp_path)

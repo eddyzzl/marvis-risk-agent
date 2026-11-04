@@ -1,4 +1,5 @@
 import { escapeHtml } from "../ui-utils.js";
+import { localizeText } from "../i18n.js";
 import {
   listSkills as listSkillsApi,
   reloadSkills as reloadSkillsApi,
@@ -311,7 +312,7 @@ export async function renderSkillManager(container, deps = {}) {
 
 function defaultShowError(message) {
   if (typeof alert === "function") {
-    alert(message);
+    alert(localizeText(message));
     return;
   }
   console.error(message);

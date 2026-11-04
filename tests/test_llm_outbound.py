@@ -134,11 +134,14 @@ def test_report_and_reviewer_wire_withhold_raw_material(monkeypatch):
     assert report["stability"][0] == {"metric": "psi_test_vs_train", "value": .15}
     wire.reply = {"passed": True, "reasons": []}
     reviewer = Reviewer(lambda: wire.client)
-    assert reviewer.llm_critique(_step([]), _tainted(), "modeling " + PRIVATE[0]).passed
+    # The user's goal is carried verbatim (tests/test_llm_outbound_review_goal.py);
+    # raw material in step outputs is still withheld.
+    assert reviewer.llm_critique(_step([]), _tainted(), "modeling，不要用XGB").passed
     assert wire.last_context()["output_summary"]["metrics"]["test_auc"] == .71
+    assert wire.last_context()["goal"] == "modeling，不要用XGB"
     wire.reply = {"summary": "结构审阅完成"}
-    reviewer.final_review(_plan(_step([])), {"step-1": _tainted()}, "validation " + PRIVATE[0])
-    wire.last_context()
+    reviewer.final_review(_plan(_step([])), {"step-1": _tainted()}, "validation")
+    assert wire.last_context()["goal"] == "validation"
 
 
 def test_unknown_free_text_and_schema_examples_never_enter_transport(monkeypatch):

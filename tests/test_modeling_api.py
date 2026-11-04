@@ -632,17 +632,25 @@ def test_modeling_typed_screen_actions_use_live_get_snapshot_and_fail_closed(
         json=apply_setup_payload,
     )
     assert applied_setup.status_code == 202, applied_setup.text
-    revised_setup_gate = _last_assistant(
-        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
-    )
-    assert revised_setup_gate["metadata"]["modeling_setup"]["recipes"] == [
-        "lr",
-        "xgb",
-    ]
-
+    # 「确认方案，开始执行」 applies the edits AND confirms the setup once: the
+    # recomputed setup gate is not rendered again, screening runs straight on.
     after_setup = client.get(
         f"/api/tasks/{task_id}/agent/messages"
     ).json()["messages"]
+    screen_gate = _last_assistant(after_setup)
+    assert screen_gate["metadata"]["screen"]["selected"]
+    setup_gates = [
+        message
+        for message in after_setup
+        if (message.get("metadata") or {}).get("kind") == "gate"
+        and (message.get("metadata") or {}).get("modeling_setup")
+        and (message.get("metadata") or {}).get("gate_source_tool") == "screen_features"
+    ]
+    assert [message["id"] for message in setup_gates] == [setup_gate["id"]]
+    plan = client.app.state.plan_repo.load_plan(setup_gate["metadata"]["plan_id"])
+    spec_step = next(step for step in plan.steps if step.tool_ref.tool == "choose_modeling_spec")
+    assert client.app.state.plan_repo.load_step_output(spec_step.id)["recipes"] == ["lr", "xgb"]
+
     stale_setup = client.post(
         f"/api/tasks/{task_id}/agent/messages",
         json=apply_setup_payload,
@@ -651,19 +659,6 @@ def test_modeling_typed_screen_actions_use_live_get_snapshot_and_fail_closed(
     assert client.get(
         f"/api/tasks/{task_id}/agent/messages"
     ).json()["messages"] == after_setup
-
-    confirmed_setup = client.post(
-        f"/api/tasks/{task_id}/agent/messages",
-        json=_typed_gate_action_payload(
-            revised_setup_gate,
-            action="confirm_gate",
-        ),
-    )
-    assert confirmed_setup.status_code == 202, confirmed_setup.text
-    screen_gate = _last_assistant(
-        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
-    )
-    assert screen_gate["metadata"]["screen"]["selected"]
 
     missing_thresholds = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -685,18 +680,12 @@ def test_modeling_typed_screen_actions_use_live_get_snapshot_and_fail_closed(
     )
     assert adjusted_thresholds.status_code == 202, adjusted_thresholds.text
 
-    rerun_gate = _last_assistant(
-        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
-    )
-    assert rerun_gate["metadata"]["step_id"] != screen_gate["metadata"]["step_id"]
-    rerun = client.post(
-        f"/api/tasks/{task_id}/agent/messages",
-        json=_typed_gate_action_payload(rerun_gate, action="confirm_gate"),
-    )
-    assert rerun.status_code == 202, rerun.text
+    # The re-screen keeps the already-confirmed split/spec: no second setup
+    # confirmation, straight back to the feature gate with the new threshold.
     reviewed_features_gate = _last_assistant(
         client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     )
+    assert reviewed_features_gate["metadata"]["step_id"] == screen_gate["metadata"]["step_id"]
     screen = reviewed_features_gate["metadata"]["screen"]
     assert screen["thresholds"]["leakage_ks"] == pytest.approx(0.5)
     assert screen["selected"]
@@ -763,8 +752,10 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "手动模式请点击「开始执行」" in overview["content"]
-    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
+    # Batch 3b (2026-10-14 redesign): plan overview copy is mode-neutral; the agent-only hint is structured.
+    assert "确认没问题就开始执行。" in overview["content"]
+    assert "请回复" not in overview["content"]
+    assert overview["metadata"]["reply_hint"] == "要先改哪一步，也可以直接说。"
 
     # turn 1 — 开始: make the split + G2 spec, pause before feature screening
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
@@ -812,12 +803,14 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     refined_list_table = next(t for t in refine_tables if t["title"].startswith("最终清单"))
     assert {row[0] for row in refined_list_table["rows"]} <= set(chosen)
 
-    # confirm the refined feature set: pause at the explicit G3 tuning-configuration gate.
-    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
-    assert resp.status_code == 202, resp.text
-    tuning_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert tuning_gate["metadata"].get("kind") == "gate"
-    assert "调参配置已生成" in tuning_gate["content"]
+    # D-4: this gate is the single 「配置调参」 confirmation (budget editable here);
+    # confirming it configures and tunes without a second 「调参」 gate.
+    gate_step = next(
+        step
+        for step in client.app.state.plan_repo.list_plans_for_task(task_id)[0].steps
+        if step.id == refine_gate["metadata"]["step_id"]
+    )
+    assert gate_step.title == "配置调参"
 
     # confirm tuning config: tune + train + compare, pause at the final-experiment selection gate.
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
@@ -948,9 +941,9 @@ def test_modeling_refinement_funnel_drops_noise_and_redundant_features(client: T
     assert tune_step.inputs["features"] == f"$ref:{refine_step.id}.output.selected"
     assert train_step.inputs["features"] == f"$ref:{refine_step.id}.output.selected"
 
-    # drive to completion: confirm 配置调参 -> tune/train/compare -> model-selection gate
-    # -> report gate -> delivery gate -> done.
-    for content in ["确认", "确认", "确认", "确认", "确认"]:
+    # drive to completion: confirm 配置调参 (D-4: also starts tuning) ->
+    # tune/train/compare -> model-selection gate -> report gate -> delivery gate -> done.
+    for content in ["确认", "确认", "确认", "确认"]:
         latest = _last_assistant(
             client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
         )
@@ -1072,9 +1065,9 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
         assert column in split_step.inputs["passthrough_cols"]
 
     # 开始 -> split/spec gate; 确认 -> screen gate; 确认 -> FS-1 refine gate; 确认 ->
-    # tuning-config gate; 确认 -> model-selection gate; 确认 -> report gate; 确认 -> delivery
-    # gate; 确认 -> done.
-    for content in ["开始", "确认", "确认", "确认", "确认", "确认", "确认", "确认"]:
+    # 配置调参 gate (D-4: confirming it also tunes); 确认 -> model-selection gate;
+    # 确认 -> report gate; 确认 -> delivery gate -> done.
+    for content in ["开始", "确认", "确认", "确认", "确认", "确认", "确认"]:
         latest = _last_assistant(
             client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
         )
@@ -1259,7 +1252,7 @@ def test_modeling_persists_explicit_target_type_and_defaults_recipe(client: Test
     messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     opening = next(m for m in messages if m["role"] == "assistant")
     assert "回归任务" in opening["content"]
-    assert "lgb_regressor" in opening["content"]
+    assert "LightGBM 回归" in opening["content"]
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert plans
     spec_step = next(step for step in plans[0].steps if step.title == "选择建模规格")
@@ -1346,6 +1339,36 @@ def test_modeling_persists_oot_ks_min_and_injects_success_criteria(client: TestC
             "target_type": "binary",
         }
     ]
+
+
+def test_modeling_setup_form_offers_uploaded_split_and_task_oot_goal(client: TestClient, tmp_path: Path):
+    """Eval S4: the sample's own train/test/oot column is a selectable setup
+    choice, labelled as coming from the upload, and the task's OOT KS goal is
+    carried to the form so it never defaults to "no OOT"."""
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "沿用已有划分",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lr"],
+        "oot_ks_min": 0.3,
+    }).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"}
+    ).status_code == 202
+
+    setup = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["modeling_setup"]
+    assert setup["oot_requested"] is True
+    assert setup["oot_requirement"] == "OOT KS ≥ 0.3"
+    summary = setup["split_summary"]
+    assert summary["existing_split"] == {"column": "model_flag", "origin": "uploaded"}
+    assert summary["split_config"] == {}
+    assert summary["has_oot"] is True
 
 
 def test_modeling_without_oot_ks_min_injects_no_success_criteria(client: TestClient, tmp_path: Path):
@@ -1456,8 +1479,10 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "手动模式请点击「开始执行」" in overview["content"]
-    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
+    # Batch 3b (2026-10-14 redesign): plan overview copy is mode-neutral; the agent-only hint is structured.
+    assert "确认没问题就开始执行。" in overview["content"]
+    assert "请回复" not in overview["content"]
+    assert overview["metadata"]["reply_hint"] == "要先改哪一步，也可以直接说。"
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert plans and plans[-1].template_id == "modeling_with_join"
     plan = plans[-1]
@@ -2625,7 +2650,7 @@ def test_modeling_honors_selected_algorithms(client: TestClient, tmp_path: Path)
     opening = next(m for m in msgs if m["role"] == "assistant")
     # the chosen algorithms are noted (multi-algorithm compare, not the lgb default only)
     assert "算法" in opening["content"]
-    assert "lr" in opening["content"] and "lgb" in opening["content"]
+    assert "逻辑回归" in opening["content"] and "LightGBM" in opening["content"]
     assert "取最优" in opening["content"]
 
 

@@ -31,19 +31,24 @@ for (const plan of plans) {
     assert.equal(headline.label, snapshot.label, `${plan.status}/${kind}`);
   }
 }
+// Batch 4 (2026-10-14 redesign): the presentation also carries key/face/dot/checker; compare the word and tone.
+const word = (presentation) => ({ label: presentation.label, tone: presentation.tone });
 const snapshot = planWorkflowStatus(plans[0]);
-assert.deepEqual(actionStatusPresentation(snapshot.message, snapshot.kind, {
+assert.deepEqual(word(actionStatusPresentation(snapshot.message, snapshot.kind, {
   task, usesPlanWorkflow: true, workflowSnapshot: snapshot,
-}), { label: "待核对", tone: "fail" });
-assert.deepEqual(actionStatusPresentation("请求失败", "error", {
+})), { label: "待核对", tone: "fail" });
+// Batch 4 (2026-10-14 redesign): one failure word everywhere; stage wording stays in the detail line.
+assert.deepEqual(word(actionStatusPresentation("请求失败", "error", {
   task, usesPlanWorkflow: true,
-}), { label: "执行失败", tone: "fail" });
-assert.deepEqual(actionStatusPresentation("复核后仍失败", "error", {
+})), { label: "失败", tone: "fail" });
+// Batch 4 (2026-10-14 redesign): 验证失败 -> the canonical 失败.
+assert.deepEqual(word(actionStatusPresentation("复核后仍失败", "error", {
   task: { status: "failed", task_type: "validation" },
-}), { label: "验证失败", tone: "fail" });
-assert.deepEqual(actionStatusPresentation("停止", "stopped", {
+})), { label: "失败", tone: "fail" });
+// Batch 4 (2026-10-14 redesign): 停止 -> the canonical 已停止.
+assert.deepEqual(word(actionStatusPresentation("停止", "stopped", {
   task, stopped: true, usesPlanWorkflow: true, workflowSnapshot: snapshot,
-}), { label: "停止", tone: "neutral" });
+})), { label: "已停止", tone: "neutral" });
 '''
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],

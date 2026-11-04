@@ -28,6 +28,7 @@ from marvis.files import sha256_file
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool_evidence_verifier import (
+    _canonical_json_object,
     POOL_ID_RE as _POOL_ID_RE,
     POOL_REF_FIELDS as _POOL_REF_FIELDS,
     POOL_REVISION_ID_RE as _POOL_REVISION_ID_RE,
@@ -52,6 +53,7 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     validate_pool_requirement_bindings_provenance,
 )
 from marvis.packs.strategy.pool_validation import (
+    _exact_fields,
     STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
     build_strategy_pool_validation_evidence,
     canonical_strategy_pool_validation_json,
@@ -75,6 +77,9 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactNotFoundError,
     stable_task_artifact_id,
 )
+from marvis.packs.strategy.input_validation import dataset_evidence_binding as _dataset_evidence_binding
+from marvis.packs.strategy.input_validation import sample_design_v2_identity as _sample_design_v2_identity
+from marvis.packs.strategy.input_validation import expression_fields as _expression_fields
 
 
 _StrategySampleDesignV2Binding = (
@@ -706,7 +711,7 @@ def validate_strategy_pool_validation_artifact_refs(
         )
     by_partition: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(value):
-        obj = _json_object(raw, f"pool_validation_refs[{index}]")
+        obj = _canonical_json_object(raw, f"pool_validation_refs[{index}]")
         _exact_fields(
             obj,
             _POOL_VALIDATION_REF_FIELDS,
@@ -1000,7 +1005,7 @@ def validate_measure_strategy_pool_validation_tool_output(
 ) -> dict[str, Any]:
     """Reconstruct scalars and authenticate the task-artifact binding."""
 
-    obj = _json_object(value, "measure_strategy_pool_validation output")
+    obj = _canonical_json_object(value, "measure_strategy_pool_validation output")
     trusted_task_id = _text(expected_task_id, "expected_task_id")
     trusted_artifact_id = _hash(
         expected_artifact_id,
@@ -1060,7 +1065,7 @@ def validate_measure_strategy_pool_validation_tool_output(
                 f"measure_strategy_pool_validation output {field} must be true"
             )
 
-    artifact = _json_object(
+    artifact = _canonical_json_object(
         obj["artifact"],
         "measure_strategy_pool_validation artifact",
     )
@@ -1531,7 +1536,7 @@ def _require_provenance_matches_evidence(
 
 
 def _validate_inputs(value: object) -> dict[str, Any]:
-    obj = _json_object(value, "measure_strategy_pool_validation inputs")
+    obj = _canonical_json_object(value, "measure_strategy_pool_validation inputs")
     _exact_fields(
         obj,
         _INPUT_FIELDS,
@@ -1566,7 +1571,7 @@ def _validate_inputs(value: object) -> dict[str, Any]:
 
 
 def _validate_sample_design_ref(value: object) -> dict[str, str]:
-    obj = _json_object(value, "sample_design_ref")
+    obj = _canonical_json_object(value, "sample_design_ref")
     _exact_fields(
         obj,
         _SAMPLE_DESIGN_REF_FIELDS,
@@ -1750,19 +1755,6 @@ def _require_pool_development_contract(
         )
 
 
-def _sample_design_v2_identity(
-    binding: _StrategySampleDesignV2Binding,
-) -> tuple[str, ...]:
-    return (
-        binding.task_id,
-        binding.membership_artifact_id,
-        binding.membership_artifact_content_hash,
-        binding.bundle_artifact_id,
-        binding.bundle_artifact_content_hash,
-        str(binding.bundle["bundle_id"]),
-        str(binding.bundle["sample_design"]["sample_design_id"]),
-        str(binding.bundle["sample_design"]["content_hash"]),
-    )
 
 
 def _require_bindings_under_lock(
@@ -1944,18 +1936,6 @@ def _read_authenticated_parquet_snapshot(
         raise StrategyError(messages[exc.reason]) from exc
 
 
-def _expression_fields(value: object) -> set[str]:
-    fields: set[str] = set()
-    if isinstance(value, Mapping):
-        field = value.get("field")
-        if isinstance(field, str):
-            fields.add(field)
-        for item in value.values():
-            fields.update(_expression_fields(item))
-    elif isinstance(value, list | tuple):
-        for item in value:
-            fields.update(_expression_fields(item))
-    return fields
 
 
 def _sample_design_evidence_ref(
@@ -1987,22 +1967,6 @@ def _sample_design_evidence_ref(
     }
 
 
-def _dataset_evidence_binding(
-    sample: _StrategySampleDesignV2Binding,
-) -> dict[str, Any]:
-    source = sample.source_binding
-    return {
-        "task_id": source.task_id,
-        "dataset_id": source.dataset_id,
-        "dataset_content_hash": source.dataset_content_hash,
-        "dataset_source_path": source.dataset_source_path,
-        "dataset_registry_metadata_hash": (
-            source.dataset_registry_metadata_hash
-        ),
-        "workspace_revision": source.workspace_revision,
-        "workspace_generation": source.workspace_generation,
-        "semantic_mapping_hash": source.semantic_mapping_hash,
-    }
 
 
 def _persist_evidence(
@@ -2258,7 +2222,7 @@ def _provenance_field_bindings(
 
 
 def _validate_provenance(value: object) -> dict[str, Any]:
-    obj = _json_object(value, "Strategy Pool validation provenance")
+    obj = _canonical_json_object(value, "Strategy Pool validation provenance")
     _exact_fields(
         obj,
         _PROVENANCE_FIELDS,
@@ -2297,7 +2261,7 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         raise StrategyError(
             "Strategy Pool validation provenance lifecycle changed"
         )
-    pool_ref = _json_object(
+    pool_ref = _canonical_json_object(
         obj["pool_ref"],
         "Strategy Pool validation provenance.pool_ref",
     )
@@ -2335,7 +2299,7 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         "validation provenance.pool_ref.expected_revision",
     )
     _validate_sample_design_ref(obj["sample_design_ref"])
-    dataset = _json_object(
+    dataset = _canonical_json_object(
         obj["dataset_binding"],
         "Strategy Pool validation provenance.dataset_binding",
     )
@@ -2359,7 +2323,7 @@ def _validate_provenance(value: object) -> dict[str, Any]:
                 f"validation provenance.dataset_binding.{field} "
                 "must be a non-negative integer"
             )
-    target = _json_object(
+    target = _canonical_json_object(
         obj["target_binding"],
         "Strategy Pool validation provenance.target_binding",
     )
@@ -2377,7 +2341,7 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         raise StrategyError(
             "Strategy Pool validation provenance target binding changed"
         )
-    fields = _json_object(
+    fields = _canonical_json_object(
         obj["field_bindings"],
         "Strategy Pool validation provenance.field_bindings",
     )
@@ -2647,26 +2611,6 @@ def _require_dataset_path(path: Path, *, root: Path) -> None:
         ) from exc
 
 
-def _json_object(value: object, name: str) -> dict[str, Any]:
-    try:
-        normalized = json.loads(
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-        )
-    except (TypeError, ValueError, RecursionError) as exc:
-        raise StrategyError(f"{name} must be canonical JSON") from exc
-    if not isinstance(normalized, dict):
-        raise StrategyError(f"{name} must be an object")
-    if normalized != value:
-        raise StrategyError(f"{name} contains non-canonical JSON values")
-    return normalized
-
-
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
@@ -2690,22 +2634,6 @@ def _object_without_duplicate_keys(
 
 def _reject_json_constant(value: str) -> Any:
     raise StrategyError(f"JSON contains non-finite constant: {value}")
-
-
-def _exact_fields(
-    value: Mapping[str, Any],
-    expected: frozenset[str],
-    name: str,
-) -> None:
-    if set(value) != expected:
-        unexpected = sorted(set(value) - expected)
-        missing = sorted(expected - set(value))
-        details: list[str] = []
-        if unexpected:
-            details.append("unsupported fields: " + ", ".join(unexpected))
-        if missing:
-            details.append("missing fields: " + ", ".join(missing))
-        raise StrategyError(f"{name} has invalid fields ({'; '.join(details)})")
 
 
 def _text(value: object, name: str) -> str:

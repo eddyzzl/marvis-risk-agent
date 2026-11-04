@@ -6,7 +6,8 @@
 明确记录 ``month_gap`` 和实际月间隔；不把跨期观测冒认为单月迁移。
 
 - ``flow_rate``：逐相邻月对给出 NxN 转移占比矩阵 + into_bad/out_of_bad 净流量。
-- ``bucket_migration``：把窗口内各月对聚合成平均迁徙率矩阵 + 逐单元格最差月矩阵。
+- ``bucket_migration``：把窗口内各月对池化成平均迁徙率矩阵 + 逐单元格最差月矩阵。
+  窗口内没有迁出基数的起始状态，其行为显式未定义（``None``），不以 0% 冒充数据。
 
 roll_rate_matrix (strategy 包) 保留不动——那是"状态×时间长表"口径，本内核是
 "相邻快照对齐"口径，两者语义不同。
@@ -141,11 +142,16 @@ class BucketMigrationResult:
     states: tuple[str, ...]
     to_states: tuple[str, ...]
     window_months: tuple[str, ...]
-    avg_matrix: list[list[float]]
-    worst_matrix: list[list[float]]
+    #: 池化迁徙率；未观测起始状态的行全部为 None（未定义）。
+    avg_matrix: list[list[float | None]]
+    worst_matrix: list[list[float | None]]
     #: 渲染用行列表：每行 {"from": state, "<to_state>": rate, ...}。
     heat_table: list[dict]
+    #: 窗口内的 month_gap（影响矩阵是否为月度口径）+ unobserved_state。逐月
+    #: sparse_month 只由 flow_rate 报告一次，不在此重复。
     red_flags: list[dict] = field(default_factory=list)
+    #: 窗口内没有迁出基数的起始状态（其行为 None）。
+    unobserved_states: tuple[str, ...] = ()
 
 
 def bucket_migration(
@@ -159,7 +165,23 @@ def bucket_migration(
     window: list[str] | tuple[str, ...] | None = None,
     bad_states: list[str] | tuple[str, ...] | None = None,
 ) -> BucketMigrationResult:
-    """把窗口内相邻月对聚合成平均迁徙率矩阵 + 逐单元格最差月矩阵（与 flow_rate 共用对齐内核）。"""
+    """把窗口内相邻月对池化成平均迁徙率矩阵 + 逐单元格最差月矩阵（与 flow_rate 共用对齐内核）。
+
+    平均矩阵口径 = 窗口池化（与 flow_rate 的计权一致：有 ``balance_col`` 时按起始月
+    余额加权，否则每对计 1）::
+
+        avg[i][j] = Σ_t base_t[i] · rate_t[i][j] / Σ_t base_t[i] = Σ_t w_t[i→j] / Σ_t w_t[i]
+
+    即窗口内所有从 states[i] 出发的转移权重之和 / 迁出基数之和。某月该起始状态
+    没有基数时，该月不参与这一行（旧实现把它当 0% 计入分母，导致行和 < 100%）。
+    因此有基数的行（含 exited 列）行和恒为 1。
+
+    窗口内迁出基数为 0 的起始状态记入 ``unobserved_states``：其 avg/worst 行全部为
+    ``None``（未定义，而不是看起来像数据的 0%），并给出 ``unobserved_state`` 红旗。
+
+    worst 矩阵 = 逐单元格取该行有基数月份中的最大转移率（"最强迁移强度"语义，
+    对角留存格同样取最大）；同样只在有基数的月份上取，未观测行为 ``None``。
+    """
     result = flow_rate(
         df,
         id_col=id_col,
@@ -174,30 +196,41 @@ def bucket_migration(
     state_order = result.states
     to_states = result.to_states
 
-    n_from = len(state_order)
     n_to = len(to_states)
-    if not selected:
-        empty = [[0.0] * n_to for _ in range(n_from)]
-        return BucketMigrationResult(
-            states=state_order,
-            to_states=to_states,
-            window_months=tuple(window_months),
-            avg_matrix=empty,
-            worst_matrix=[[0.0] * n_to for _ in range(n_from)],
-            heat_table=_heat_table(empty, state_order, to_states),
-            red_flags=list(result.red_flags),
+    avg: list[list[float | None]] = []
+    worst: list[list[float | None]] = []
+    unobserved: list[str] = []
+    for i, state in enumerate(state_order):
+        # only months where this from-state has mass contribute to its row
+        observed = [t for t in selected if t.base[state] > 0]
+        pooled_base = sum(t.base[state] for t in observed)
+        if not observed or pooled_base <= 0:
+            unobserved.append(state)
+            avg.append([None] * n_to)
+            worst.append([None] * n_to)
+            continue
+        avg.append([
+            sum(t.base[state] * t.from_to_matrix[i][j] for t in observed) / pooled_base
+            for j in range(n_to)
+        ])
+        worst.append([max(t.from_to_matrix[i][j] for t in observed) for j in range(n_to)])
+
+    window_set = set(window_months)
+    red_flags = [
+        flag for flag in result.red_flags
+        if flag.get("kind") == "month_gap" and flag.get("month") in window_set
+    ]
+    if unobserved:
+        red_flags.append(
+            {
+                "kind": "unobserved_state",
+                "states": list(unobserved),
+                "message": (
+                    f"迁徙窗口内状态 {'、'.join(unobserved)} 没有迁出基数，该行迁徙率无法估计，"
+                    "以空值（无观测）表示，不按 0% 处理。"
+                ),
+            }
         )
-
-    avg = [[0.0] * n_to for _ in range(n_from)]
-    worst = [[0.0] * n_to for _ in range(n_from)]
-    for i in range(n_from):
-        for j in range(n_to):
-            cell_values = [t.from_to_matrix[i][j] for t in selected]
-            avg[i][j] = sum(cell_values) / len(cell_values)
-            # worst = 最差月：对角(留存/改善)取最小，非对角向坏取最大。这里统一
-            # 用"最大迁出率"语义 -- worst 关注最坏迁移强度，取每个单元格跨月最大值。
-            worst[i][j] = max(cell_values)
-
     return BucketMigrationResult(
         states=state_order,
         to_states=to_states,
@@ -205,7 +238,8 @@ def bucket_migration(
         avg_matrix=avg,
         worst_matrix=worst,
         heat_table=_heat_table(avg, state_order, to_states),
-        red_flags=list(result.red_flags),
+        red_flags=red_flags,
+        unobserved_states=tuple(unobserved),
     )
 
 
@@ -298,7 +332,7 @@ def _month_matrix(
     return matrix, base, into_bad, out_of_bad
 
 
-def _heat_table(matrix: list[list[float]], states: tuple[str, ...], to_states: tuple[str, ...]) -> list[dict]:
+def _heat_table(matrix: list[list[float | None]], states: tuple[str, ...], to_states: tuple[str, ...]) -> list[dict]:
     rows: list[dict] = []
     for i, from_state in enumerate(states):
         row = {"from": from_state}

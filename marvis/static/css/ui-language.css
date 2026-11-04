@@ -1,0 +1,61 @@
+/* Language is chosen inside the settings popover in either sidebar state. */
+
+.settings-menu .settings-row[data-settings-row="language"] {
+  grid-template-columns: 82px minmax(0, 1fr);
+}
+
+.settings-menu [data-settings-row="language"] .settings-row-title {
+  white-space: nowrap;
+}
+
+.ui-locale-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--fill-2, rgba(0, 0, 0, 0.05));
+}
+
+.ui-locale-option {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ui-locale-option:hover {
+  color: var(--text);
+}
+
+.ui-locale-option.selected {
+  background: var(--card, #fff);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.ui-locale-option:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--brand-primary, #3b82f6));
+  outline-offset: 1px;
+}
+
+/* Platform text that lives in CSS `content:` follows the locale too. */
+:root[lang="en"] .agent-memory-detail:empty::before {
+  content: "Select a memory on the left to see its summary, sources and audit events.";
+}
+
+:root[lang="en"] .welcome-task-card.unavailable::after {
+  content: "Coming soon";
+}
+
+:root[lang="en"] #resultWorkspace[data-thread-filter="results"] #resultScrollContent:not(:has([data-agent-result="true"]))::after {
+  content: "This task has no results yet. Tables, files or reports from finished steps appear here.";
+}

@@ -24,6 +24,8 @@ from marvis.agent.semantic_intent import INTENT_RISK_STANDARD_VINTAGE
 from marvis.agent.semantic_intent import INTENT_RISK_VTG_TERMINAL
 from marvis.agent.semantic_intent import INTENT_STRATEGY_SAMPLE_BINDING
 from marvis.agent.semantic_intent import INTENT_STRATEGY_WORKFLOW
+from marvis.agent.semantic_intent import INTENT_MONITORING_SCHEDULE
+from marvis.agent.semantic_intent import INTENT_SQL_QUERY
 from marvis.agent.semantic_intent import route_semantic_intent
 from marvis.agent.strategy_request_compiler import (
     utterance_targets_candidate_monthly_stability,
@@ -75,6 +77,7 @@ from . import _registry as _registry_lane
 from . import adhoc as adhoc_lane
 from . import c1_state as c1_state_lane
 from . import contracts as contracts_lane
+from . import conversation_actions as conversation_actions_lane
 from . import dataset_turns as dataset_turns_lane
 from . import feature as feature_lane
 from . import labeling as labeling_lane
@@ -87,6 +90,7 @@ from . import strategy_contracts as strategy_contracts_lane
 from . import strategy_request as strategy_request_lane
 from . import strategy_sample as strategy_sample_lane
 from . import typed_ui as typed_ui_lane
+from . import vintage as vintage_lane
 
 
 def _safe_semantic_intent_state_snapshot(
@@ -199,6 +203,22 @@ def dispatch_driver_turn(
             agent_autodrive_turn(runtime, repo, task, client=agent_client)
             return responses_lane.join_turn_response(repo, task.id)
         return result
+    # B-line extension: the exact command of an offered repair option, the
+    # undo command, or an expired repair command (workflow_repair_turn.py).
+    if not recovery_bypass and all(
+        value is None for value in (selection, dedup_strategies, adjust_params, expected_step_id)
+    ):
+        from . import workflow_repair_turn as workflow_repair_lane
+
+        repaired = workflow_repair_lane.maybe_handle_command(
+            runtime,
+            repo,
+            task,
+            user_text=user_text,
+            append=shared_lane.append_driver_messages,
+        )
+        if repaired is not None:
+            return repaired
     # An unresolved structured failure owns ordinary conversation first.  In
     # particular, “为什么策略分析失败” is a question about existing evidence,
     # not authorization to compile and run a new strategy request.
@@ -294,6 +314,48 @@ def dispatch_driver_turn(
             return responses_lane.join_turn_response(repo, task.id)
         return result
     conversation = repo.list_agent_messages(task.id)
+    # The risk intake's own 当期新增 / 截至当期状态 question: a reply that
+    # names one reading fills that slot (see vintage.is_pending_label_answer).
+    if vintage_lane.is_pending_label_answer(
+        runtime, task, text=text, conversation=conversation
+    ):
+        runtime = replace(runtime, semantic_intent=INTENT_RISK_STANDARD_VINTAGE)
+        result = _registry_lane.DRIVER_TURN_FUNCS[task.task_type](
+            runtime,
+            repo,
+            task,
+            user_text=user_text,
+            selection=selection,
+            dedup_strategies=dedup_strategies,
+            adjust_params=adjust_params,
+            expected_step_id=expected_step_id,
+            expected_plan_id=expected_plan_id,
+            expected_plan_status=expected_plan_status,
+            expected_plan_revision=expected_plan_revision,
+            expected_plan_fingerprint=expected_plan_fingerprint,
+            expected_step_fingerprint=expected_step_fingerprint,
+            confirmation_source=confirmation_source,
+            ui_action=ui_action,
+        )
+        if result.get("status") == "clarification_required":
+            return result
+        if agent_client is not None and auto_accept_enabled:
+            agent_autodrive_turn(runtime, repo, task, client=agent_client)
+            return responses_lane.join_turn_response(repo, task.id)
+        return result
+    # A reply to the Agent's own strategy-development question belongs to that
+    # question, not to top-level routing: the original request was already
+    # authorized, the reply only supplies its business slots, and questions or
+    # hold-backs inside the reply never start a plan.
+    development_answer = strategy_request_lane._maybe_handle_strategy_development_answer(
+        runtime,
+        repo,
+        task,
+        text=text,
+        conversation=conversation,
+    )
+    if development_answer is not None:
+        return development_answer
     if task.task_type == TASK_TYPE_STRATEGY and not (
         utterance_targets_strategy_project_context(text)
         or strategy_request_lane._is_strategy_request_intent(text)
@@ -329,6 +391,18 @@ def dispatch_driver_turn(
             )
         )
     )
+    # D-7: a collections request is answered with its entry (the strategy
+    # task's collections workspace) before any routing; no plan is created.
+    if (
+        not has_existing_pending_contract
+        and shared_lane._active_plan(runtime.plan_repo, task.id) is None
+        and shared_lane.latest_open_gate(conversation) is None
+    ):
+        from .collections_guidance import maybe_handle_collections_request
+
+        collections_answer = maybe_handle_collections_request(repo, task, text=text)
+        if collections_answer is not None:
+            return collections_answer
     if (
         runtime.require_semantic_text_authorization
         and text.strip()
@@ -397,6 +471,18 @@ def dispatch_driver_turn(
             agent_autodrive_turn(runtime, repo, task, client=agent_client)
             return responses_lane.join_turn_response(repo, task.id)
         return result
+    # A question about a finished plan is answered read-only from its stored
+    # outputs before any routing; nothing here creates a plan or runs a Tool.
+    if not has_existing_pending_contract:
+        result_answer = semantic_lane._maybe_answer_result_question(
+            runtime,
+            repo,
+            task,
+            text=text,
+            conversation=conversation,
+        )
+        if result_answer is not None:
+            return result_answer
     semantic_decision = None
     pending_adhoc = None
     if (
@@ -446,6 +532,10 @@ def dispatch_driver_turn(
                 reason=semantic_decision.reason,
                 diagnostics=getattr(semantic_decision, "diagnostics", None),
                 pending_adhoc=pending_adhoc,
+                about_results=(
+                    semantic_lane._looks_like_question(text)
+                    and semantic_lane._task_has_finished_results(runtime, task)
+                ),
             )
         after_snapshot = _safe_semantic_intent_state_snapshot(runtime, repo, task)
         if after_snapshot is None or before_snapshot != after_snapshot:
@@ -538,6 +628,16 @@ def dispatch_driver_turn(
                     task,
                     user_text=user_text,
                     force_intent=True,
+                )
+            ),
+            INTENT_SQL_QUERY: lambda: (
+                conversation_actions_lane.handle_sql_query_turn(
+                    runtime, repo, task, user_text=user_text,
+                )
+            ),
+            INTENT_MONITORING_SCHEDULE: lambda: (
+                conversation_actions_lane.handle_monitoring_schedule_turn(
+                    runtime, repo, task, user_text=user_text,
                 )
             ),
         }.get(semantic_decision.intent)
@@ -920,7 +1020,7 @@ def agent_autodrive_turn(
             stage="chat",
             content=(
                 f"🤖 AUTO 已连续自动处理 {max_gates} 个节点，为安全起见转人工确认；"
-                "请查看当前节点并回复「确认」或给出调整指令以继续。"
+                "请查看当前节点，确认没问题就点确认，或直接说要怎么调整。"
             ),
             metadata={"intent": "agent_budget_exhausted", "max_gates": max_gates},
         )

@@ -136,7 +136,7 @@ from marvis.repositories.validation_contracts import (
     ValidationContractRepository,
     require_confirmed_validation_input_contract,
 )
-from marvis.validation.pmml_score_artifacts import (
+from marvis.validation_services.pmml_score_artifacts import (
     build_pmml_scoring_identity,
     load_or_run_pmml_scoring,
     raise_if_cancelled,
@@ -145,7 +145,7 @@ from marvis.validation.pmml_score_artifacts import (
     validate_pmml_score_artifact,
 )
 from marvis.validation.pmml_scoring import TASK_PMML_SCORERS
-from marvis.validation.pmml_stress import run_pmml_stress
+from marvis.validation_services.pmml_stress import run_pmml_stress
 from marvis.validation.stress_test import require_complete_stress_result
 from marvis.validation_services.metrics import (
     compute_platform_validation_results,
@@ -154,7 +154,6 @@ from marvis.validation_services.metrics import (
     write_reproducibility_result,
 )
 from marvis.validation.results import (
-    ConsistencyStatus,
     pmml_scoring_result_from_dict,
     pmml_scoring_result_to_dict,
     validation_results_to_dict,
@@ -351,6 +350,7 @@ def run_notebook_stage(
                     input_pmml_path=input_pmml_path,
                     output_path=output_path,
                     fallback_sample_path=sample_path,
+                    cancellation_check=cancellation_token.raise_if_cancelled,
                 )
                 if not output_path.exists():
                     raise PipelineError(
@@ -374,6 +374,7 @@ def run_notebook_stage(
                         excel_path=metrics_work_dir / "validation.xlsx",
                         stress_scores_path=execution_dir / STRESS_SCENARIO_SCORES_JSON,
                         fallback_sample_path=sample_path,
+                        cancellation_check=cancellation_token.raise_if_cancelled,
                     )
                     _require_metrics_outputs(metrics_work_dir)
                 repo.update_status(
@@ -1167,6 +1168,7 @@ def _run_legacy_metrics_stage(
                         input_pmml_path=input_pmml_path,
                         output_path=staged_reproducibility.path,
                         fallback_sample_path=sample_path,
+                        cancellation_check=cancellation_token.raise_if_cancelled,
                     )
                     write_platform_validation_metrics(
                         task=task,
@@ -1179,6 +1181,7 @@ def _run_legacy_metrics_stage(
                         excel_path=metrics_work_dir / "validation.xlsx",
                         stress_scores_path=stress_scores_path,
                         fallback_sample_path=sample_path,
+                        cancellation_check=cancellation_token.raise_if_cancelled,
                     )
                     _require_metrics_outputs(metrics_work_dir)
                 else:
@@ -1316,7 +1319,7 @@ def run_report_stage(
             results=results,
             report_values=report_values,
         )
-        word_result = write_validation_word(
+        write_validation_word(
             results,
             template_path=settings.report_template_path,
             output_path=staged_report.path,
@@ -1331,31 +1334,10 @@ def run_report_stage(
             image_output_dir=staged_excel_images.path,
         )
         cancellation_token.raise_if_cancelled()
-        if word_result.unresolved_placeholders:
-            if task.status != TaskStatus.REVIEW_REQUIRED:
-                try:
-                    report_uow.finalize_with_connection(
-                        repo.transaction,
-                        lambda conn: repo.update_status_on_connection(
-                            conn,
-                            task_id,
-                            TaskStatus.REVIEW_REQUIRED,
-                            message="报告已生成，需人工复核",
-                            expected={
-                                TaskStatus.WRITING_ARTIFACTS,
-                                TaskStatus.SUCCEEDED,
-                            },
-                            begin_immediate=True,
-                        ),
-                    )
-                except IllegalTransition:
-                    # Another concurrent report request already advanced the task;
-                    # this run lost the race, so leave the winner's result intact.
-                    return
-            else:
-                report_uow.finalize(lambda: None)
-            return
-        terminal_status = _terminal_validation_status(task, results)
+        _require_final_validation_artifacts(staged_report.path, staged_excel.path)
+        # Findings and unfilled report metadata remain visible in the outputs.
+        # They do not keep a successfully delivered Agent workflow unfinished.
+        terminal_status = TaskStatus.SUCCEEDED
         if (
             task.status is TaskStatus.SUCCEEDED
             and terminal_status is TaskStatus.SUCCEEDED
@@ -1373,11 +1355,7 @@ def run_report_stage(
                     conn,
                     task_id,
                     terminal_status,
-                    message=(
-                        "验证已完成，需人工复核报告"
-                        if terminal_status is TaskStatus.REVIEW_REQUIRED
-                        else "pipeline succeeded"
-                    ),
+                    message="pipeline succeeded",
                     expected={
                         TaskStatus.WRITING_ARTIFACTS,
                         TaskStatus.REVIEW_REQUIRED,
@@ -1439,14 +1417,10 @@ def _rollback_report_uow(uow: ArtifactUnitOfWork | None) -> None:
     _rollback_artifact_uow(uow)
 
 
-def _terminal_validation_status(task: TaskRecord, results) -> TaskStatus:
-    if results.reproducibility is None:
-        return TaskStatus.SUCCEEDED
-    return (
-        TaskStatus.SUCCEEDED
-        if results.reproducibility.summary.status is ConsistencyStatus.PASS
-        else TaskStatus.REVIEW_REQUIRED
-    )
+def _require_final_validation_artifacts(report_path: Path, excel_path: Path) -> None:
+    for path in (report_path, excel_path):
+        if not path.is_file() or path.stat().st_size == 0:
+            raise PipelineError(f"report output missing or empty: {path.name}")
 
 
 def _report_values_with_manual_fallback(
@@ -1999,7 +1973,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             results=results,
             report_values=report_values,
         )
-        word_result = write_validation_word(
+        write_validation_word(
             results,
             template_path=settings.report_template_path,
             output_path=outputs_dir / "validation_report.docx",
@@ -2007,24 +1981,13 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             report_values=report_values,
         )
 
-        if word_result.unresolved_placeholders:
-            repo.update_status(
-                task_id,
-                TaskStatus.REVIEW_REQUIRED,
-                message="报告已生成，需人工复核",
-                expected=TaskStatus.WRITING_ARTIFACTS,
-            )
-            return
-
-        terminal_status = _terminal_validation_status(task, results)
+        _require_final_validation_artifacts(
+            outputs_dir / "validation_report.docx", outputs_dir / "validation.xlsx",
+        )
         repo.update_status(
             task_id,
-            terminal_status,
-            message=(
-                "验证已完成，需人工复核报告"
-                if terminal_status is TaskStatus.REVIEW_REQUIRED
-                else "pipeline succeeded"
-            ),
+            TaskStatus.SUCCEEDED,
+            message="pipeline succeeded",
             expected=TaskStatus.WRITING_ARTIFACTS,
         )
     except PipelineError as exc:

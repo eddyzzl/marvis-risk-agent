@@ -12,8 +12,8 @@ import pyarrow.parquet as pq
 import pytest
 from filelock import FileLock
 
-import marvis.validation.pmml_score_artifacts as artifacts
-from marvis.validation.pmml_score_artifacts import (
+import marvis.validation_services.pmml_score_artifacts as artifacts
+from marvis.validation_services.pmml_score_artifacts import (
     AtomicScoreWriter,
     SCORE_ARTIFACT_SCHEMA,
     cancellable_file_lock,

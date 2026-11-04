@@ -1,7 +1,7 @@
 import { businessObjectiveFormHtml, collectBusinessObjective } from "./business-objective.js";
 import { api, localToken } from "./api.js";
 import { defaultTaskType, taskTypeDefinitions } from "./task-types.js";
-import { formatDateInput } from "./ui-utils.js";
+import { escapeHtml, formatDateInput } from "./ui-utils.js";
 import { materialUploadSelectionText } from "./dialogs.js";
 import {
   MAX_VALIDATION_BATCH_ROWS,
@@ -364,7 +364,10 @@ export function createCreateTaskDialogController({
     }
   }
 
-  function openTaskDialog(taskType = defaultTaskType) {
+  // Resets the dialog for a task type without showing it. The home page's
+  // creation card fills it through prefillTaskDialog (2026-10-14 redesign,
+  // batch 5) and either shows it (高级设置) or submits it directly.
+  function prepareTaskDialog(taskType = defaultTaskType) {
     applyTaskTypeToDialog(taskType);
     resetCreateTaskSpecificInputs({ $ });
     const defaultMode = hasEnabledAgent() || !taskTypeDefinition(taskType).manualEnabled ? "agent" : "manual";
@@ -383,8 +386,86 @@ export function createCreateTaskDialogController({
     resetValidationExtraModels();
     prefillCreateTaskReportFields();
     updateCreateModelSummary();
+  }
+
+  function openTaskDialog(taskType = defaultTaskType) {
+    prepareTaskDialog(taskType);
     $("taskDialog").showModal();
     $("modelName").focus();
+  }
+
+  // Card values are percents ("60"); the dialog takes 0-1 fractions.
+  function percentToFraction(percent) {
+    const raw = String(percent ?? "").trim();
+    if (!raw) return "";
+    const value = Number(raw);
+    return Number.isFinite(value) ? String(Number((value / 100).toFixed(6))) : raw;
+  }
+
+  // draft: {taskType, name, validator, runMode, files, strategy, algorithms}.
+  // Files go through the dialog's own upload path, so the create contract
+  // stays the dialog's. Strategy limits from the card mean a full strategy
+  // development constrained on bad rate; algorithms are binary recipe ids.
+  function prefillTaskDialog(draft = {}, { show = false } = {}) {
+    prepareTaskDialog(draft.taskType || defaultTaskType);
+    if (draft.name) $("modelName").value = draft.name;
+    if (draft.validator) $("validator").value = draft.validator;
+    if (draft.runMode) {
+      const radio = document.querySelector(`input[name="runMode"][value="${draft.runMode}"]`);
+      if (radio && !radio.disabled) {
+        document.querySelectorAll('input[name="runMode"]').forEach((input) => {
+          input.checked = input === radio;
+        });
+        updateAlgorithmFieldVisibility();
+      }
+    }
+    if (Array.isArray(draft.files) && draft.files.length) {
+      materialSourceController.setMode("upload");
+      // {file, relativePath} items (a dropped folder keeps its paths); bare
+      // File objects are accepted too.
+      materialSourceController.captureFileItems(
+        draft.files.map((entry) => (entry?.file ? entry : { file: entry })),
+      );
+    }
+    const limits = draft.strategy || {};
+    // D-7: a collections request opens the strategy task for its collections
+    // workspace; it is not a strategy development, so no limits are needed.
+    if (draft.taskType === "strategy" && draft.collections) {
+      $("strategyEntryMode").value = "strategy_analysis";
+      updateStrategyProfitVisibility();
+    } else if (draft.taskType === "strategy" && (String(limits.minApprovalRate ?? "").trim() || String(limits.maxBadRate ?? "").trim())) {
+      $("strategyEntryMode").value = "strategy_development";
+      $("strategyObjective").value = "max_approval";
+      $("strategyMinApprovalRate").value = percentToFraction(limits.minApprovalRate);
+      $("strategyMaxBadRate").value = percentToFraction(limits.maxBadRate);
+      updateStrategyProfitVisibility();
+    }
+    // The home sentence's KS goal ("OOT KS 不低于 0.3") becomes the task's
+    // oot_ks_min, so the modeling Agent can say whether it was met.
+    if (draft.taskType === "modeling" && draft.ootKsMin && $("modelOotKsMin")) {
+      $("modelOotKsMin").value = draft.ootKsMin;
+    }
+    // Metrics the sentence named (「稳定性」→ monthly PSI) are added to the
+    // default selection; nothing is unchecked.
+    if (draft.taskType === "feature_analysis" && Array.isArray(draft.featureMetrics) && draft.featureMetrics.length) {
+      const wanted = new Set(draft.featureMetrics);
+      document.querySelectorAll('input[name="featureMetric"]').forEach((input) => {
+        if (wanted.has(input.value) && !input.disabled) input.checked = true;
+      });
+    }
+    if (draft.taskType === "modeling" && Array.isArray(draft.algorithms) && draft.algorithms.length) {
+      const wanted = new Set(draft.algorithms);
+      document.querySelectorAll('input[name="modelAlgorithm"]').forEach((input) => {
+        input.checked = wanted.has(input.value);
+      });
+      normalizeModelAlgorithmFamilies();
+    }
+    prefillCreateTaskReportFields();
+    updateCreateModelSummary();
+    if (show) {
+      $("taskDialog").showModal();
+      $("modelName").focus();
+    }
   }
 
   function openTaskDialogFromCard(event) {
@@ -582,9 +663,13 @@ export function createCreateTaskDialogController({
         }
         payload.sample_weight_col = sampleWeightCol;
       }
-      // AGT-4: optional minimum OOT KS success criterion. Left blank by default —
-      // never defaulted to a platform-chosen number. Only meaningful for binary
-      // targets (KS is not computed for continuous/multiclass recipes).
+    }
+    // AGT-4: optional minimum OOT KS success criterion. Left blank by default —
+    // never defaulted to a platform-chosen number. Only meaningful for binary
+    // targets (KS is not computed for continuous/multiclass recipes). Read in
+    // both modes: an Agent-mode task kept the home sentence's 「KS 不低于 0.3」
+    // nowhere (eval S4), so the Agent could not say whether it was met.
+    if (definition.algorithmField) {
       const ootKsMinRaw = $("modelOotKsMin")?.value.trim();
       if (ootKsMinRaw) {
         const ootKsMin = Number(ootKsMinRaw);
@@ -592,7 +677,7 @@ export function createCreateTaskDialogController({
           setCreateStatus("成功标准（OOT KS 下限）必须是 0 到 1 之间的数字。", "error");
           return null;
         }
-        if (payload.target_type !== "binary") {
+        if (payload.target_type && payload.target_type !== "binary") {
           setCreateStatus("成功标准（OOT KS 下限）仅适用于二分类算法。", "error");
           return null;
         }
@@ -784,23 +869,32 @@ export function createCreateTaskDialogController({
     };
   }
 
+  function modelMaterialSummaryHtml(name, hasMaterial) {
+    // A model name can itself be a platform word such as “通过”. Only the
+    // material status and the unnamed fallback follow the interface locale.
+    const rawName = String(name || "").trim();
+    return `<span${rawName ? ' translate="no"' : ""}>${escapeHtml(rawName || "未命名模型")}</span> · <span>${hasMaterial ? "已选择材料" : "待选择材料"}</span>`;
+  }
+
   function updateCreateModelSummary() {
-    const primaryName = $("modelName")?.value.trim() || "未命名模型";
+    const primaryName = $("modelName")?.value.trim() || "";
     const primaryMaterial = materialSourceController.mode() === "upload"
       ? Boolean(materialSourceController.selectedFiles()?.length)
       : Boolean($("sourceDir")?.value.trim());
     const summary = $("primaryModelSummary");
-    if (summary) summary.textContent = `${primaryName} · ${primaryMaterial ? "已选择材料" : "待选择材料"}`;
+    if (summary) summary.innerHTML = modelMaterialSummaryHtml(primaryName, primaryMaterial);
     let missing = primaryMaterial ? 0 : 1;
     for (const row of extraValidationModelRows) {
       const card = document.querySelector(`[data-validation-extra-row-id="${row.id}"]`);
       const hasMaterial = row.material.mode() === "upload" ? Boolean(row.material.selectedFiles()?.length) : Boolean(extraFieldValue(card, "source-dir").trim());
       if (!hasMaterial) missing += 1;
       const label = card?.querySelector("[data-extra-model-summary]");
-      if (label) label.textContent = `${extraFieldValue(card, "name").trim() || "未命名模型"} · ${hasMaterial ? "已选择材料" : "待选择材料"}`;
+      if (label) label.innerHTML = modelMaterialSummaryHtml(extraFieldValue(card, "name"), hasMaterial);
     }
     const count = $("createModelCount");
-    if (count) count.textContent = activeTaskType === "validation" ? `${extraValidationModelRows.length + 1} 个模型 · ${missing ? `${missing} 个待选择材料` : "材料已选择，创建后校验"}` : "创建后检查材料与执行条件";
+    if (count) count.innerHTML = activeTaskType === "validation"
+      ? `<span>${extraValidationModelRows.length + 1} 个模型</span> · <span>${missing ? `${missing} 个待选择材料` : "材料已选择，创建后校验"}</span>`
+      : "创建后检查材料与执行条件";
     const multiple = activeTaskType === "validation" && extraValidationModelRows.length > 0;
     const manual = $("runModeManual");
     if (manual) manual.disabled = multiple || !taskTypeDefinition(activeTaskType).manualEnabled;
@@ -954,6 +1048,7 @@ export function createCreateTaskDialogController({
     createTask,
     openTaskDialog,
     openTaskDialogFromCard,
+    prefillTaskDialog,
     setCreateStatus,
     syncCreateTaskTierDefault,
     taskTypeDefinition,

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from marvis.agent.service import _stage_prompt, fallback_word_conclusions
+from marvis.agent.service import fallback_word_conclusions
 from marvis.agent.validation_evidence import agent_evidence_from_settings
 from marvis.app import create_app
 from marvis.domain import TaskRecord, TaskStatus
@@ -128,64 +128,8 @@ def test_agent_evidence_migrates_legacy_v2_lift_order(tmp_path: Path):
     ] == pytest.approx(2.4)
 
 
-def test_v2_pmml_scoring_prompt_uses_only_scoring_coverage_and_performance():
-    prompt = json.loads(
-        _stage_prompt(
-            task=_task(validation_workflow_version=2),
-            stage="reproducibility",
-            evidence={
-                "pmml_scoring": _scoring_payload(),
-                "notebook_steps": {"steps": [{"status": "passed"}]},
-                "contract": {"score_fn": "model.predict_proba"},
-                "reproducibility": {"summary": {"status": "pass"}},
-                "validation_results": {
-                    "pmml_scoring": _scoring_payload(),
-                    "effectiveness": {"overall": [{"split": "oot", "ks": 0.3}]},
-                },
-            },
-        )
-    )
-
-    assert set(prompt["evidence"]) == {"pmml_scoring"}
-    scoring = prompt["evidence"]["pmml_scoring"]
-    assert scoring["input_row_count"] == 1_000_000
-    assert scoring["failure_count"] == 0
-    assert scoring["rows_per_second"] == 50_000.0
-    assert "cache_key" not in scoring
-    assert "只使用 evidence.pmml_scoring" in prompt["instructions"]
-    assert "不得声称执行过 Notebook" in prompt["instructions"]
-    assert "不得建议当前或后续补做" in prompt["instructions"]
-    assert "代码模型与 PMML 分数一致性" in prompt["instructions"]
-    assert "AUC" in prompt["instructions"]
-
-
-def test_v2_word_prompt_and_fallback_use_pmml_scoring_not_reproducibility():
+def test_v2_word_fallback_uses_pmml_scoring_not_reproducibility():
     task = _task(validation_workflow_version=2)
-    prompt = json.loads(
-        _stage_prompt(
-            task=task,
-            stage="word_conclusion_draft",
-            evidence={
-                "scan": {"checks": []},
-                "pmml_scoring": _scoring_payload(),
-                "reproducibility": {"summary": {"status": "pass"}},
-                "validation_results": {
-                    "pmml_scoring": _scoring_payload(),
-                    "reproducibility": {"summary": {"status": "pass"}},
-                    "effectiveness": {"overall": [{"split": "oot", "ks": 0.3}]},
-                    "stress_test": {"status": "completed", "per_category": []},
-                },
-                "visible_stage_summaries": [],
-            },
-        )
-    )
-
-    assert "pmml_scoring" in prompt["evidence"]
-    assert "reproducibility" not in prompt["evidence"]
-    assert "reproducibility" not in prompt["evidence"]["validation_results"]
-    assert "PMML 打分测试" in prompt["instructions"]
-    assert "不得声称执行过 Notebook" in prompt["instructions"]
-
     fallback = fallback_word_conclusions(task=task)
     combined = " ".join(fallback.values())
     assert "PMML部署可用" in combined

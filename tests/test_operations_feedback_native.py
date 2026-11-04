@@ -20,7 +20,7 @@ from test_reference_deployment import _promotion, _install_activate
 from test_operations_api import _claim_role
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def feedback_carrier(tmp_path_factory):
     app, maker, checker, admin, task, package_request, root = rule_runtime.__wrapped__(
         tmp_path_factory
@@ -187,7 +187,11 @@ def test_actual_decision_feedback_import_monitor_tick_red_inbox_and_retry_no_req
 
 
 def test_actual_feedback_unknown_maturity_watermark_and_source_cas(feedback_carrier):
-    app, _, task, registry, dataset, package_hash, start, end, now, _ = feedback_carrier
+    app, client, task, registry, dataset, package_hash, start, end, now, _ = feedback_carrier
+    # This test owns its imported feedback, including when selected alone or sharded.
+    imported = client.post("/api/operations/decision-feedback", json=feedback_payload(task, dataset))
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["inserted"] == 2
     binding = DecisionFeedbackBinding(
         task_id=task.id,
         environment="local-reference:production",

@@ -18,10 +18,12 @@ from marvis.packs.analysis.errors import AnalysisError
 
 #: top_k 之外的小细分归并到该标签。
 OTHER_SEGMENT = "其他"
-#: top1 占比超过该阈值 -> high_concentration 红旗。
+#: top1 占比阈值下限（另需超过均匀占比的 HIGH_CONCENTRATION_EVEN_MULTIPLE 倍）。
 HIGH_CONCENTRATION_TOP1 = 0.40
-#: HHI 超过该阈值 -> high_concentration 红旗。
+#: HHI 阈值下限（另需超过均匀分布 HHI=1/n 的 HIGH_CONCENTRATION_EVEN_MULTIPLE 倍）。
 HIGH_CONCENTRATION_HHI = 0.25
+#: n 个细分均匀分布时 top1 = HHI = 1/n；阈值至少取其该倍数，均匀分布永不触发。
+HIGH_CONCENTRATION_EVEN_MULTIPLE = 1.5
 
 
 @dataclass(frozen=True)
@@ -138,15 +140,23 @@ def segment_profile(
         )
 
     red_flags: list[dict] = []
-    if concentration.top1_pct > HIGH_CONCENTRATION_TOP1 or concentration.hhi > HIGH_CONCENTRATION_HHI:
+    segment_count = int(len(raw_counts))
+    top1_threshold, hhi_threshold = concentration_thresholds(segment_count)
+    if concentration.top1_pct > top1_threshold or concentration.hhi > hhi_threshold:
         red_flags.append(
             {
                 "kind": "high_concentration",
                 "top1_pct": concentration.top1_pct,
                 "hhi": concentration.hhi,
+                "segment_count": segment_count,
+                "top1_threshold": top1_threshold,
+                "hhi_threshold": hhi_threshold,
                 "message": (
-                    f"细分高度集中：top1 占比 {concentration.top1_pct:.1%}，HHI {concentration.hhi:.3f}"
-                    f"（阈值 top1>{HIGH_CONCENTRATION_TOP1:.0%} 或 HHI>{HIGH_CONCENTRATION_HHI}）。"
+                    f"细分高度集中：{segment_count} 个细分，top1 占比 {concentration.top1_pct:.1%}，"
+                    f"HHI {concentration.hhi:.3f}（阈值 top1>{top1_threshold:.1%} 或 HHI>{hhi_threshold:.3f}；"
+                    f"按细分个数调整：至少为均匀分布 1/{segment_count} 的 "
+                    f"{HIGH_CONCENTRATION_EVEN_MULTIPLE:g} 倍，且不低于 {HIGH_CONCENTRATION_TOP1:.0%} / "
+                    f"{HIGH_CONCENTRATION_HHI:g}）。"
                 ),
             }
         )
@@ -228,6 +238,18 @@ def _net_profit(group: pd.DataFrame, params: ProfitParams, *, ead_col: str, pd_c
     return revenue - expected_loss - funding_cost - operating_cost
 
 
+def concentration_thresholds(segment_count: int) -> tuple[float, float]:
+    """(top1, HHI) 阈值随细分个数调整。
+
+    n 个细分均匀分布时 top1 = HHI = 1/n：n 很小时固定阈值（top1>40% / HHI>0.25）
+    对均匀分布也会触发（两个各 50% 的细分 HHI=0.5）。因此阈值取
+    max(固定下限, EVEN_MULTIPLE / n)：均匀分布永不触发；n>=6 时退回固定阈值。
+    """
+    even_share = 1.0 / segment_count if segment_count > 0 else 1.0
+    floor = HIGH_CONCENTRATION_EVEN_MULTIPLE * even_share
+    return max(HIGH_CONCENTRATION_TOP1, floor), max(HIGH_CONCENTRATION_HHI, floor)
+
+
 def _concentration(weights: pd.Series, total: float) -> Concentration:
     shares = [float(value) / total for value in weights.tolist()] if total else []
     top1 = shares[0] if shares else 0.0
@@ -237,6 +259,7 @@ def _concentration(weights: pd.Series, total: float) -> Concentration:
 
 
 __all__ = [
+    "HIGH_CONCENTRATION_EVEN_MULTIPLE",
     "HIGH_CONCENTRATION_HHI",
     "HIGH_CONCENTRATION_TOP1",
     "OTHER_SEGMENT",
@@ -244,5 +267,6 @@ __all__ = [
     "ProfitParams",
     "SegmentProfileResult",
     "SegmentRow",
+    "concentration_thresholds",
     "segment_profile",
 ]

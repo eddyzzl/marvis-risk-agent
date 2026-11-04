@@ -2557,258 +2557,89 @@ def test_candidate_lab_refresh_is_single_flight_and_aborts_on_task_switch():
 
 
 def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
-    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
-    index_html = (ROOT / "marvis/static/index.html").read_text(encoding="utf-8")
-    workbench_css = read_browser_stylesheets(ROOT / "marvis/static")
-
-    assert (
-        'from "./js/v2/strategy_candidate_lab_controller.js"' in app_js
-    )
-    assert "strategyCandidateLabController.selectTask(task)" in app_js
-    assert (
-        'strategyCandidateLabController.refresh(taskId, { silent: true })'
-        in app_js
-    )
-    poll_body = app_js[
-        app_js.index("async function pollValidationProgress(") :
-        app_js.index("async function validateCurrentTask(")
-    ]
-    assert "strategyCandidateLabController.refresh(" not in poll_body
-    assert poll_body.count(
-        "refreshStrategyCandidateLabAfterSettled(taskId, polledTask)"
-    ) == 1
-    settled_refresh_body = app_js[
-        app_js.index("async function refreshStrategyCandidateLabAfterSettled(") :
-        app_js.index("async function pollValidationProgress(")
-    ]
-    assert settled_refresh_body.count(
-        "strategyCandidateLabController.refresh(taskId, { silent: true })"
-    ) == 1
-    assert "try {" in settled_refresh_body
-    assert "catch (_error)" in settled_refresh_body
-    assert "strategyCandidateLabController.bind(document)" in app_js
+    index_html = (ROOT / 'marvis/static/index.html').read_text(encoding='utf-8')
+    workbench_css = read_browser_stylesheets(ROOT / 'marvis/static')
     assert 'id="strategyCandidateLabPanel"' in index_html
     assert 'id="strategyCandidateLabResults"' in index_html
-    for workflow in (
-        "strategy_project_context",
-        "strategy_sample_design_v2",
-        "univariate_candidate_analysis",
-        "univariate_candidate_refinement",
-        "cross_matrix_analysis",
-        "cross_matrix_candidate_search",
-        "cross_matrix_candidate_build_from_search",
-        "automatic_tree_candidate_build",
-        "scorecard_band_build",
-        "scorecard_cutoff_selection",
-        "candidate_monthly_stability",
-        "voting_candidate_search",
-        "voting_candidate_build_from_search",
-        "strategy_pool_impact",
-        "strategy_impact_cube",
-        "strategy_pool_materialize",
-        "strategy_lifecycle_adopt",
-        "strategy_dsl_delivery",
-        "strategy_report_bundle_v2",
-    ):
+    for workflow in ('strategy_project_context', 'strategy_sample_design_v2', 'univariate_candidate_analysis', 'univariate_candidate_refinement', 'cross_matrix_analysis', 'cross_matrix_candidate_search', 'cross_matrix_candidate_build_from_search', 'automatic_tree_candidate_build', 'scorecard_band_build', 'scorecard_cutoff_selection', 'candidate_monthly_stability', 'voting_candidate_search', 'voting_candidate_build_from_search', 'strategy_pool_impact', 'strategy_impact_cube', 'strategy_pool_materialize', 'strategy_lifecycle_adopt', 'strategy_dsl_delivery', 'strategy_report_bundle_v2'):
         assert f'data-candidate-lab-workflow="{workflow}"' in index_html
-    refinement_start = index_html.index(
-        'data-candidate-lab-workflow="univariate_candidate_refinement"'
-    )
-    refinement_end = index_html.index("</form>", refinement_start)
+    refinement_start = index_html.index('data-candidate-lab-workflow="univariate_candidate_refinement"')
+    refinement_end = index_html.index('</form>', refinement_start)
     refinement_html = index_html[refinement_start:refinement_end]
     assert 'data-candidate-lab-field="source_candidate_id"' in refinement_html
     assert '<select data-candidate-lab-field="source_candidate_id">' in refinement_html
-    for forbidden in ("artifact_id", "content_hash", "evidence_hash"):
+    for forbidden in ('artifact_id', 'content_hash', 'evidence_hash'):
         assert forbidden not in refinement_html
-    scorecard_selection_start = index_html.index(
-        'data-candidate-lab-workflow="scorecard_cutoff_selection"'
-    )
-    scorecard_selection_end = index_html.index("</form>", scorecard_selection_start)
-    scorecard_selection_html = index_html[
-        scorecard_selection_start:scorecard_selection_end
-    ]
-    assert 'data-candidate-lab-field="scorecard_asset_id"' in (
-        scorecard_selection_html
-    )
-    assert 'data-candidate-lab-field="scorecard_cutoff_id"' in (
-        scorecard_selection_html
-    )
-    for forbidden in (
-        "artifact_id",
-        "asset_hash",
-        "content_hash",
-        "score_evidence_ref",
-        "sample_design_ref",
-    ):
+    scorecard_selection_start = index_html.index('data-candidate-lab-workflow="scorecard_cutoff_selection"')
+    scorecard_selection_end = index_html.index('</form>', scorecard_selection_start)
+    scorecard_selection_html = index_html[scorecard_selection_start:scorecard_selection_end]
+    assert 'data-candidate-lab-field="scorecard_asset_id"' in scorecard_selection_html
+    assert 'data-candidate-lab-field="scorecard_cutoff_id"' in scorecard_selection_html
+    for forbidden in ('artifact_id', 'asset_hash', 'content_hash', 'score_evidence_ref', 'sample_design_ref'):
         assert forbidden not in scorecard_selection_html
-    stability_start = index_html.index(
-        'data-candidate-lab-workflow="candidate_monthly_stability"'
-    )
-    stability_end = index_html.index("</form>", stability_start)
+    stability_start = index_html.index('data-candidate-lab-workflow="candidate_monthly_stability"')
+    stability_end = index_html.index('</form>', stability_start)
     stability_html = index_html[stability_start:stability_end]
     assert 'data-candidate-lab-field="stability_pool_entry"' in stability_html
     assert 'data-candidate-lab-field="stability_asset_id"' in stability_html
-    for forbidden in (
-        "expected_pool_revision",
-        "expected_pool_snapshot_hash",
-        "dataset_id",
-        "sample_design_ref",
-        "target_col",
-        "month_col",
-    ):
+    for forbidden in ('expected_pool_revision', 'expected_pool_snapshot_hash', 'dataset_id', 'sample_design_ref', 'target_col', 'month_col'):
         assert forbidden not in stability_html
-    voting_search_start = index_html.index(
-        'data-candidate-lab-workflow="voting_candidate_search"'
-    )
-    voting_search_end = index_html.index("</form>", voting_search_start)
+    voting_search_start = index_html.index('data-candidate-lab-workflow="voting_candidate_search"')
+    voting_search_end = index_html.index('</form>', voting_search_start)
     voting_search_html = index_html[voting_search_start:voting_search_end]
-    for field in (
-        "voting_strategy_type",
-        "voting_member_count",
-        "voting_n",
-        "voting_objective_metric",
-        "voting_objective_direction",
-        "voting_constraints",
-        "voting_include_rule_ids",
-        "voting_exclude_rule_ids",
-        "voting_max_combinations",
-    ):
+    for field in ('voting_strategy_type', 'voting_member_count', 'voting_n', 'voting_objective_metric', 'voting_objective_direction', 'voting_constraints', 'voting_include_rule_ids', 'voting_exclude_rule_ids', 'voting_max_combinations'):
         assert f'data-candidate-lab-field="{field}"' in voting_search_html
-    voting_build_start = index_html.index(
-        'data-candidate-lab-workflow="voting_candidate_build_from_search"'
-    )
-    voting_build_end = index_html.index("</form>", voting_build_start)
+    voting_build_start = index_html.index('data-candidate-lab-workflow="voting_candidate_build_from_search"')
+    voting_build_end = index_html.index('</form>', voting_build_start)
     voting_build_html = index_html[voting_build_start:voting_build_end]
     assert 'data-candidate-lab-field="voting_search_id"' in voting_build_html
     assert 'data-candidate-lab-field="voting_combo_id"' in voting_build_html
-    for forbidden in (
-        "pool_ref",
-        "artifact_id",
-        "content_hash",
-        "dataset_id",
-        "target_col",
-        "hit_matrix",
-        "score_vector",
-        "objective_value",
-        "rank",
-        "best",
-        "champion",
-    ):
+    for forbidden in ('pool_ref', 'artifact_id', 'content_hash', 'dataset_id', 'target_col', 'hit_matrix', 'score_vector', 'objective_value', 'rank', 'best', 'champion'):
         assert forbidden not in voting_search_html
         assert forbidden not in voting_build_html
-    assert "原始 PD 越高表示风险越高" in index_html
-    assert "评分卡分数越高表示更安全" in index_html
-    assert "不等于通过或拒绝动作" in index_html
-    assert "不会自动进入 Strategy Pool" in index_html
-    assert "最佳 Cutoff" not in index_html
-    assert "不会自动构建、选择、入池或部署" in index_html
-    cross_search_start = index_html.index(
-        'data-candidate-lab-workflow="cross_matrix_candidate_search"'
-    )
-    cross_search_end = index_html.index("</form>", cross_search_start)
+    assert '原始 PD 越高表示风险越高' in index_html
+    assert '评分卡分数越高表示更安全' in index_html
+    assert '不等于通过或拒绝动作' in index_html
+    assert '不会自动进入 Strategy Pool' in index_html
+    assert '最佳 Cutoff' not in index_html
+    assert '不会自动构建、选择、入池或部署' in index_html
+    cross_search_start = index_html.index('data-candidate-lab-workflow="cross_matrix_candidate_search"')
+    cross_search_end = index_html.index('</form>', cross_search_start)
     cross_search_html = index_html[cross_search_start:cross_search_end]
-    assert 'data-candidate-lab-field="cross_search_features"' in (
-        cross_search_html
-    )
-    assert 'data-candidate-lab-field="cross_search_max_pairs"' in (
-        cross_search_html
-    )
-    cross_build_start = index_html.index(
-        'data-candidate-lab-workflow="cross_matrix_candidate_build_from_search"'
-    )
-    cross_build_end = index_html.index("</form>", cross_build_start)
+    assert 'data-candidate-lab-field="cross_search_features"' in cross_search_html
+    assert 'data-candidate-lab-field="cross_search_max_pairs"' in cross_search_html
+    cross_build_start = index_html.index('data-candidate-lab-workflow="cross_matrix_candidate_build_from_search"')
+    cross_build_end = index_html.index('</form>', cross_build_start)
     cross_build_html = index_html[cross_build_start:cross_build_end]
-    assert 'data-candidate-lab-field="cross_build_search_id"' in (
-        cross_build_html
-    )
-    assert 'data-candidate-lab-field="cross_build_pair_id"' in (
-        cross_build_html
-    )
-    for forbidden in (
-        "method",
-        "candidate_id",
-        "artifact_id",
-        "content_hash",
-        "eligible",
-        "rank",
-        "interaction_gain_iv",
-    ):
+    assert 'data-candidate-lab-field="cross_build_search_id"' in cross_build_html
+    assert 'data-candidate-lab-field="cross_build_pair_id"' in cross_build_html
+    for forbidden in ('method', 'candidate_id', 'artifact_id', 'content_hash', 'eligible', 'rank', 'interaction_gain_iv'):
         assert f'data-candidate-lab-field="{forbidden}"' not in cross_search_html
         assert f'data-candidate-lab-field="{forbidden}"' not in cross_build_html
-    assert "不会自动构建 Cross Matrix、加入 Pool、采纳或部署" in (
-        cross_search_html
-    )
-    assert "不会自动入 Pool、采纳或部署" in cross_build_html
-    interactive_tree_start = index_html.index(
-        'data-candidate-lab-workflow="interactive_tree_revision"'
-    )
-    interactive_tree_end = index_html.index("</form>", interactive_tree_start)
-    interactive_tree_html = index_html[
-        interactive_tree_start:interactive_tree_end
-    ]
-    for field in (
-        "interactive_tree_operation",
-        "interactive_tree_source_id",
-        "interactive_tree_node_id",
-        "interactive_tree_threshold",
-        "interactive_tree_reason",
-    ):
+    assert '不会自动构建 Cross Matrix、加入 Pool、采纳或部署' in cross_search_html
+    assert '不会自动入 Pool、采纳或部署' in cross_build_html
+    interactive_tree_start = index_html.index('data-candidate-lab-workflow="interactive_tree_revision"')
+    interactive_tree_end = index_html.index('</form>', interactive_tree_start)
+    interactive_tree_html = index_html[interactive_tree_start:interactive_tree_end]
+    for field in ('interactive_tree_operation', 'interactive_tree_source_id', 'interactive_tree_node_id', 'interactive_tree_threshold', 'interactive_tree_reason'):
         assert f'data-candidate-lab-field="{field}"' in interactive_tree_html
-    for forbidden in (
-        "feature",
-        "current_threshold",
-        "asset_hash",
-        "metrics",
-        "base_threshold",
-    ):
-        assert f'data-candidate-lab-field="{forbidden}"' not in (
-            interactive_tree_html
-        )
-    assert "不会写回来源树、物化 frontier、入池、采纳或部署" in (
-        interactive_tree_html
-    )
-    adoption_start = index_html.index(
-        'data-candidate-lab-workflow="strategy_lifecycle_adopt"'
-    )
-    adoption_end = index_html.index("</form>", adoption_start)
+    for forbidden in ('feature', 'current_threshold', 'asset_hash', 'metrics', 'base_threshold'):
+        assert f'data-candidate-lab-field="{forbidden}"' not in interactive_tree_html
+    assert '不会写回来源树、物化 frontier、入池、采纳或部署' in interactive_tree_html
+    adoption_start = index_html.index('data-candidate-lab-workflow="strategy_lifecycle_adopt"')
+    adoption_end = index_html.index('</form>', adoption_start)
     adoption_html = index_html[adoption_start:adoption_end]
-    for field in (
-        "lifecycle_adopt_strategy_id",
-        "lifecycle_adoption_reason",
-        "lifecycle_adopt_pd_mode",
-        "lifecycle_adopt_pd_column",
-        "lifecycle_adopt_pd_value",
-        "lifecycle_adopt_lgd_mode",
-        "lifecycle_adopt_lgd_column",
-        "lifecycle_adopt_lgd_value",
-        "lifecycle_adopt_utilization_mode",
-        "lifecycle_adopt_ead_mode",
-        "lifecycle_adopt_funding_rate_mode",
-        "lifecycle_adopt_term_months_mode",
-        "lifecycle_adopt_operating_cost_per_loan_mode",
-    ):
+    for field in ('lifecycle_adopt_strategy_id', 'lifecycle_adoption_reason', 'lifecycle_adopt_pd_mode', 'lifecycle_adopt_pd_column', 'lifecycle_adopt_pd_value', 'lifecycle_adopt_lgd_mode', 'lifecycle_adopt_lgd_column', 'lifecycle_adopt_lgd_value', 'lifecycle_adopt_utilization_mode', 'lifecycle_adopt_ead_mode', 'lifecycle_adopt_funding_rate_mode', 'lifecycle_adopt_term_months_mode', 'lifecycle_adopt_operating_cost_per_loan_mode'):
         assert f'data-candidate-lab-field="{field}"' in adoption_html
-    for forbidden in (
-        "asset_status",
-        "status",
-        "content_hash",
-        "validation_metrics",
-        "deployment_status",
-    ):
+    for forbidden in ('asset_status', 'status', 'content_hash', 'validation_metrics', 'deployment_status'):
         assert f'data-candidate-lab-field="{forbidden}"' not in adoption_html
-    assert "重新回测并等待人工确认" in adoption_html
-    assert "本地采纳不是生产部署" in adoption_html
-    assert "text:001" in index_html
-    assert "number:-9999" in index_html
-    assert ".candidate-lab-layout" in workbench_css
-    assert (
-        "grid-template-columns: minmax(0, 1fr)"
-        in workbench_css
-    )
-    assert "@media" not in workbench_css[
-        workbench_css.index("/* Candidate Lab") :
-        workbench_css.index("/* Modeling setup gate controls.")
-    ]
+    assert '重新回测并等待人工确认' in adoption_html
+    assert '本地采纳不是生产部署' in adoption_html
+    assert 'text:001' in index_html
+    assert 'number:-9999' in index_html
+    assert '.candidate-lab-layout' in workbench_css
+    assert 'grid-template-columns: minmax(0, 1fr)' in workbench_css
+    assert '@media' not in workbench_css[workbench_css.index('/* Candidate Lab'):workbench_css.index('/* Modeling setup gate controls.')]
 
 
 def test_local_strategy_adoption_collector_emits_only_governed_user_controls():

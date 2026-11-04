@@ -34,5 +34,10 @@ def dataset_name(registry, dataset) -> str:
         )
         if original_name:
             return original_name
+    return dataset_file_name(dataset)
+
+
+def dataset_file_name(dataset) -> str:
+    """Source file name of a registered dataset, falling back to its id."""
     source = getattr(dataset, "source_path", None)
     return Path(source).name if source else str(getattr(dataset, "id", ""))

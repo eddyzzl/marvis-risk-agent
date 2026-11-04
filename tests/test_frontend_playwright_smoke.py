@@ -13,6 +13,7 @@ import json
 import mimetypes
 import os
 import threading
+from dataclasses import asdict
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +22,8 @@ from urllib.parse import urlparse
 import pytest
 
 from marvis.app import _static_asset_version, _static_import_map
+from marvis.execution_environment import ExecutionEnvironmentSettings
+from marvis.routers.plans import list_capability_tiers
 from tests.static_stylesheets import browser_stylesheet_hrefs
 
 
@@ -70,6 +73,44 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         if path == "/api/tasks":
             self._send_json(self._tasks)
             return
+        if path == "/api/plugins":
+            self._send_json({"plugins": []})
+            return
+        if path == "/api/skills":
+            self._send_json({"skills": [], "builtin": [],
+                             "counts": {"active": 0, "disabled": 0, "rejected": 0}})
+            return
+        if path == "/api/capability-tiers":
+            self._send_json(list_capability_tiers())
+            return
+        if path == "/api/plugins/governance":
+            self._send_json({
+                "settings": {"mode": "trusted_local", "revision": 0},
+                "publishers": [], "versions": [],
+                "signature_schema": "marvis.capability-signature.v1",
+                "signature_verification_available": False,
+                "boundaries": {
+                    "identity": "workspace_server_session_and_admin_confirmation",
+                    "immutable_versions": "read_only_material_with_signature_and_hash_verification",
+                    "hostile_same_uid_os_isolation": False,
+                    "independent_skill_runtime": False,
+                },
+            })
+            return
+        if path == "/api/institution/status":
+            self._send_json({
+                "singleton": 1, "mode": "trusted_local", "audience": "marvis-local", "revision": 0,
+                "protocol": "marvis.identity-assertion.v1", "algorithm": "Ed25519",
+                "external_identity_verified": False,
+                "resource_policy": "canonical owner and expiring explicit grants",
+                "unsupported": ["arbitrary Notebook", "unregistered local path intake", "unknown HTTP surfaces"],
+            })
+            return
+        if path == "/api/production-governance/me":
+            # This UI fixture has no registered production principal. Preserve
+            # the real endpoint's denial instead of granting a synthetic role.
+            self._send_json({"detail": "production principal is not registered"}, status=403)
+            return
         task_id = _task_api_id(path, "/api/tasks/", "/agent/messages")
         if task_id is not None:
             self._send_json({"messages": self._messages_by_task.get(task_id, []), "incremental": False})
@@ -86,8 +127,13 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         if task_id is not None:
             self._send_json({"metric_values": {}, "workbook_source": "", "metric_table_sections": []})
             return
-        if path == "/api/settings/execution-environment/options":
-            self._send_json({"settings": {}, "options": [], "validation": None})
+        if path in {"/api/settings/execution-environment", "/api/settings/execution-environment/options"}:
+            self._send_json({
+                "settings": asdict(ExecutionEnvironmentSettings()), "options": [],
+                "validation": {"ok": False, "message": "UI fixture does not launch kernels",
+                               "kernel_name": "python3", "python_version": "",
+                               "network_capability": {}, "worker_capability": {}},
+            })
             return
         if path == "/api/settings/llm":
             self._send_json({"default_model_id": "", "models": [], "enabled_models": []})
@@ -146,6 +192,12 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _SmokeHTTPServer(ThreadingHTTPServer):
+    # Chromium's module graph opens a burst of connections. The stdlib default
+    # queue of five can reset module requests while other test workers run.
+    request_queue_size = 128
+
+
 @contextlib.contextmanager
 def _serve_smoke_page(
     smoke_html: str,
@@ -161,7 +213,7 @@ def _serve_smoke_page(
         messages_by_task=messages_by_task,
         plans_by_task=plans_by_task,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server = _SmokeHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -499,6 +551,77 @@ def test_real_modeling_task_delivery_workspace_renders_in_real_browser():
             browser.close()
 
 
+@pytest.mark.parametrize(
+    ("theme", "collapsed", "width"),
+    [
+        ("light", False, 1366),
+        ("dark", False, 1366),
+        ("light", True, 1366),
+        ("dark", True, 1366),
+        ("light", True, 390),
+        ("dark", True, 390),
+    ],
+)
+def test_task_search_stays_above_scrim_and_remains_interactive(theme, collapsed, width):
+    playwright = pytest.importorskip("playwright.sync_api")
+    tasks = [
+        {**_real_modeling_task(), "id": "search-alpha", "model_name": "Search layer alpha"},
+        {**_real_modeling_task(), "id": "search-beta", "model_name": "Search layer beta"},
+    ]
+    with _serve_smoke_page(_smoke_html(), tasks=tasks) as url, playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            page.set_default_timeout(5000)
+            page.add_init_script(
+                "localStorage.clear();"
+                f"localStorage.setItem('marvis_theme', {json.dumps(theme)});"
+                f"localStorage.setItem('sidebarCollapsed', {'1' if collapsed else '0'});"
+            )
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(url.rsplit("/", 1)[0] + "/")
+            page.wait_for_selector("body:not(.app-booting)")
+            page.wait_for_selector("#taskList .task-row", state="attached")
+            page.locator("#taskSearchToggle").click()
+            page.wait_for_function("document.body.classList.contains('search-active')")
+            page.wait_for_timeout(350)  # Let the search flyout and scrim finish their transitions.
+
+            def hit_test(selector):
+                return page.evaluate(
+                    """selector => {
+                      const target = document.querySelector(selector);
+                      const box = target.getBoundingClientRect();
+                      const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+                      return {
+                        selector,
+                        receivesPointer: target === hit || target.contains(hit),
+                        hitId: hit?.id || "",
+                        hitClass: hit?.className || "",
+                      };
+                    }""",
+                    selector,
+                )
+
+            input_hit = hit_test("#taskSearchInput")
+            assert input_hit["receivesPointer"], input_hit
+            result_hit = hit_test("#taskList .task-row")
+            assert result_hit["receivesPointer"], result_hit
+            page.locator("#taskSearchInput").fill("alpha")
+            assert page.locator("#taskList .task-row").count() == 1
+            assert page.locator("#taskList .task-row-name").inner_text() == "Search layer alpha · v1"
+            page.keyboard.press("Escape")
+            assert not page.locator("body").evaluate("el => el.classList.contains('search-active')")
+            assert page.locator("#taskList .task-row").count() == 2
+            assert page.locator("#taskSearchInput").input_value() == ""
+            page.locator("#taskSearchToggle").click()
+            page.locator("#searchScrim").click(position={"x": width - 8, "y": 892})
+            assert not page.locator("body").evaluate("el => el.classList.contains('search-active')")
+            assert not errors
+        finally:
+            browser.close()
+
+
 def _assert_panel_smoke(page, url: str) -> None:
     page.goto(url)
     page.wait_for_selector(".modeling-setup-panel")
@@ -581,15 +704,51 @@ def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
     assert shell_metrics["welcomeWidth"] > 260
     assert shell_metrics["welcomeHeight"] > 260
     assert shell_metrics["cards"] >= 6
-    assert shell_metrics["minCardWidth"] > 120
-    assert shell_metrics["minCardHeight"] > 80
+    # Batch 5 (D7): icon + name buttons in one row (four per row on phones).
+    assert shell_metrics["minCardWidth"] > 56
+    assert shell_metrics["minCardHeight"] > 50
     assert shell_metrics["badText"] is False
     assert shell_metrics["overflow"] <= 1
     assert shell_metrics["moduleUrls"]
     assert all("?v=" in module_url for module_url in shell_metrics["moduleUrls"])
 
+    # A work icon only fills the home composer; the sentence opens the creation
+    # card, and 高级设置 opens the create dialog prefilled with it.
     page.click("#welcomeModelDevelopmentCard")
+    home_fill = page.evaluate(
+        """
+        () => ({
+          dialogOpen: document.querySelector("#taskDialog").open,
+          value: document.querySelector("#homeComposerInput").value,
+          sendDisabled: document.querySelector("#homeComposerSend").disabled,
+        })
+        """
+    )
+    assert home_fill["dialogOpen"] is False
+    # U8 (2026-10-19): the icon fills a fill-in sentence with editable slots.
+    assert home_fill["value"].startswith("根据这个Y样本和这几个X数据，给我做一个MOB3_30的A卡模型")
+    assert home_fill["sendDisabled"] is False
+    page.press("#homeComposerTemplate", "Enter")
+    page.wait_for_selector("#homeDraft .home-draft-card")
+    draft_metrics = page.evaluate(
+        """
+        () => ({
+          composerVisible: !!document.querySelector("#homeComposer").offsetParent,
+          type: document.querySelector("#homeDraft [data-home-draft-type][aria-pressed='true']")?.dataset.homeDraftType,
+          name: document.querySelector("#homeDraft [data-home-draft-field='name']").value,
+          lead: document.querySelector("#homeDraft .home-draft-lead").textContent,
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+        })
+        """
+    )
+    assert draft_metrics["composerVisible"] is False
+    assert draft_metrics["type"] == "modeling"
+    assert draft_metrics["name"] == "MOB3_30 A卡模型"
+    assert "模型开发" in draft_metrics["lead"]
+    assert draft_metrics["overflow"] <= 1
+    page.click("#homeDraft [data-home-draft-advanced]")
     page.wait_for_selector("#taskDialog[open]")
+    assert page.input_value("#modelName") == "MOB3_30 A卡模型"
     dialog_metrics = page.evaluate(
         """
         () => {
@@ -628,6 +787,43 @@ def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
     assert dialog_metrics["agentTierVisible"] is True
     assert dialog_metrics["tierValue"] in {"", "guarded", "balanced", "explorer", "autonomous"}
     assert dialog_metrics["overflow"] <= 1
+    # The card's strategy limits reach the dialog as its 0-1 fractions.
+    page.click("#closeTaskDialogButton")
+    page.click("#homeDraft [data-home-draft-back]")
+    # Examples are a random pick (V3 UI-7); type the strategy example instead.
+    # Returning from a work-icon draft keeps its editable template visible.
+    editor = "#homeComposerTemplate" if page.locator("#homeComposerTemplate").is_visible() else "#homeComposerInput"
+    page.fill(editor, "通过率 60% 以上，坏账 5% 以内的准入策略")
+    page.set_input_files(
+        "#homeComposerFileInput",
+        files=[{"name": "score_sample.csv", "mimeType": "text/csv", "buffer": b"apply_id,score,bad\n1,600,0\n"}],
+    )
+    page.press(editor, "Enter")
+    page.wait_for_selector('#homeDraft [data-home-draft-limit="minApprovalRate"]')
+    page.click("#homeDraft [data-home-draft-advanced]")
+    page.wait_for_selector("#taskDialog[open]")
+    strategy_prefill = page.evaluate(
+        """
+        () => ({
+          taskType: document.querySelector("#taskType").value,
+          name: document.querySelector("#modelName").value,
+          entry: document.querySelector("#strategyEntryMode").value,
+          objective: document.querySelector("#strategyObjective").value,
+          minApproval: document.querySelector("#strategyMinApprovalRate").value,
+          maxBad: document.querySelector("#strategyMaxBadRate").value,
+          files: document.querySelector("#materialUploadStatus").textContent,
+        })
+        """
+    )
+    assert strategy_prefill == {
+        "taskType": "strategy",
+        "name": "准入策略",
+        "entry": "strategy_development",
+        "objective": "max_approval",
+        "minApproval": "0.6",
+        "maxBad": "0.05",
+        "files": "已选择 score_sample.csv。",
+    }
     assert not page_errors
     assert not console_errors
     assert not import_map_warnings
@@ -665,9 +861,17 @@ def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
             deliveryHeight: delivery.height,
             analysisWidth: analysis.width,
             planWidth: plan.width,
-            hasModelCard: text.includes("模型卡") && text.includes("art-lgb.model_card.md"),
-            hasChampionComparison: text.includes("Champion对比") && text.includes("art-lgb.champion_comparison.md"),
-            hasApprovalPackage: text.includes("审批包") && text.includes("art-lgb.approval_package.md"),
+            // Deliverables read by human labels; the stored file name only
+            // rides in the tooltip, and each file stays downloadable.
+            hasModelCard: text.includes("模型卡")
+              && Boolean(document.querySelector('.model-delivery-panel [data-model-delivery-download="model_card"]'))
+              && Boolean(document.querySelector('.model-delivery-panel [title="art-lgb.model_card.md"]')),
+            hasChampionComparison: text.includes("Champion对比")
+              && Boolean(document.querySelector('[data-readiness-id="challenger_comparison"] [title="art-lgb.champion_comparison.md"]')),
+            hasApprovalPackage: text.includes("审批材料包")
+              && Boolean(document.querySelector('.model-delivery-panel [data-model-delivery-download="approval_package"]'))
+              && Boolean(document.querySelector('.model-delivery-panel [title="art-lgb.approval_package.md"]')),
+            showsInternalFileNames: /art-lgb\.(model_card|approval_package|champion_comparison)\.md/.test(text),
             hasTaskTitle: text.includes("A卡模型开发"),
             badText: text.includes("undefined") || text.includes("NaN"),
             overflow: document.documentElement.scrollWidth - window.innerWidth,
@@ -688,8 +892,79 @@ def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
     assert metrics["hasModelCard"] is True
     assert metrics["hasChampionComparison"] is True
     assert metrics["hasApprovalPackage"] is True
+    assert metrics["showsInternalFileNames"] is False
     assert metrics["hasTaskTitle"] is True
     assert metrics["badText"] is False
     assert metrics["overflow"] <= 1
     assert not page_errors
     assert not console_errors
+
+
+# D-10 (batch 1b): English UI guard. The fixture payloads go through the same
+# serve-time localization an English request gets from UiLocaleMiddleware.
+_ENGLISH_GUARD_JS = r"""
+() => {
+  const cjk = /[㐀-䶿一-鿿]/;
+  const userData = [
+    '[translate="no"]', '[data-i18n-skip]', 'script', 'style', 'textarea', 'pre', 'code',
+    '.agent-message.user', '.agent-markdown',
+    '.agent-message-content > :is(p, ul, ol, h1, h2, h3, h4, h5, h6, blockquote, table, hr)',
+    '.agent-message-tables td', 'td', '.task-row-name', '.task-hero-name', '#currentTaskTitle', '.home-continue-name',
+    '[data-field-name]', '[data-file-name]',
+  ].join(', ');
+  const left = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement;
+    if (!parent || !cjk.test(node.data)) continue;
+    if (parent.closest(userData)) continue;
+    if (!parent.getClientRects().length) continue;  // not rendered
+    left.push(node.data.trim());
+  }
+  return [...new Set(left)];
+}
+"""
+
+
+def test_english_mode_shows_no_platform_chinese_outside_user_data():
+    playwright = pytest.importorskip("playwright.sync_api")
+    from marvis.ui_locale import localize_payload
+
+    task = _real_modeling_task()
+    messages = localize_payload(_real_modeling_messages(), locale="en")
+    plan = _real_modeling_plan()
+    for step, phase in zip(plan["steps"], ("建模", "建模", "交付")):
+        step["phase"] = phase  # phases as the real modeling template names them
+    plan = localize_payload(plan, locale="en")
+    with _serve_smoke_page(
+        _smoke_html(),
+        tasks=[task],
+        messages_by_task={task["id"]: messages},
+        plans_by_task={task["id"]: [plan]},
+    ) as url, playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            base = url.rsplit("/", 1)[0] + "/"
+            home = browser.new_page(viewport={"width": 1366, "height": 900})
+            home.add_init_script("localStorage.clear(); localStorage.setItem('marvis_ui_locale', 'en');")
+            home.goto(base)
+            home.wait_for_function("() => !document.body.classList.contains('app-booting')")
+            assert home.evaluate("document.documentElement.lang") == "en"
+            assert home.evaluate(_ENGLISH_GUARD_JS) == []
+
+            workspace = browser.new_page(viewport={"width": 1366, "height": 900})
+            workspace.add_init_script(
+                "localStorage.clear(); localStorage.setItem('marvis_ui_locale', 'en');"
+                f"localStorage.setItem('marvis_selected_task_id', {json.dumps(task['id'])});"
+            )
+            workspace.goto(base)
+            workspace.wait_for_function("() => !document.body.classList.contains('app-booting')")
+            workspace.wait_for_timeout(800)
+            assert workspace.evaluate(_ENGLISH_GUARD_JS) == []
+
+            # Switching back restores Chinese without a reload.
+            workspace.evaluate("document.querySelector(\"[data-ui-locale-option='zh']\").click()")
+            assert workspace.evaluate("document.documentElement.lang") == "zh-CN"
+            assert workspace.evaluate("document.querySelector('#createTaskOpenButton span').textContent") == "新建任务"
+        finally:
+            browser.close()

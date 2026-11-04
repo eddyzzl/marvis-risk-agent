@@ -877,8 +877,8 @@ def test_reclaim_running_plans_pauses_readonly_plan_and_marks_step_interrupted(t
             {"label": "计划", "value": "plan-1"},
             {"label": "失败步骤", "value": "step-1"},
         ],
-        "actions": ["回复“重试当前步骤”，从该失败步骤继续。"],
-        "agent_prompt": "请回复“重试当前步骤”，Agent 将复用已完成步骤和中间产物继续执行。",
+        "actions": ["点「重试当前步骤」，从该失败步骤继续。"],
+        "agent_prompt": "点「重试当前步骤」，Agent 会复用已完成步骤和中间产物继续执行。",
         "recovery_actions": [
             {"label": "重试当前步骤", "command": "重试当前步骤"}
         ],
@@ -904,7 +904,10 @@ def test_reclaim_running_plans_pauses_readonly_plan_and_marks_step_interrupted(t
     }
     assert "服务已重启" in last["content"]
     assert "计划已暂停" in last["content"]
-    assert "回复“重试当前步骤”" in last["content"]
+    # Batch 3b (2026-10-14 redesign): the retry is a one-click chip from the
+    # diagnostic's recovery_actions, so the copy points at it instead of a typed keyword.
+    assert "点「重试当前步骤」" in last["content"]
+    assert "回复“重试当前步骤”" not in last["content"]
     assert "点击" not in last["content"]
 
 

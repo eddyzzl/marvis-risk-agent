@@ -2,7 +2,9 @@
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
     "Microsoft YaHei", "Segoe UI", sans-serif;
   --font-mono: "SF Mono", Menlo, Consolas, monospace;
-  --bg: #f5f5f7;
+  /* D1 (2026-10-14): white canvas, grey content boxes; controls and floating layers stay white */
+  --bg: #ffffff;
+  --card: #f4f4f6;
   --surface: #ffffff;
   --surface-soft: #fafafa;
   --border: #d9d9df;
@@ -13,9 +15,10 @@
   --text-muted: #6f6f76;
   --accent: #0071e3;
   --accent-soft: #eaf3ff;
-  --option-hover: #dedee3;
-  --option-selected: #d4d4da;
-  --option-selected-border: #d4d4da;
+  /* hover and selected keep the contrast floors against white controls (1.28 / 1.42) */
+  --option-hover: #e0e0e5;
+  --option-selected: #d8d8dd;
+  --option-selected-border: #d8d8dd;
   --option-focus-ring: rgba(84, 84, 92, 0.28);
   --focus-ring: rgba(0, 113, 227, 0.28);
   --success: #1f7a3f;
@@ -36,35 +39,66 @@
   --border-color: var(--border);
   --surface-muted: #f0f1f3;
   --surface-subtle: #f6f7f9;
-  --sidebar-bg: #eeeeef;
-  --sidebar-border: #dedee3;
-  --sidebar-hover: #e3e3e5;
+  --sidebar-bg: #f4f4f6;
+  --sidebar-border: #e6e6ea;
+  --sidebar-hover: #ebebef;
   --pill-bg: #ececef;
-  --scrollbar-track: #eeeeef;
+  --scrollbar-track: #f4f4f6;
   --scrollbar-thumb: #b8b8bf;
   --scrollbar-thumb-hover: #9f9fa7;
   --scrim-bg: rgba(0, 0, 0, 0.42);
   --scrim-blur: blur(2px);
-  --radius: 16px;
+  /* radius scale: 8 controls, 12 nested boxes, 14 cards, 18 large cards and dialogs, 22 glass capsules */
+  --radius: 14px;
   --radius-sm: 8px;
   --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-control: 10px;
+  --radius-lg: 18px;
+  --radius-control: 8px;
+  --radius-glass: 22px;
   --radius-pill: 999px;
-  --shadow-lift: 0 1px 3px rgba(15, 23, 42, 0.1);
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  /* type scale */
+  --fs-xs: 12px;
+  --fs-sm: 12.5px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-read: 14.5px;
+  --fs-lg: 15px;
+  --fs-title: 17px;
+  --fs-h2: 20px;
+  --fs-h1: 24px;
+  /* flat content: hairline separators and neutral fills instead of borders and shadows */
+  --sep: rgba(60, 60, 67, 0.13);
+  --fill: rgba(118, 118, 128, 0.12);
+  --fill-2: rgba(118, 118, 128, 0.2);
+  /* glass is only for controls that float above content (D2, D3).
+     2026-10-23 (UI-10): every glass layer is lighter and shares one blur. */
+  --glass-bg: rgba(255, 255, 255, 0.3);
+  --glass-rim: rgba(255, 255, 255, 0.85);
+  --glass-blur: 22px;
+  --glass-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.09), 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 26px rgba(0, 0, 0, 0.1);
+  /* Popovers holding forms and tables (Inspector) use a denser material. */
+  --glass-bg-dense: rgba(255, 255, 255, 0.72);
+  /* Hover cards, menus and toasts: text over moving content, a little denser. */
+  --glass-bg-pop: rgba(255, 255, 255, 0.5);
+  /* 2026-10-21 user choice: the sidebar, dialogs and home composer are glass too. */
+  --glass-sidebar-bg: rgba(242, 242, 245, 0.48);
+  --glass-dialog-bg: rgba(255, 255, 255, 0.64);
+  /* one elevation for floating layers: popovers, menus, dialogs, hover cards */
+  --shadow-pop: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 8px 24px rgba(0, 0, 0, 0.12);
+  --shadow-lift: none;
+  --glass-edge: none;
   --switch-on: #34c759;
-  --button-solid-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --button-solid-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --button-secondary-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --button-secondary-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --button-solid-shadow: none;
+  --button-solid-shadow-hover: none;
+  --button-secondary-shadow: none;
+  --button-secondary-shadow-hover: none;
   --sidebar-control-size: 34px;
   --sidebar-control-icon-size: 17px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-floating: 0 2px 8px rgba(0, 0, 0, 0.035);
-  --settings-menu-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
-  --progress-rail-shadow: 0 3px 12px rgba(0, 0, 0, 0.045);
-  --sidebar-width: 256px;
+  --shadow: none;
+  --shadow-floating: none;
+  --settings-menu-shadow: var(--shadow-pop);
+  --progress-rail-shadow: var(--glass-shadow);
+  --sidebar-width: 248px;
   --collapsed-entry-size: 44px;
   --collapsed-entry-gutter: 16px;
   --collapsed-hit-area-width: calc(var(--collapsed-entry-gutter) * 2 + var(--collapsed-entry-size));
@@ -78,6 +112,7 @@
   --pet-default-workspace-offset: -2px;
   --pet-min-workspace-offset: -2px;
   --pet-collapsed-workspace-offset: 72px;
+  --pet-dock-size: var(--collapsed-entry-size);
   --brand-primary: #303034;
   --brand-primary-hover: #3b3b42;
   --brand-icon-color: color-mix(in srgb, var(--brand-primary) 42%, var(--text));
@@ -114,10 +149,8 @@
   --agent-send-stop-bg: #1d1f23;
   --agent-send-stop-bg-hover: color-mix(in srgb, var(--danger) 82%, var(--text) 18%);
   --agent-send-stop-shadow: 0 3px 10px rgba(29, 31, 35, 0.24);
-  --agent-user-message-bg: linear-gradient(180deg, #f2f3f5, #e9ebef);
-  --agent-user-message-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.52);
+  --agent-user-message-bg: var(--fill);
+  --agent-user-message-shadow: none;
   --agent-code-token-keyword: #9b1b7d;
   --agent-code-token-function: #005ecb;
   --agent-code-token-string: #0f7a45;
@@ -183,7 +216,19 @@
 
 body[data-theme="dark"] {
   --bg: #181818;
+  --card: #2d2d2d;
   --surface: #2d2d2d;
+  --sep: rgba(255, 255, 255, 0.1);
+  --fill: rgba(255, 255, 255, 0.08);
+  --fill-2: rgba(255, 255, 255, 0.14);
+  --glass-bg: rgba(58, 58, 62, 0.3);
+  --glass-rim: rgba(255, 255, 255, 0.13);
+  --glass-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6), 0 8px 26px rgba(0, 0, 0, 0.45);
+  --glass-bg-dense: rgba(40, 40, 44, 0.74);
+  --glass-bg-pop: rgba(48, 48, 52, 0.54);
+  --glass-sidebar-bg: rgba(36, 36, 40, 0.5);
+  --glass-dialog-bg: rgba(40, 40, 44, 0.66);
+  --shadow-pop: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 10px 28px rgba(0, 0, 0, 0.42);
   --surface-soft: #242424;
   --border: #363636;
   --border-strong: #474747;
@@ -223,21 +268,15 @@ body[data-theme="dark"] {
   --scrollbar-track: #1f1f1f;
   --scrollbar-thumb: #5f5f66;
   --scrollbar-thumb-hover: #74747c;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
-  --shadow-floating: 0 3px 12px rgba(0, 0, 0, 0.18);
-  --shadow-lift: 0 1px 3px rgba(0, 0, 0, 0.45);
-  --settings-menu-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
-  --progress-rail-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  --shadow: none;
+  --shadow-floating: none;
+  --shadow-lift: none;
+  --settings-menu-shadow: var(--shadow-pop);
+  --progress-rail-shadow: var(--glass-shadow);
+  --glass-edge: none;
   --switch-on: #30d158;
-  --button-secondary-shadow:
-    0 1px 1px rgba(0, 0, 0, 0.18),
-    0 2px 4px rgba(0, 0, 0, 0.14),
-    0 5px 8px rgba(0, 0, 0, 0.08);
-  --button-secondary-shadow-hover:
-    0 1px 1px rgba(0, 0, 0, 0.20),
-    0 3px 6px rgba(0, 0, 0, 0.16),
-    0 6px 10px rgba(0, 0, 0, 0.10);
+  --button-secondary-shadow: none;
+  --button-secondary-shadow-hover: none;
   --button-disabled-bg: #2b2c31;
   --button-primary-bg: #525258;
   --button-primary-bg-hover: #5d5d64;
@@ -259,10 +298,8 @@ body[data-theme="dark"] {
   --agent-send-stop-bg: #1d1f23;
   --agent-send-stop-bg-hover: #111318;
   --agent-send-stop-shadow: 0 3px 10px rgba(29, 31, 35, 0.30);
-  --agent-user-message-bg: linear-gradient(180deg, #3a3c40, #303236);
-  --agent-user-message-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --agent-user-message-bg: var(--fill);
+  --agent-user-message-shadow: none;
   --agent-code-token-keyword: #ff8bd8;
   --agent-code-token-function: #8bbdff;
   --agent-code-token-string: #70d898;
@@ -344,4 +381,77 @@ body {
   font-size: 14px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Glass: only for controls that float above content (toolbar capsules, composer,
+   reply chips, plan panel, popovers). Content passes underneath; no blur bands. */
+.ui-glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-rim);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+/* ==========================================================================
+   Disclosure chevron (workbench redesign, batch 1)
+   One quiet chevron replaces the browser's raw triangle on every <summary>.
+   - The native marker is hidden for all summaries (zero specificity).
+   - Summaries that already draw their own indicator, or that act as a
+     menu / chip button, are excluded so they never get a second chevron:
+       .validation-create-model-head  own ::before "›"/"⌄"
+       .draft-manage-summary          own .draft-manage-chevron svg
+       .sidebar-settings              settings menu button
+       .agent-memory-references       inline pill chip
+       .candidate-lab-launcher        own ::after chevron
+       .candidate-lab-evidence-card   own "查看证据" state label
+       .extension-format-guide        own svg chevron
+       .skill-builtin-workflow        own svg chevron
+       .skill-validator-details       own .skill-validator-chevron svg
+   - Everything stays inside :where() so component rules keep winning.
+   ========================================================================== */
+:where(summary) {
+  list-style: none;
+}
+
+:where(summary)::-webkit-details-marker {
+  display: none;
+}
+
+:where(details[open] > summary) {
+  --disclosure-chevron-turn: 90deg;
+}
+
+:where(details > summary:not(
+  .validation-create-model-head,
+  .draft-manage-summary,
+  :is(
+    .sidebar-settings,
+    .agent-memory-references,
+    .candidate-lab-launcher,
+    .candidate-lab-evidence-card,
+    .extension-format-guide,
+    .skill-builtin-workflow,
+    .skill-validator-details
+  ) > summary
+))::before {
+  content: "";
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-inline-end: 6px;
+  vertical-align: -1px;
+  background-color: currentColor;
+  opacity: 0.7;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2012%2012%27%3E%3Cpath%20d%3D%27M4.5%202.5%208%206l-3.5%203.5%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%271.6%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%2F%3E%3C%2Fsvg%3E") center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2012%2012%27%3E%3Cpath%20d%3D%27M4.5%202.5%208%206l-3.5%203.5%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%271.6%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%2F%3E%3C%2Fsvg%3E") center / 12px 12px no-repeat;
+  transform: rotate(var(--disclosure-chevron-turn, 0deg));
+  transition: transform 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(details > summary)::before {
+    transition: none;
+  }
 }

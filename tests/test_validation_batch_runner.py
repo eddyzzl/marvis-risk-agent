@@ -590,10 +590,8 @@ def test_two_models_complete_reports_only_after_explicit_confirmation(
     final_items = repo.list_items(batch.parent_task_id)
     assert repo.get_batch(batch.parent_task_id).status == "completed"
     assert [item.ordinal for item in final_items] == [1, 2]
-    assert all(
-        item.status in {"succeeded", "review_required"}
-        for item in final_items
-    )
+    assert all(item.status == "succeeded" for item in final_items)
+    assert task_repo.get_task(batch.parent_task_id).status is TaskStatus.SUCCEEDED
     assert Path(repo.get_batch(batch.parent_task_id).summary_path).is_file()
     for item in final_items:
         outputs = settings.tasks_dir / item.child_task_id / "outputs"
@@ -606,7 +604,7 @@ def test_two_models_complete_reports_only_after_explicit_confirmation(
     ]
     assert len(completed) == 1
     assert completed[0]["metadata"]["manual_review_count"] == sum(
-        item.status == "review_required" for item in final_items
+        item.outcome == "manual_review" for item in final_items
     )
     assert "summary_path" not in completed[0]["metadata"]
     assert str(settings.tasks_dir) not in str(completed[0]["metadata"])
@@ -801,6 +799,71 @@ def _write_agent_child_outputs(settings, child_task_id: str) -> None:
     for filename in ("validation_report.docx", "validation.xlsx"):
         with zipfile.ZipFile(output_dir / filename, "w") as archive:
             archive.writestr("placeholder.txt", "report")
+
+
+def test_delivered_batch_finishes_despite_manual_review_risk_verdict(tmp_path, monkeypatch):
+    settings, repo, batch = _batch_with_valid_child(tmp_path, child_count=2)
+    task_repo = TaskRepository(settings.db_path)
+    monkeypatch.setattr("marvis.validation_batch_runner.validation_batch_stress_risk", lambda _: "high")
+    for item in repo.list_items(batch.parent_task_id):
+        _write_agent_child_outputs(settings, item.child_task_id)
+        _advance_child_to_succeeded(task_repo, item.child_task_id)
+    final = sync_agent_batch_after_child_report(
+        settings=settings, child_task_id=repo.list_items(batch.parent_task_id)[0].child_task_id,
+    )
+    assert final.status == "completed"
+    assert task_repo.get_task(batch.parent_task_id).status is TaskStatus.SUCCEEDED
+    assert all(item.status == "succeeded" and item.outcome == "manual_review"
+               for item in repo.list_items(batch.parent_task_id))
+    completed = [message for message in task_repo.list_agent_messages(batch.parent_task_id)
+                 if message["stage"] == "batch_completed"]
+    assert completed[-1]["metadata"]["manual_review_count"] == 2
+
+
+def test_incomplete_child_report_is_not_recorded_completed(tmp_path):
+    from marvis.validation_batch_runner import ValidationBatchItemError, _record_completed_item
+
+    settings, repo, batch = _batch_with_valid_child(tmp_path)
+    [item] = repo.list_items(batch.parent_task_id)
+    _write_agent_child_outputs(settings, item.child_task_id)
+    (settings.tasks_dir / item.child_task_id / "outputs/validation.xlsx").unlink()
+    with pytest.raises(ValidationBatchItemError, match="报告产物不完整"):
+        _record_completed_item(batch_repo=repo, settings=settings, item=item,
+                               final_task=SimpleNamespace(status=TaskStatus.SUCCEEDED))
+    assert repo.get_item(item.id).status == "queued"
+
+
+def test_missing_batch_summary_does_not_complete_parent(tmp_path):
+    settings, repo, batch = _batch_with_valid_child(tmp_path)
+    [item] = repo.list_items(batch.parent_task_id)
+    repo.update_item(item.id, status="succeeded", stage="completed", outcome="manual_review",
+                     report_complete=True, finished=True)
+    final = _finalize_batch(
+        settings=settings, parent_task_id=batch.parent_task_id, batch_repo=repo,
+        task_repo=TaskRepository(settings.db_path), items=repo.list_items(batch.parent_task_id),
+        manual_review_base_url="", summary_writer=lambda **kwargs: None,
+    )
+    assert final.status == "failed"
+    assert TaskRepository(settings.db_path).get_task(batch.parent_task_id).status is TaskStatus.FAILED
+
+
+@pytest.mark.parametrize("status", [
+    TaskStatus.REVIEW_REQUIRED, TaskStatus.FAILED, TaskStatus.WRITING_ARTIFACTS,
+])
+def test_unfinished_child_cannot_reuse_previous_reports_to_complete_batch(tmp_path, status):
+    from marvis.validation_batch_runner import ValidationBatchItemError, _record_completed_item
+
+    settings, repo, batch = _batch_with_valid_child(tmp_path)
+    [item] = repo.list_items(batch.parent_task_id)
+    task_repo = TaskRepository(settings.db_path)
+    _write_agent_child_outputs(settings, item.child_task_id)
+    _advance_child_to_succeeded(task_repo, item.child_task_id)
+    task_repo.update_status(item.child_task_id, TaskStatus.REVIEW_REQUIRED,
+                            "report cancelled", reason_code="user_cancelled")
+    with pytest.raises(ValidationBatchItemError, match="报告尚未完成或已取消"):
+        _record_completed_item(batch_repo=repo, settings=settings, item=item,
+                               final_task=replace(task_repo.get_task(item.child_task_id), status=status))
+    assert repo.get_item(item.id).status == "queued"
 
 
 def test_agent_child_report_records_item_then_writes_n2_summary(tmp_path: Path):

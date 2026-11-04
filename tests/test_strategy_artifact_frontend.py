@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import textwrap
+from pathlib import Path
 
 from tests.static_stylesheets import read_browser_stylesheets
-
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "marvis" / "static"
@@ -288,14 +287,8 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
 
 
 def test_strategy_artifact_card_styles_live_in_driver_actions_family():
-    source = (STATIC / "js" / "v2" / "plan_rail_controller.js").read_text(
-        encoding="utf-8"
-    )
     css = read_browser_stylesheets(STATIC)
 
-    assert "生产已部署" not in source
-    assert "已在生产环境上线" not in source
-    assert "不代表生产环境已上线" in source
     assert ".strategy-artifacts-notice" in css
     assert ".strategy-artifact-list" in css
     assert ".strategy-artifact-row" in css

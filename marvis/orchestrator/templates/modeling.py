@@ -408,8 +408,9 @@ MODELING = WorkflowTemplate(
                 "properties": {"best_params": {"type": "object"}},
                 "required": ["best_params"],
             }),),
-            # 门:确认筛选出的特征集后再花算力调参(执行器暂停在本步前,驱动展示"特征筛选"产出)
-            needs_confirmation=True,
+            # D-4: confirming 「配置调参」 (budget editable there) starts tuning;
+            # this step shows the same configuration, so no second gate.
+            needs_confirmation=False,
             phase="建模",
         ),
         StepTemplate(
@@ -741,7 +742,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "properties": {"best_params": {"type": "object"}},
                 "required": ["best_params"],
             }),),
-            needs_confirmation=True,
+            needs_confirmation=False,  # D-4: confirmed once at 「配置调参」
             phase="建模",
         ),
         StepTemplate(

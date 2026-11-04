@@ -879,13 +879,49 @@ def _ground_strategy_sample_design_v2_request(
     if missing:
         fields = tuple(dict.fromkeys(missing))
         return _contracts._clarification(
-            "V2 样本设计草案存在无法逐字与原话核对的控制项："
-            + "、".join(fields)
-            + "。平台不会猜测、补写或静默降级。",
+            "样本设计里有几项在你的原话里找不到逐字依据："
+            + "、".join(_sample_design_control_labels(fields))
+            + "。平台不会猜测、补写或静默降级，请在消息里把这几项说清楚。",
             code="strategy_sample_design_v2_controls_not_grounded",
             fields=fields,
         )
     return result
+
+
+# Business names for the sample-design controls a user has to state
+# (2026-10-14 redesign, batch 3b). ``fields`` keeps the raw control paths for
+# the platform; only the prose uses these labels.
+_SAMPLE_DESIGN_CONTROL_LABELS = {
+    "maturity.status": "风险样本成熟度",
+    "maturity.performance_window_days": "表现期天数",
+    "drop_nan_labels": "空标签怎么处理",
+    "approval_population": "审批人群",
+    "risk_population": "风险人群",
+    "partitioning.column": "分段用的时间字段",
+    "partitioning.ranges.development": "开发集时间范围",
+    "partitioning.ranges.validation": "验证集时间范围",
+    "partitioning.ranges.oot": "OOT 时间范围",
+    "field_bindings.entity_field": "主体字段",
+    "field_bindings.time_field": "时间字段",
+    "field_bindings.group_field": "分组字段",
+    "field_bindings.month_field": "月份字段",
+    "field_bindings.weight_field": "权重字段",
+    "field_bindings.loan_amount_field": "放款金额字段",
+    "field_bindings.overdue_amount_field": "逾期金额字段",
+    "historical_score": "历史评分",
+}
+
+
+def _sample_design_control_labels(fields: tuple[str, ...]) -> list[str]:
+    labels: list[str] = []
+    for field in fields:
+        # ``field_bindings.time_field=apply_month`` means another column in the
+        # utterance also fits that role; the user-facing ask is the role itself.
+        base = field.split("=", 1)[0]
+        label = _SAMPLE_DESIGN_CONTROL_LABELS.get(base, "其他样本设置")
+        if label not in labels:
+            labels.append(label)
+    return labels
 
 def _sample_design_v2_has_chained_operation(utterance: str) -> bool:
     return _grounding._has_positive_chained_operation(

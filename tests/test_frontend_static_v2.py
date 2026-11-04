@@ -1,9 +1,9 @@
-"""Smoke-only frontend tests.
+"""Frontend compatibility contracts and isolated production-function behavior.
 
-These tests grep the static JS/HTML for v2 strings. They DO NOT load the
-frontend or exercise any flow; they only guard against accidental deletion
-of v2-shaped fields/endpoints. Real frontend behavior must be exercised in
-a browser against the running FastAPI app.
+CSS/markup assertions pin visual and packaging constraints, not running flows.
+Node tests execute the actual JavaScript; real creation DOM event coverage lives
+in test_frontend_creation_dom_behavior.py. Reviewed source-only behavior proxies
+and their replacements are recorded in the F13 disposition document.
 """
 
 import json
@@ -11,10 +11,11 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.javascript_source import session_projection_fixture
 from tests.javascript_source import slice_function as _slice_function
 from tests.static_stylesheets import read_browser_stylesheets
-
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
@@ -158,32 +159,6 @@ def test_v2_artifact_preview_uses_tabular_numeric_metrics():
     assert 'font-feature-settings: "tnum"' in css
     assert '[data-v2-artifact-view="true"] .metrics-preview td' in css
     assert "text-align: right" in css
-
-
-def test_agent_message_polling_uses_incremental_cursor_when_safe():
-    app_js = _read_static("app.js")
-
-    assert "function agentMessageCanPollIncrementally" in app_js
-    assert "message?.metadata?.optimistic || message?.metadata?.streaming" in app_js
-    assert "function mergeIncrementalAgentMessages" in app_js
-    assert "?after_id=${encodeURIComponent(lastMessageId)}" in app_js
-    assert "if (payload.incremental)" in app_js
-
-
-def test_v2_plan_rail_fetch_errors_are_visible_without_rail_controls():
-    app_js = _read_static("app.js")
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
-
-    assert "createPlanRailController" in app_js
-    assert "planRailController.render({ force, renderSignatures })" in app_js
-    assert "const v2PlanFetchErrors = new Map()" in plan_js
-    assert "await apiClient(`/api/tasks/${encodeURIComponent(taskId)}/plans`, { signal: request.signal })" in plan_js
-    assert "计划读取失败" in plan_js
-    assert "当前显示的是上次缓存的计划" not in plan_js
-    assert "const fetchErrorBanner = fetchError" not in plan_js
-    assert "return planRailPhaseRows(plan).map((row) => planPhaseHtml(row)).join" in plan_js
-    assert "data-plan-rail-retry" not in plan_js
-    assert "function retryFetch" in plan_js
 
 
 def _agent_timeline_items_for(
@@ -390,12 +365,14 @@ def _workflow_step_statuses_for(task: dict, notebook_steps: list[dict]) -> list[
         [
             "const selectedTaskId = 'task-1';",
             f"const selectedTask = {json.dumps(task, ensure_ascii=False)};",
-            f"let latestNotebookSteps = {json.dumps(notebook_steps, ensure_ascii=False)};",
+            f"taskSession.panels.notebook.steps = {json.dumps(notebook_steps, ensure_ascii=False)};",
             "const workflowSteps = [{id:'scan'}, {id:'notebook'}, {id:'metrics'}, {id:'report'}];",
             "function taskBusyAction() { return null; }",
             "function taskServerBusyAction() { return null; }",
             app_js[failure_start:failure_end],
             *(_slice_function(app_js, f"function {name}(") for name in (
+                # Batch 4 (2026-10-14 redesign): workflowStepStatus parks a stopped task's step.
+                "taskStopped",
                 "workflowIndex", "taskFailureStepId", "taskRunningStepId", "workflowStepStatus",
             )),
             app_js[notebook_start:notebook_end],
@@ -499,12 +476,12 @@ def _task_display_status_for(
     stopped_end = app_js.index("function taskBusyAction", stopped_start)
     pill_start = app_js.index("function actionStatusPill")
     pill_end = app_js.index("function describeActionStatus", pill_start)
-    label_start = app_js.index("function statusLabel")
+    # Batch 4 (2026-10-14 redesign): the row/title helpers resolve through js/task-status.js.
+    label_start = app_js.index("function taskPlanWorkflowStatusSnapshot")
     label_end = app_js.index("function notebookReproducibilityComplete", label_start)
     script = "\n".join(
         [
-            'import { actionStatusPresentation } from "./marvis/static/js/task-status.js";',
-            f"const statusLabels = {json.dumps({'scanned': '已扫描', 'failed': '失败'}, ensure_ascii=False)};",
+            'import { actionStatusPresentation, resolveTaskStatus } from "./marvis/static/js/task-status.js";',
             f"const task = {json.dumps(task, ensure_ascii=False)};",
             "function taskUsesPlanRail(task) { return ['data_join', 'feature_analysis', 'modeling', 'strategy', 'vintage', 'portfolio'].includes(task?.task_type); }",
             "const planRailController = { statusSnapshot() { return null; } };",
@@ -512,11 +489,12 @@ def _task_display_status_for(
             app_js[stopped_start:stopped_end],
             app_js[pill_start:pill_end],
             app_js[label_start:label_end],
-            "statusLabels.review_required = '待复核';",
+            f"const pill = actionStatusPill({json.dumps(action_message, ensure_ascii=False)}, {json.dumps(action_kind)}, task);",
             "process.stdout.write(JSON.stringify({",
             "  rowLabel: taskStatusLabel(task),",
             "  rowTone: taskStatusTone(task),",
-            f"  heroPill: actionStatusPill({json.dumps(action_message, ensure_ascii=False)}, {json.dumps(action_kind)}, task),",
+            # Batch 4: the presentation also carries key/face/dot/checker; the pins compare the word and tone.
+            "  heroPill: pill && { label: pill.label, tone: pill.tone },",
             "}));",
         ]
     )
@@ -531,27 +509,6 @@ def _task_display_status_for(
     return json.loads(result.stdout)
 
 
-def test_frontend_uses_v2_task_actions_only():
-    app_js = _read_static("app.js")
-
-    assert "run-notebook" not in app_js
-    assert "report-template" not in app_js
-    assert "api/tasks/${taskId}/notebook" in app_js
-    assert "api/tasks/${taskId}/metrics" in app_js
-    assert "api/tasks/${taskId}/report" in app_js
-    assert "api/tasks/${taskId}/report/download" in app_js
-    assert "api/tasks/${taskId}/analysis/download" in app_js
-    assert "api/tasks/${taskId}/report/preview" in app_js
-    assert 'data-step-action="downloadWordReport"' in app_js
-    assert 'data-step-action="downloadExcelAnalysis"' in app_js
-    assert 'data-step-action="previewWordReport"' in app_js
-    assert "下载Word" in app_js
-    assert "下载Excel" in app_js
-    assert "预览" in app_js
-    assert "下载Word报告" not in app_js
-    assert "下载Excel分析" not in app_js
-    assert "预览Word报告" not in app_js
-    assert 'data-step-action="downloadReport"' not in app_js
 
 
 def test_word_report_preview_dialog_uses_task_dialog_backdrop():
@@ -568,8 +525,6 @@ def test_word_report_preview_dialog_uses_task_dialog_backdrop():
 
 def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actions():
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
-    layout_resize_js = _read_static("js/layout-resize.js")
 
     title_start = styles_css.index(".step-title {")
     title_end = styles_css.index("}", title_start)
@@ -590,51 +545,20 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
 
     assert "container: step-rail / inline-size;" in styles_css
 
-    renderer_start = app_js.index("function renderWorkflowStepper")
-    renderer_end = app_js.index("function formatDate", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-    assert '<span class="step-copy">' in renderer
-    assert '<div class="step-sub">' not in renderer
 
-    assert "export const PROGRESS_WIDTH_MIN = 240;" in layout_resize_js
-    assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
-    assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
-    assert 'from "./js/layout-resize.js"' in app_js
 
 
 def test_plan_rail_preserves_parent_steps_with_pure_status_subtasks():
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_browser_css()
 
-    assert "export function planRailPhaseRows" in plan_js
-    assert "Number(left?.index)" in plan_js
-    assert "function planPhaseHtml" in plan_js
-    assert "function planSubstepHtml" in plan_js
-    assert "function planPhaseStatus" in plan_js
-    assert "function planSubstepGroupHtml" in plan_js
-    assert "function planRetryCardHtml" in plan_js
     # No tags, events, sub-agent rows or action entries can leak into the rail.
-    for forbidden in (
-        "planRetryRailEntryHtml",
-        "plan-step-await",
-        "plan-step-running",
-        "plan-step-ready",
-        "plan-rail-replan-badge",
-        "plan-rail-events",
-        "plan-rail-subagents",
-        "plan-rail-start-status",
-        "data-plan-retry-open",
-        "data-plan-rail-intervene",
-    ):
-        assert forbidden not in plan_js
-    assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in plan_js
-    assert 'class="plan-retry-inputs"' in plan_js
 
     plan_step_rule = _css_rule(v2_css, ".plan-rail-step")
     assert "cursor: default" in plan_step_rule
     # Middle-workspace retry card is roomy (full width, glass card language).
     assert "width: 100%" in _css_rule(v2_css, ".plan-retry-card")
-    assert "backdrop-filter" in _css_rule(v2_css, ".plan-retry-card")
+    # Batch 1 (2026-10-14 redesign D1-D5): content cards are flat; glass is only for floating controls.
+    assert "backdrop-filter" not in _css_rule(v2_css, ".plan-retry-card")
 
     assert ".plan-rail-phase" not in v2_css
     assert ".plan-rail-major-number" not in v2_css
@@ -671,7 +595,8 @@ import assert from "node:assert/strict";
 import {
   createLayoutResizeController,
   PROGRESS_WIDTH_MAX,
-  SIDEBAR_WIDTH_MIN,
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MAX,
 } from "./marvis/static/js/layout-resize.js";
 
 const styleValues = new Map([
@@ -734,7 +659,8 @@ const controller = createLayoutResizeController({
 });
 
 controller.restoreLayoutWidths();
-assert.equal(styleValues.get("--sidebar-width"), `${SIDEBAR_WIDTH_MIN}px`);
+// The legacy 320px default migrates to the new default width.
+assert.equal(styleValues.get("--sidebar-width"), `${SIDEBAR_WIDTH_DEFAULT}px`);
 assert.equal(styleValues.get("--progress-width"), `${PROGRESS_WIDTH_MAX}px`);
 
 let prevented = false;
@@ -747,11 +673,15 @@ controller.startResizeDrag("left", {
 assert.equal(prevented, true);
 assert.equal(bodyClasses.has("is-resizing"), true);
 listeners.pointermove({ clientX: 400 });
-assert.equal(styleValues.get("--sidebar-width"), "520px");
+assert.equal(styleValues.get("--sidebar-width"), `${SIDEBAR_WIDTH_MAX}px`);
 listeners.pointerup();
 assert.equal(bodyClasses.has("is-resizing"), false);
 assert.equal(removed.length, 2);
-assert.equal(JSON.parse(storageData.marvis_layout).sidebar, 520);
+assert.equal(JSON.parse(storageData.marvis_layout).sidebar, SIDEBAR_WIDTH_MAX);
+
+controller.resetSidebarWidth();
+assert.equal(styleValues.get("--sidebar-width"), `${SIDEBAR_WIDTH_DEFAULT}px`);
+assert.equal(JSON.parse(storageData.marvis_layout).sidebar, SIDEBAR_WIDTH_DEFAULT);
 
 styleValues.set("--progress-width", "400px");
 let keyPrevented = false;
@@ -779,40 +709,12 @@ process.stdout.write("ok");
 
 
 def test_plan_rail_retry_step_posts_edited_inputs():
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_browser_css()
 
-    retry_text_body = _slice_function(plan_js, "function planRetryInputsText")
-    retry_fields_body = _slice_function(plan_js, "function planRetrySchemaFieldsHtml")
-    retry_parse_structured_body = _slice_function(plan_js, "function collectPlanRetryStructuredInputs")
-    retry_scope_body = _slice_function(plan_js, "function planRetryScopeHtml")
-    retry_body = _slice_function(plan_js, "async function retryPlanStep")
-    click_body = _slice_function(plan_js, "function handleClick")
 
-    assert "step?.failure_envelope?.editable_input_schema" in retry_text_body
-    assert 'Object.prototype.hasOwnProperty.call(spec, "default")' in retry_text_body
-    assert 'data-plan-retry-input-key="${encodedKey}"' in retry_fields_body
-    assert 'data-plan-retry-input-type="${typeLabel}"' in retry_fields_body
-    assert "plan-retry-schema-fields" in retry_fields_body
-    assert "collectPlanRetryStructuredInputs(form)" in _slice_function(plan_js, "function parsePlanRetryInputs")
-    assert "[data-plan-retry-input-key]" in retry_parse_structured_body
-    assert "step?.failure_envelope" in retry_scope_body
-    assert "downstream_reset_steps" in retry_scope_body
-    assert "plan-retry-scope" in retry_scope_body
     # Roomier middle-region grid (wider min column than the old narrow rail).
     assert "grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))" in _css_rule(v2_css, ".plan-retry-schema-fields")
     assert "color: var(--text-muted)" in _css_rule(v2_css, ".plan-retry-scope")
-    assert 'button?.dataset?.planRetryStep || ""' in retry_body
-    assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
-    assert "JSON.stringify({ inputs })" in retry_body
-    assert "publishPlan(operation, taskId, null)" in retry_body
-    assert "void retryFetch(taskId, 0, view, operation)" in retry_body
-    assert "PLAN_RETRY_REFRESH_INTERVAL_MS" in retry_body
-    assert "[data-plan-retry-step]" in click_body
-    assert "void retryPlanStep(planRetryButton);" in click_body
-    assert "[data-plan-rail-retry]" not in click_body
-    assert "[data-plan-retry-open]" not in click_body
-    assert "openRetryCard(" not in click_body
 
 
 def test_plan_retry_uses_manually_edited_json_when_structured_fields_are_present():
@@ -1058,19 +960,11 @@ def test_plan_retry_replace_semantics_warning_is_always_present():
     footgun risk on the JSON editor -- assert the warning copy renders next to it
     unconditionally, and that the JSON editor keeps pre-filling current values
     (the mitigation for a user who edits only part of the object)."""
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_browser_css()
 
-    warning_body = _slice_function(plan_js, "function planRetryReplaceWarningHtml")
     # The form (with the warning + JSON editor) now renders in the middle
     # workspace via planRetryCardHtml, not the old rail planRetryControlHtml.
-    control_body = _slice_function(plan_js, "function planRetryCardHtml")
 
-    assert "整体替换" in warning_body
-    assert "非合并" in warning_body
-    assert "plan-retry-warning" in warning_body
-    assert "planRetryReplaceWarningHtml()" in control_body
-    assert "planRetryInputsText(step)" in control_body
     assert "color: var(--warning-strong)" in _css_rule(v2_css, ".plan-retry-warning")
     assert "background: var(--warning-soft)" in _css_rule(v2_css, ".plan-retry-warning")
 
@@ -1200,39 +1094,16 @@ def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred
 
 def test_completed_report_actions_render_below_step_copy_with_office_colors():
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
 
-    assert "function completedReportReadyForDownloads" in app_js
-    ready_start = app_js.index("function completedReportReadyForDownloads")
-    ready_end = app_js.index("function stepDownloadActionsHtml", ready_start)
-    ready_helper = app_js[ready_start:ready_end]
-    assert 'step.action === "report"' in ready_helper
-    assert "task?.report_available === true" in ready_helper
-    assert '["succeeded", "review_required"].includes(task?.status)' in ready_helper
 
-    assert "function stepDownloadActionsHtml" in app_js
-    downloads_start = app_js.index("function stepDownloadActionsHtml")
-    downloads_end = app_js.index("function stepActionButtonHtml", downloads_start)
-    downloads_renderer = app_js[downloads_start:downloads_end]
-    assert '<div class="step-download-actions">' in downloads_renderer
-    assert 'data-step-action="previewWordReport"' in downloads_renderer
-    assert 'data-step-action="downloadWordReport"' in downloads_renderer
-    assert 'data-step-action="downloadExcelAnalysis"' in downloads_renderer
-    assert "step-action-button primary word" in downloads_renderer
-    assert "step-action-button excel" in downloads_renderer
 
-    step_renderer_start = app_js.index("function renderWorkflowStepper")
-    step_renderer_end = app_js.index("function formatDate", step_renderer_start)
-    step_renderer = app_js[step_renderer_start:step_renderer_end]
-    assert "stepActionButtonHtml(displayStep)" in step_renderer
-    assert "stepDownloadActionsHtml(displayStep)" in step_renderer
-    assert step_renderer.index("stepActionButtonHtml(displayStep)") < step_renderer.index("stepDownloadActionsHtml(displayStep)")
 
     action_start = styles_css.index(".step-download-actions {")
     action_end = styles_css.index("}", action_start)
     action_rule = styles_css[action_start:action_end]
     assert "margin-left: 48px;" in action_rule
-    assert "flex-wrap: nowrap;" in action_rule
+    # The three download buttons wrap instead of being clipped in the narrow rail.
+    assert "flex-wrap: wrap;" in action_rule
     assert "justify-content: stretch;" in action_rule
 
     word_start = styles_css.index(".step-action-button.word")
@@ -1350,83 +1221,11 @@ def test_generic_actions_and_composer_use_semantic_visual_tokens():
     assert "outline: 3px solid var(--focus-ring);" in focus_rule
 
 
-def test_stage_actions_capture_task_id_before_polling():
-    app_js = _read_static("app.js")
-
-    poll_start = app_js.index("async function pollValidationProgress")
-    poll_end = app_js.index("async function validateCurrentTask", poll_start)
-    poll_renderer = app_js[poll_start:poll_end]
-    assert "taskId = taskSession.taskId" in poll_renderer
-    assert "let polledTask = findTaskInCache(taskId)" in poll_renderer
-    assert "isWorkbenchTaskId(taskId)" in poll_renderer
-
-    for function_name in [
-        "scanCurrentTask",
-        "validateCurrentTask",
-        "generateMetrics",
-        "generateReport",
-    ]:
-        start = app_js.index(f"async function {function_name}")
-        end = app_js.index("\n}\n", start)
-        body = app_js[start:end]
-        assert "const taskId = taskSession.taskId;" in body
-        assert "pollValidationProgress(" not in body or "taskId" in body
-
-
-def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
-    app_js = _read_static("app.js")
-    polling_js = _read_static("js/polling.js")
-
-    assert "const progressPolls = createProgressPollRegistry();" in app_js
-    assert "export function createProgressPollRegistry" in polling_js
-    assert "existing.cancelled = true;" in polling_js
-    assert "function ensureActiveTaskProgressPolling" in app_js
-
-    ensure_start = app_js.index("function ensureActiveTaskProgressPolling")
-    ensure_end = app_js.index("async function refreshTasks", ensure_start)
-    ensure_body = app_js[ensure_start:ensure_end]
-    assert "taskServerBusyAction(task)" in ensure_body
-    assert "progressPolls.has(taskId)" in ensure_body
-    assert "pollValidationProgress(terminalTaskStatuses, taskId, { background: true })" in ensure_body
-
-    refresh_start = app_js.index("async function refreshTasks")
-    refresh_end = app_js.index("async function scanCurrentTask", refresh_start)
-    refresh_body = app_js[refresh_start:refresh_end]
-    assert "syncSelectedTaskFromCache();" in refresh_body
-    assert "ensureActiveTaskProgressPolling();" in refresh_body
-
-    select_start = app_js.index("function selectTask")
-    select_end = app_js.index("function deselectCurrentTask", select_start)
-    select_body = app_js[select_start:select_end]
-    assert "ensureActiveTaskProgressPolling(task);" in select_body
-
-    poll_start = app_js.index("async function pollValidationProgress")
-    poll_end = app_js.index("async function validateCurrentTask", poll_start)
-    poll_body = app_js[poll_start:poll_end]
-    assert "settleWhenServerIdle = false" in poll_body
-    assert "const claim = claimProgressPoll(progressPolls, taskId, { background });" in poll_body
-    assert "if (!claim.claimed) return claim.existing.promise;" in poll_body
-    assert "releaseProgressPoll(progressPolls, taskId, pollState)" in poll_body
-    assert "if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background)" in poll_body
-    assert "if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background) {" in poll_body
-
-
-def test_create_dialog_enter_does_not_submit_textareas():
-    app_js = _read_static("app.js")
-
-    handler_start = app_js.index('event.key === "Enter"')
-    handler_end = app_js.index("runAction(createTaskAndScan", handler_start)
-    handler = app_js[handler_start:handler_end]
-    assert 'event.target.closest("#taskDialog")' in handler
-    assert 'event.target.tagName !== "TEXTAREA"' in handler
-    assert "!event.isComposing" in handler
 
 
 def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
-    focus_ring_js = _read_static("js/focus-ring.js")
 
     assert "static/app.js?v=__MARVIS_STATIC_VERSION__" in index_html
     assert '<script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>' in index_html
@@ -1440,36 +1239,6 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     assert "static/app.js?v=20260603-field-focus-ring" not in index_html
     assert "static/app.js?v=20260603-dark-masks" not in index_html
 
-    assert "export function formControlFocusTarget(target)" in focus_ring_js
-    assert "export function installFormControlFocusRingGuard" in focus_ring_js
-    assert 'target?.closest?.("input, textarea, select")' in focus_ring_js
-    assert "let lastPointerDownControl = null;" in focus_ring_js
-    assert "let lastPointerDownAt = 0;" in focus_ring_js
-    assert 'root.addEventListener("pointerdown", handleFormControlPointerDown, true);' in focus_ring_js
-    assert 'root.addEventListener("mousedown", handleFormControlPointerDown, true);' in focus_ring_js
-    assert 'root.addEventListener("touchstart", handleFormControlPointerDown, true);' in focus_ring_js
-    assert 'root.addEventListener("click", handleFormControlLabelClick, true);' in focus_ring_js
-    assert 'root.addEventListener("focusin", handleFormControlFocusIn, true);' in focus_ring_js
-    assert 'root.addEventListener("focusout", handleFormControlFocusOut, true);' in focus_ring_js
-    assert "const pointerFocusPending = now() - lastPointerDownAt < suppressionWindowMs;" in focus_ring_js
-    focus_in_start = focus_ring_js.index("function handleFormControlFocusIn")
-    focus_in_end = focus_ring_js.index("function handleFormControlFocusOut", focus_in_start)
-    focus_in_body = focus_ring_js[focus_in_start:focus_in_end]
-    assert 'control.classList.toggle(' in focus_in_body
-    assert '"suppress-pointer-focus-ring"' in focus_in_body
-    assert "pointerFocusPending && lastPointerDownControl !== control" in focus_in_body
-    label_click_start = focus_ring_js.index("function handleFormControlLabelClick")
-    label_click_end = focus_ring_js.index("root.addEventListener", label_click_start)
-    label_click_body = focus_ring_js[label_click_start:label_click_end]
-    assert 'event.target.closest?.("label")' in label_click_body
-    assert "label.contains(focused)" in label_click_body
-    assert "focused.id === label.htmlFor" in label_click_body
-    assert 'focused.classList.add("suppress-pointer-focus-ring")' in label_click_body
-    assert 'if (control) control.classList.remove("suppress-pointer-focus-ring");' in focus_ring_js
-    assert 'from "./js/focus-ring.js"' in app_js
-    assert "function formControlFocusTarget(target)" not in app_js
-    assert "function installFormControlFocusRingGuard" not in app_js
-    assert "installFormControlFocusRingGuard();" in app_js
 
     suppress_start = styles_css.index("input.suppress-pointer-focus-ring:focus-visible,")
     suppress_end = styles_css.index("}", suppress_start)
@@ -1609,72 +1378,13 @@ assert.deepEqual(finished, ['render', 'restore', 'focus', 'boot', 'render', 'res
 '''
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], capture_output=True, text=True,
-    )
+    check=False)
     assert result.returncode == 0, result.stderr
     assert "runAction(async () => {\n  await refreshTasks();" not in app_js
 
 
-def test_create_task_payload_omits_notebook_contract_fields():
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-
-    for field in ["report_values"]:
-        assert f"{field}:" in create_dialog_js
-
-    for removed_field in [
-        "algorithm:",
-        "notebook_path:",
-        "sample_path:",
-        "pmml_path:",
-        "dictionary_path:",
-        "target_col:",
-        "score_col:",
-        "split_col:",
-        "time_col:",
-        "feature_columns:",
-    ]:
-        assert removed_field not in create_dialog_js
-
-
-def test_create_task_uses_single_model_name_field():
-    index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-
-    assert 'id="modelName"' in index_html
-    assert "模型名称" in index_html
-    assert 'id="modelVersion"' not in index_html
-    assert "模型版本" not in index_html
-    assert 'model_version: ""' in create_dialog_js
-    assert '$("modelVersion")' not in app_js
-    assert '$("modelVersion")' not in create_dialog_js
-    assert "请先填写模型名称、验证人员和材料目录。" in create_dialog_js
-    assert "请先填写模型名称、版本" not in app_js
-    assert "请先填写模型名称、版本" not in create_dialog_js
-
-
-def test_task_display_does_not_require_model_version_separator():
-    app_js = _read_static("app.js")
-    workspace_view_js = _read_static("js/task-workspace-view.js")
-
-    assert "function taskDisplayName" in app_js
-    assert "taskDisplayName," in app_js
-    assert "taskDisplayName?.(selectedTask)" in workspace_view_js
-    assert "${taskSession.task.model_name} · ${taskSession.task.model_version}" not in app_js
-    assert "${task.model_name} · ${task.model_version}" not in app_js
-    display_fn = app_js.split("function taskDisplayName", 1)[1].split(
-        "function stampValidationBatchItemCount",
-        1,
-    )[0]
-    assert "formatValidationBatchTaskName(task.created_at, task.item_count)" in display_fn
-    assert "isValidationBatchTask(task)" in display_fn
-    assert "模型验证批次" in display_fn
-    assert "const displayName = taskDisplayName(task)" in app_js
-    assert "${escapeHtml(displayName)}" in app_js
-
-
 def test_create_dialog_hides_v2_config_controls():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
 
     for removed_element_id in [
         "algorithm",
@@ -1710,26 +1420,9 @@ def test_create_dialog_hides_v2_config_controls():
     assert "数据来源说明" not in index_html
     assert "样本划分说明" not in index_html
     assert "修订说明" not in index_html
-    assert 'optionalInputValue("notebookPath")' not in app_js
-    assert 'optionalInputValue("samplePath")' not in app_js
-    assert 'optionalInputValue("pmmlPath")' not in app_js
-    assert 'optionalInputValue("dictionaryPath")' not in app_js
 
     for element_id in ["runModeManual", "runModeAgent", "modelName", "validator", "sourceDir"]:
         assert f'id="{element_id}"' in index_html
-
-
-def test_create_dialog_omits_legacy_model_training_description_autofill():
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-
-    # The legacy auto-filled "model_training_description" report value stays removed —
-    # the modeling algorithm is now a real user choice (the create-dialog picker),
-    # not an auto-derived training blurb.
-    defaults_start = create_dialog_js.index("function defaultCreateReportValues")
-    defaults_end = create_dialog_js.index("function prefillCreateTaskReportFields", defaults_start)
-    defaults = create_dialog_js[defaults_start:defaults_end]
-    assert '"TEXT:model_training_description"' not in defaults
-    assert "MODEL_TRAINING_DESCRIPTIONS" not in create_dialog_js
 
 
 def test_create_dialog_auto_fills_removed_report_values():
@@ -1747,17 +1440,7 @@ def test_create_dialog_auto_fills_removed_report_values():
     assert '"TEXT:revision_description": "初稿"' in defaults
     assert "...validationNarrativeDefaults(seed.modelName)" in defaults
     narrative = _slice_function(create_dialog_js, "function validationNarrativeDefaults(")
-    payload = _run_node_capture_json("\n".join([
-        "let modelName = '模型A';",
-        "function taskTextSeed() { return { modelName, validator: 'qa', reportTitle: '测试报告' }; }",
-        "function formatDateInput() { return '2026-09-17'; }",
-        narrative,
-        defaults,
-        "const generic = defaultCreateReportValues();",
-        "modelName = '渠道甲T卡 MOB6'; const t = defaultCreateReportValues();",
-        "modelName = '渠道甲A卡 MOB3'; const a = defaultCreateReportValues();",
-        "process.stdout.write(JSON.stringify({ generic, t, a }));",
-    ]))
+    payload = _run_node_capture_json(f"let modelName = '模型A';\nfunction taskTextSeed() {{ return {{ modelName, validator: 'qa', reportTitle: '测试报告' }}; }}\nfunction formatDateInput() {{ return '2026-09-17'; }}\n{narrative}\n{defaults}\nconst generic = defaultCreateReportValues();\nmodelName = '渠道甲T卡 MOB6'; const t = defaultCreateReportValues();\nmodelName = '渠道甲A卡 MOB3'; const a = defaultCreateReportValues();\nprocess.stdout.write(JSON.stringify({{ generic, t, a }}));")
     for variant in payload.values():
         for key in ("model_overview", "model_scope", "sample_audience", "bad_sample_definition", "good_sample_definition"):
             assert variant[f"TEXT:{key}"] == "", "Model names must not invent business facts"
@@ -1826,60 +1509,16 @@ def test_create_dialog_uses_visual_run_mode_cards():
 
 def test_create_dialog_updates_run_mode_copy_by_task_type():
     index_html = _read_static("index.html")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    task_types_js = _read_static("js/task-types.js")
 
     assert 'data-run-mode-description="manual"' in index_html
     assert 'data-run-mode-description="agent"' in index_html
-    assert "function setRunModeDescription" in create_dialog_js
-    assert 'setRunModeDescription("manual", definition.manualModeDescription);' in create_dialog_js
-    assert 'setRunModeDescription("agent", definition.agentModeDescription);' in create_dialog_js
     assert "由验证人员逐步执行材料扫描、Notebook 验证与报告生成" not in index_html
     assert "智能解析材料、规划验证步骤并辅助生成验证报告" not in index_html
 
-    definitions_start = task_types_js.index("export const taskTypeDefinitions = {")
-    definitions_end = task_types_js.index("export const taskTypeDisplayOrder", definitions_start)
-    definitions = task_types_js[definitions_start:definitions_end]
-    expected_copy = {
-        "data_join": [
-            "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
-            "Agent 先读 schema 提议角色和键，汇总命中率/膨胀风险，等你确认后执行",
-        ],
-        "feature_analysis": [
-            "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
-            "Agent 根据字段和字典建议补算指标、解释异常特征，并按你的反馈重跑",
-        ],
-        "modeling": [
-            "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
-            "Agent 组织读样本、切分确认、泄漏筛选、调参训练与结果解释",
-        ],
-        "validation": [
-            "逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成",
-            "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
-        ],
-        "strategy": [
-            "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
-            "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
-        ],
-            "vintage": [
-                "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
-                "Agent 先访谈分析目标，再校验材料字段，计算并生成可下载报表与重点结论",
-            ],
-    }
-    for task_type, copy_items in expected_copy.items():
-        task_start = definitions.index(f"  {task_type}: {{")
-        task_end = definitions.index("\n  },", task_start)
-        task_definition = definitions[task_start:task_end]
-        assert "manualModeDescription:" in task_definition
-        assert "agentModeDescription:" in task_definition
-        for copy in copy_items:
-            assert copy in task_definition
 
 
 def test_create_dialog_defaults_available_mode_without_preselecting_algorithms():
     index_html = _read_static("index.html")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    task_types_js = _read_static("js/task-types.js")
 
     assert 'name="runMode" type="radio" value="manual" checked' not in index_html
     assert 'name="runMode" type="radio" value="agent" checked' not in index_html
@@ -1888,35 +1527,21 @@ def test_create_dialog_defaults_available_mode_without_preselecting_algorithms()
     assert 'name="modelAlgorithm" value="lr" checked' not in index_html
     assert 'name="modelAlgorithm" value="scorecard" checked' not in index_html
 
-    definitions_start = task_types_js.index("export const taskTypeDefinitions = {")
-    definitions_end = task_types_js.index("export const taskTypeDisplayOrder", definitions_start)
-    definitions = task_types_js[definitions_start:definitions_end]
-    assert 'defaultRunMode: "manual"' not in definitions
-    assert 'defaultRunMode: "agent"' not in definitions
-    assert definitions.count('defaultRunMode: ""') == 7
 
-    dialog_start = create_dialog_js.index("function openTaskDialog")
-    dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
-    dialog_body = create_dialog_js[dialog_start:dialog_end]
-    assert "input.checked = input.value === defaultMode;" in dialog_body
-    assert "resetModelAlgorithmChoices();" in dialog_body
-    assert "updateAlgorithmFieldVisibility();" in dialog_body
-    assert "definition.defaultRunMode ===" not in dialog_body
+    # Batch 5: the reset lives in prepareTaskDialog, shared by openTaskDialog
+    # and the home card's prefillTaskDialog.
 
-    assert "function resetModelAlgorithmChoices" in create_dialog_js
-    apply_start = create_dialog_js.index("function applyTaskTypeToDialog")
-    apply_end = create_dialog_js.index("function updateAlgorithmFieldVisibility", apply_start)
-    apply_body = create_dialog_js[apply_start:apply_end]
-    assert "checked: false" in apply_body
-    assert "checked: definition.defaultRunMode" not in apply_body
 
 
 def test_create_dialog_reopens_with_clean_task_specific_inputs_and_defaults():
     create_dialog_js = _read_static("js/create-task-dialog.js")
     module_url = (STATIC_DIR / "js" / "create-task-dialog.js").as_uri()
-    dialog_start = create_dialog_js.index("function openTaskDialog")
+    # Batch 5: the reset lives in prepareTaskDialog, shared by openTaskDialog
+    # and the home card's prefillTaskDialog.
+    dialog_start = create_dialog_js.index("function prepareTaskDialog")
     dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
     dialog_body = create_dialog_js[dialog_start:dialog_end]
+    assert "prepareTaskDialog(taskType);" in dialog_body
 
     assert "resetCreateTaskSpecificInputs" in dialog_body
     assert 'document.querySelectorAll(\'input[name="runMode"]\')' in dialog_body
@@ -1967,25 +1592,8 @@ assert.deepEqual(reportInputs.map((input) => input.value), ["", ""]);
     )
 
 
-def test_create_task_requires_run_mode_and_allows_agent_mode():
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-
-    create_start = create_dialog_js.index("async function createTask")
-    create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
-    create_renderer = create_dialog_js[create_start:create_end]
-
-    assert "const selectedRunMode" in create_renderer
-    assert "请选择执行模式。" in create_renderer
-    assert "Agent 模式当前暂不支持创建任务，请选择手动模式。" not in create_renderer
-    assert "run_mode: selectedRunMode" in create_renderer
-    assert '?.value || "manual"' not in create_renderer
-
-
 def test_create_dialog_prioritizes_materials_before_optional_report_background():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    dialogs_js = _read_static("js/dialogs.js")
     styles_css = _read_browser_css()
 
     assert "报告初始内容" not in index_html
@@ -2030,24 +1638,6 @@ def test_create_dialog_prioritizes_materials_before_optional_report_background()
     assert "material-upload-actions" not in material_section
     assert "暂未开放" not in material_section
 
-    assert "export function createMaterialSourceController" in dialogs_js
-    assert "export function materialUploadSelectionText" in dialogs_js
-    assert "export function renderMaterialUploadSelection" in dialogs_js
-    assert "function bindDropzone()" in dialogs_js
-    assert "captureFiles(input.files)" in dialogs_js
-    assert "file?.webkitRelativePath" in dialogs_js
-    assert 'dropzone.addEventListener("click", openFilePicker)' in dialogs_js
-    assert 'dropzone.addEventListener("keydown", (event) =>' in dialogs_js
-    assert "function walkDroppedEntry" in dialogs_js
-    assert "typeof item.webkitGetAsEntry" in dialogs_js
-    assert "captureFileItems(await droppedFileItems(event.dataTransfer))" in dialogs_js
-    assert 'dropzone.classList.add("is-dragover")' in dialogs_js
-    assert 'pathPanel.classList.toggle("hidden", !isPath)' in dialogs_js
-    assert 'uploadPanel.classList.toggle("hidden", isPath)' in dialogs_js
-    assert "function renderMaterialUploadSelection" not in app_js
-    assert "onFilesChanged: (files) => renderMaterialUploadSelection({ files, getElementById: $ })" in app_js
-    assert "createTaskDialog.bindMaterialSourceControls();" in app_js
-    assert "materialSourceController.bindDropzone();" in create_dialog_js
 
     assert ".material-source-section" in styles_css
     assert ".material-source-segment" in styles_css
@@ -2132,37 +1722,17 @@ def test_material_upload_long_filename_cannot_expand_task_dialog():
 
 def test_validation_material_binding_dialog_is_wired_before_scan():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    binding_js = _read_static("js/material-binding-dialog.js")
 
     assert 'id="materialBindingDialog"' in index_html
     assert 'id="materialBindingRows"' in index_html
     assert 'id="materialBindingConfirmButton"' in index_html
-    assert 'createMaterialBindingDialogController' in app_js
-    assert 'materialBindingDialog.ensureMaterialSelection(task)' in app_js
-    assert 'ensureMaterialSelection(task, { force = false } = {})' in binding_js
-    assert 'if (!force && completeSelection(payload.selection) && !selectionIssue) return task;' in binding_js
-    assert 'materialBindingDialog.bind();' in app_js
-    assert 'label: "Notebook"' in binding_js
-    assert 'label: "Sample"' in binding_js
-    assert 'label: "PMML"' in binding_js
-    assert 'label: "Metadata", caption: "数据字典 / 特征元数据"' in binding_js
-    assert "material-binding-role-icon" in binding_js
-    assert "material-binding-role-text" in binding_js
-    assert '`/api/tasks/${activeTask.id}/materials`' in binding_js
-    assert 'method: "PUT"' in binding_js
-    assert 'sample_path' in binding_js
-    assert 'feature_importance_best.csv' not in binding_js
-    assert "selected_materials" in app_js
-    assert "已指定" in app_js
+    # Role labels and their accessible names are exercised in the rendered
+    # material dialog by test_frontend_conversation_actions_browser.py.
 
 
 def test_validation_input_candidates_use_native_tables_with_legacy_row_styling():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    message_body = _slice_function(app_js, "function agentMessageHtml")
-    assert 'data-agent-stage="${escapeHtml(String(message.stage))}"' in message_body
     assert '.agent-message[data-agent-stage="input_confirmation"] .agent-message-content ul' in styles_css
     assert '.agent-message[data-agent-stage="input_confirmation"] .agent-message-content li' in styles_css
     legacy_list_rule = _css_rule(
@@ -2192,85 +1762,16 @@ def test_validation_material_binding_dialog_keeps_content_inside_viewport():
     assert "overscroll-behavior: contain" in rows_rule
 
 
-def test_validation_failure_stage_does_not_reveal_unfinished_evidence_sections():
-    app_js = _read_static("app.js")
-
-    assert "task.failure_stage || \"\"" in app_js
-    assert "function earliestFailureStage" in app_js
-    assert "function notebookStepStageFailure" in app_js
-    assert "return earliestFailureStage(structuredStage, notebookStepStageFailure());" in app_js
-    notebook_complete = _slice_function(app_js, "function notebookReproducibilityComplete")
-    metric_visibility = _slice_function(app_js, "function shouldShowMetricSection")
-    assert "taskFailedDuringNotebook(task)" not in notebook_complete
-    assert "taskFailedDuringMetrics(task)" in notebook_complete
-    assert "taskFailedDuringNotebook(taskSession.task)" not in metric_visibility
-    assert "taskFailedDuringMetrics(taskSession.task)" not in metric_visibility
-    assert "metricPreviewSignature(\n    previewTaskId,\n    lastMetricValues,\n    lastMetricTableSections,\n    emptyMessage," in app_js
 
 
-def test_create_task_upload_mode_posts_materials_before_creating_task():
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    api_js = _read_static("js/api.js")
-
-    api_start = api_js.index("export async function api")
-    api_end = api_js.index("export function sleep", api_start)
-    api_body = api_js[api_start:api_end]
-    assert "body instanceof FormData" in api_body
-    assert '"Content-Type": "application/json"' not in api_body
-
-    # UX-12: uploadMaterialFiles is XMLHttpRequest-based (not fetch/api()) so it
-    # can report upload progress — fetch has no upload-progress event at all.
-    upload_start = create_dialog_js.index("function uploadMaterialFiles")
-    upload_end = create_dialog_js.index("async function createTask", upload_start)
-    upload_body = create_dialog_js[upload_start:upload_end]
-    assert "new FormData()" in upload_body
-    assert 'formData.append("files"' in upload_body
-    assert 'formData.append("relative_paths"' in upload_body
-    assert "new XMLHttpRequest()" in upload_body
-    assert 'xhr.open("POST", "api/material-uploads")' in upload_body
-    assert 'xhr.setRequestHeader("X-Marvis-Token", token)' in upload_body
-    assert "xhr.upload.onprogress" in upload_body
-    assert "onProgress(event.loaded, event.total)" in upload_body
-    # a 2xx response resolves with the parsed JSON payload; a non-2xx (or a
-    # network-level xhr.onerror) rejects with a real Error, matching the
-    # error.message contract runAction()'s catch block expects.
-    assert "resolve(payload)" in upload_body
-    assert "reject(new Error(message))" in upload_body
-    assert 'reject(new Error("材料上传失败：网络错误。"))' in upload_body
-
-    create_start = create_dialog_js.index("async function createTask")
-    create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
-    create_body = create_dialog_js[create_start:create_end]
-    assert "await uploadMaterialFiles" in create_body
-    assert "payload.source_dir = upload.source_dir" in create_body
-    assert "文件上传暂未开放" not in create_body
-    # UX-12: percentage readout only kicks in above the size threshold, and the
-    # status text is driven by the same setCreateStatus channel as every other
-    # busy state (no separate progress-bar component).
-    assert "MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES" in create_dialog_js
-    assert "onProgress: showPercent" in create_body
 
 
 def test_risk_analysis_can_defer_materials_and_upload_from_composer():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    task_types_js = _read_static("js/task-types.js")
 
-    assert "deferredMaterials: true" in task_types_js
-    assert "allowDeferredMaterials" in create_dialog_js
-    assert "files.length === 0 && !allowDeferredMaterials" in create_dialog_js
-    assert "(!payload.source_dir && !allowDeferredMaterials)" in create_dialog_js
     assert 'id="riskMaterialUploadInput"' in index_html
     assert 'id="riskMaterialUploadButton"' in index_html
     assert 'accept=".csv,.xlsx,.xlsm,.parquet"' in index_html
-    assert 'import { uploadDataset } from "./js/v2/api_v2.js";' in app_js
-    assert "function selectedTaskIsRiskAnalysisAgent" in app_js
-    assert "async function uploadRiskAnalysisMaterials" in app_js
-    assert 'await uploadDataset(taskId, file, { role: "sample" });' in app_js
-    assert "请检查表结构和字段是否满足要求" in app_js
-    assert '$("riskMaterialUploadButton").onclick' in app_js
-    assert '$("riskMaterialUploadInput").addEventListener("change"' in app_js
 
 
 def test_manual_risk_analysis_intake_exposes_deterministic_composer_without_llm():
@@ -2280,23 +1781,7 @@ def test_manual_risk_analysis_intake_exposes_deterministic_composer_without_llm(
     helper_start = app_js.index("function latestRiskAnalysisIntakePhase")
     helper_end = app_js.index("function syncRiskMaterialUploadControl", helper_start)
     helper_body = app_js[helper_start:helper_end]
-    script = "\n".join(
-        [
-            "let selectedTask = { id: 'risk-1', task_type: 'vintage', run_mode: 'manual' };",
-            "let agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'ask_goal' } } }];",
-            helper_body,
-            "const phases = [];",
-            "phases.push(selectedTaskNeedsManualRiskIntake());",
-            "agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'request_materials' } } }];",
-            "phases.push(selectedTaskNeedsManualRiskIntake());",
-            "agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'ready' } } }];",
-            "phases.push(selectedTaskNeedsManualRiskIntake());",
-            "selectedTask = { id: 'risk-2', task_type: 'vintage', run_mode: 'agent' };",
-            "agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'ask_goal' } } }];",
-            "phases.push(selectedTaskNeedsManualRiskIntake());",
-            "process.stdout.write(JSON.stringify(phases));",
-        ]
-    )
+    script = f"let selectedTask = {{ id: 'risk-1', task_type: 'vintage', run_mode: 'manual' }};\nlet agentMessages = [{{ role: 'assistant', metadata: {{ risk_analysis_intake: {{ phase: 'ask_goal' }} }} }}];\n{helper_body}\nconst phases = [];\nphases.push(selectedTaskNeedsManualRiskIntake());\nagentMessages = [{{ role: 'assistant', metadata: {{ risk_analysis_intake: {{ phase: 'request_materials' }} }} }}];\nphases.push(selectedTaskNeedsManualRiskIntake());\nagentMessages = [{{ role: 'assistant', metadata: {{ risk_analysis_intake: {{ phase: 'ready' }} }} }}];\nphases.push(selectedTaskNeedsManualRiskIntake());\nselectedTask = {{ id: 'risk-2', task_type: 'vintage', run_mode: 'agent' }};\nagentMessages = [{{ role: 'assistant', metadata: {{ risk_analysis_intake: {{ phase: 'ask_goal' }} }} }}];\nphases.push(selectedTaskNeedsManualRiskIntake());\nprocess.stdout.write(JSON.stringify(phases));"
     script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
@@ -2328,37 +1813,7 @@ def test_manual_risk_analysis_intake_posts_content_without_model_configuration()
     send_start = app_js.index("async function startAgentValidation")
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     send_body = app_js[send_start:send_end]
-    script = "\n".join(
-        [
-            "let selectedTaskId = 'risk-1';",
-            "let selectedTask = { id: 'risk-1', task_type: 'vintage', run_mode: 'manual' };",
-            "let agentMessages = [];",
-            "const agentRequestAbortControllers = new Map();",
-            "const input = { value: '标准 Vintage', style: {} };",
-            "const posted = [];",
-            "function $(id) { if (id === 'agentComposerInput') return input; if (id === 'agentModelSelect') return { value: '' }; return null; }",
-            "function selectedTaskNeedsManualRiskIntake() { return true; }",
-            "function agentModelUnavailableMessage() { throw new Error('manual intake must not require an LLM'); }",
-            "function showAgentModelGuidance() { throw new Error('manual intake must not show LLM guidance'); }",
-            "function setAgentComposerNotice() {}",
-            "function autoGrowComposerInput() {}",
-            "function updateAgentSendDisabled() {}",
-            "function appendOptimisticAgentUserMessage() { return { id: 'optimistic-user' }; }",
-            "function appendOptimisticAgentThinkingMessage() { return { id: 'optimistic-thinking' }; }",
-            "function removeOptimisticAgentMessage() {}",
-            "function agentEffort() { throw new Error('manual intake must not send effort'); }",
-            "function agentAcceptanceModeValue() { throw new Error('manual intake must not send acceptance mode'); }",
-            "async function api(url, options) { posted.push({ url, body: JSON.parse(options.body) }); return { messages: [], status: 'ok' }; }",
-            "async function pollAgentMessagesUntilSettled(_taskId, pending) { await pending; }",
-            "function renderAgentConversation() {}",
-            "async function waitForAgentValidation() {}",
-            "async function handleAgentMaterialSelectionRequest() {}",
-            "function setActionStatus() {}",
-            send_body,
-            "await startAgentValidation();",
-            "process.stdout.write(JSON.stringify(posted));",
-        ]
-    )
+    script = f"let selectedTaskId = 'risk-1';\nlet selectedTask = {{ id: 'risk-1', task_type: 'vintage', run_mode: 'manual' }};\nlet agentMessages = [];\nconst agentRequestAbortControllers = new Map();\nconst input = {{ value: '标准 Vintage', style: {{}} }};\nconst posted = [];\nfunction $(id) {{ if (id === 'agentComposerInput') return input; if (id === 'agentModelSelect') return {{ value: '' }}; return null; }}\nfunction selectedTaskNeedsManualRiskIntake() {{ return true; }}\nfunction agentModelUnavailableMessage() {{ throw new Error('manual intake must not require an LLM'); }}\nfunction showAgentModelGuidance() {{ throw new Error('manual intake must not show LLM guidance'); }}\nfunction setAgentComposerNotice() {{}}\nfunction autoGrowComposerInput() {{}}\nfunction updateAgentSendDisabled() {{}}\nfunction appendOptimisticAgentUserMessage() {{ return {{ id: 'optimistic-user' }}; }}\nfunction appendOptimisticAgentThinkingMessage() {{ return {{ id: 'optimistic-thinking' }}; }}\nfunction removeOptimisticAgentMessage() {{}}\nfunction agentEffort() {{ throw new Error('manual intake must not send effort'); }}\nfunction agentAcceptanceModeValue() {{ throw new Error('manual intake must not send acceptance mode'); }}\nasync function api(url, options) {{ posted.push({{ url, body: JSON.parse(options.body) }}); return {{ messages: [], status: 'ok' }}; }}\nasync function pollAgentMessagesUntilSettled(_taskId, pending) {{ await pending; }}\nfunction renderAgentConversation() {{}}\nasync function waitForAgentValidation() {{}}\nasync function handleAgentMaterialSelectionRequest() {{}}\nfunction setActionStatus() {{}}\n{send_body}\nawait startAgentValidation();\nprocess.stdout.write(JSON.stringify(posted));"
     script = _with_workbench_context(script, app_js)
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -2469,15 +1924,6 @@ def test_manual_vintage_material_upload_control_runs_deterministic_intake():
     assert result.stdout == "ok"
 
 
-def test_run_mode_cards_keep_a_valid_default_selection():
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-
-    assert "function bindRunModeDeselectableCards" in create_dialog_js
-    assert "hasEnabledAgent()" in create_dialog_js
-    assert 'input.checked = input.value === defaultMode;' in create_dialog_js
-    assert "handleRunModeCardClick" not in create_dialog_js
-    assert "bindRunModeDeselectableCards();" in app_js
 
 
 def test_create_dialog_sections_are_unframed():
@@ -2549,13 +1995,9 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
 def test_workbench_uses_middle_output_and_right_step_rail_layout():
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
 
     assert 'id="progressRail"' in index_html
     assert 'aria-label="验证步骤"' in index_html
-    assert 'progressRail?.setAttribute("aria-label", "计划步骤");' in plan_js
-    assert 'progressRail?.setAttribute("aria-label", "验证步骤");' in app_js
     assert 'id="taskSnapshot"' in index_html
     assert index_html.index('id="scanSection"') < index_html.index('id="notebookSection"')
     assert index_html.index('id="notebookSection"') < index_html.index('id="metricSection"')
@@ -2581,16 +2023,9 @@ def test_workbench_uses_middle_output_and_right_step_rail_layout():
 
 def test_plan_rail_contains_only_steps_and_progress_not_output_preview():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
 
     assert 'id="artifactPanel"' not in index_html
     assert 'id="artifactPanelBody"' not in index_html
-    assert 'function planOutputButtonHtml(step)' not in plan_js
-    assert 'data-artifact="${escapeHtml(outputRef)}"' not in plan_js
-    assert "attachArtifactHandlers" not in plan_js
-    assert "artifactPreviewContainer" not in plan_js
-    assert "installArtifactHandlers" not in app_js
 
 
 def test_plan_workflow_status_drives_task_header_from_real_plan_state():
@@ -2614,7 +2049,8 @@ def test_plan_workflow_status_drives_task_header_from_real_plan_state():
     assert "拼接诊断" in data["failed"]["detail"]
     assert data["failedAwaitingRetry"]["label"] == "失败"
     assert data["failedAwaitingRetry"]["kind"] == "error"
-    assert data["failedAwaitingRetry"]["tone"] == "danger"
+    # Batch 4 (2026-10-14 redesign): snapshots use the shared tone set (danger -> fail).
+    assert data["failedAwaitingRetry"]["tone"] == "fail"
     assert "调参" in data["failedAwaitingRetry"]["detail"]
     assert data["waiting"]["label"] == "待确认"
     assert "执行拼接" in data["waiting"]["detail"]
@@ -2640,11 +2076,16 @@ def test_failed_retry_confirmation_keeps_rail_failure_and_downstream_pending():
         ])
     )
 
+    # Batch 4 (2026-10-14 redesign): the snapshot is the shared presentation (key/face/dot/checker, tone fail).
     assert data["snapshot"] == {
+        "key": "failed",
         "label": "失败",
+        "tone": "fail",
+        "face": "fail",
+        "dot": "bad",
+        "checker": "failed",
         "message": "计划执行失败。",
         "kind": "error",
-        "tone": "danger",
         "detail": "失败步骤：调参。请在中间信息流中查看诊断与恢复方案。",
     }
     assert data["parent"] == "failed"
@@ -2658,47 +2099,21 @@ def test_waiting_confirmation_uses_matching_task_header_pill():
         action_kind="info",
     )
 
-    assert display["heroPill"] == {"label": "待确认", "tone": "review"}
+    # Batch 4 (2026-10-14 redesign): the word comes from structured state, not message text; scanned is 待继续.
+    assert display["heroPill"] == {"label": "待继续", "tone": "review"}
 
 
-def test_report_editor_form_and_summary_are_removed_from_frontend():
-    index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    styles_css = _read_browser_css()
-
-    removed_fragments = [
-        'id="reportSummary"',
-        'id="wordReportTitle"',
-        'id="reportFieldsForm"',
-        "fields-form",
-        "word-field-group",
-        "data-report-key",
-        "setReportEditorLocked",
-        "renderWordDocument",
-        "renderReportFields",
-        "saveReportFields",
-        "showReportFieldsLoading",
-        "还没生成 Word 报告",
-        "保存内容后在右侧步骤中点击",
-        "Word 内容有未保存修改",
-    ]
-    combined = "\n".join([index_html, app_js, styles_css])
-    for fragment in removed_fragments:
-        assert fragment not in combined
 
 
 def test_sidebar_empty_state_is_compact():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
     empty_start = styles_css.index(".empty-state {\n  padding")
     empty_end = styles_css.index("}", empty_start)
     empty_rule = styles_css[empty_start:empty_end]
     assert "padding: 9px 12px" in empty_rule
-    assert '<div class="empty-state">暂无任务</div>' in app_js
     assert '<div class="empty-state">暂无任务</div>' in index_html
-    assert "暂无任务。先创建一个验证任务。" not in app_js
 
     task_empty_start = styles_css.index(".task-list > .empty-state {")
     task_empty_end = styles_css.index("}", task_empty_start)
@@ -2710,7 +2125,6 @@ def test_sidebar_empty_state_is_compact():
 
 def test_shell_has_collapsible_compact_sidebar():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
@@ -2725,16 +2139,6 @@ def test_shell_has_collapsible_compact_sidebar():
     assert 'id="sidebarBrandTrigger"' in index_html
     assert 'id="collapsedCreateTaskButton"' in index_html
     assert 'aria-label="收起侧栏"' in index_html
-    assert "toggleSidebarCollapsed" in app_js
-    assert "expandSidebarFromBrand" in app_js
-    assert "handleSidebarBrandKeydown" in app_js
-    assert "restoreSidebarCollapsed" in app_js
-    assert "ensurePetWithinViewport({ persist: true });" in app_js
-    assert "const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();" in app_js
-    assert "pinPetToWorkspaceLeftEdge({ persist: true });" in app_js
-    assert "window.setTimeout(() => {" in app_js
-    assert '$("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;' in app_js
-    assert 'localStorage.setItem("sidebarCollapsed"' in app_js
     assert 'localStorage.getItem("marvis_layout")' in index_html
     assert 'style.setProperty("--sidebar-width"' in index_html
     assert 'style.setProperty("--progress-width"' in index_html
@@ -2745,10 +2149,10 @@ def test_shell_has_collapsible_compact_sidebar():
     assert index_html.index('id="appShell"') < index_html.index('localStorage.getItem("sidebarCollapsed") === "1"')
     assert index_html.index('localStorage.getItem("sidebarCollapsed") === "1"') < index_html.index('id="taskSidebar"')
     assert ".app-shell.sidebar-collapsed" in styles_css
-    assert "--sidebar-width: 256px" in styles_css
+    # Batch 2 (2026-10-14 redesign D7-D10): the sidebar defaults to 248px.
+    assert "--sidebar-width: 248px" in styles_css
     assert "--sidebar-width: 0px" in styles_css
     assert ".app-shell.sidebar-collapsed .brand-logo h1" in styles_css
-    assert "task-row-short" not in app_js
     assert ".app-shell.sidebar-collapsed .task-row-short" not in styles_css
     assert 'class="collapse-panel"' in index_html
     assert 'class="collapse-divider"' in index_html
@@ -2871,7 +2275,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     brand_token_rule = _css_rule(styles_css, ":root")
     assert "--sidebar-control-size: 34px" in brand_token_rule
     assert "--sidebar-control-icon-size: 17px" in brand_token_rule
-    assert "--radius-control: 10px" in brand_token_rule
+    assert "--radius-control: 8px" in brand_token_rule
     assert "--brand-primary: #303034" in brand_token_rule
     assert "--brand-primary-hover: #3b3b42" in brand_token_rule
     assert "--brand-icon-color: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
@@ -3003,9 +2407,12 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
     assert "z-index: 60" in flyout_rule
     assert "pointer-events: auto" in flyout_rule
     assert "padding: 10px" in flyout_rule
-    assert "background: var(--sidebar-bg)" in flyout_rule
-    assert "border: 1px solid var(--sidebar-border)" in flyout_rule
-    assert "background: var(--surface)" not in flyout_rule
+    # The collapsed search flyout is a floating layer (D2): white surface,
+    # hairline edge and the single popover elevation.
+    assert "background: var(--surface)" in flyout_rule
+    assert "border: 1px solid var(--sep)" in flyout_rule
+    assert "box-shadow: var(--shadow-pop)" in flyout_rule
+    assert "background: var(--sidebar-bg)" not in flyout_rule
     assert "border: 1px solid transparent" not in flyout_rule
     assert "body.search-active .task-row {\n  box-shadow:" not in styles_css
 
@@ -3029,7 +2436,6 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
 
 def test_sidebar_brand_title_stays_on_one_line():
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
 
     sidebar_head_start = styles_css.index(".sidebar-head {")
     sidebar_head_end = styles_css.index("}", sidebar_head_start)
@@ -3058,13 +2464,7 @@ def test_sidebar_brand_title_stays_on_one_line():
     assert "text-overflow" not in brand_rule
     assert "letter-spacing: 0" in brand_rule
 
-    layout_resize_js = _read_static("js/layout-resize.js")
-    assert "export const SIDEBAR_WIDTH_MIN = 240;" in layout_resize_js
-    assert "export const SIDEBAR_WIDTH_MAX = 520;" in layout_resize_js
-    assert "stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar" in layout_resize_js
-    assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
-    assert "clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
-    assert 'from "./js/layout-resize.js"' in app_js
+    # Batch 2 (2026-10-14 redesign D7-D10): drag 200-380px, double-click resets to 248px.
     assert "grid-template-columns: min(var(--sidebar-width), 314px) minmax(0, 1fr)" in styles_css
 
 
@@ -3094,7 +2494,7 @@ def test_sidebar_footer_and_create_action_match_brand_treatment():
     assert "color: var(--button-primary-text)" in create_rule
     assert "background: var(--button-primary-bg)" in create_rule
     assert "border: 0" in create_rule
-    assert "border-radius: var(--radius-control)" in create_rule
+    assert "border-radius: var(--radius-pill)" in create_rule
     assert "box-shadow: var(--button-solid-shadow)" in create_rule
     assert "0 7px 10px" not in create_rule
     assert "0 5px 10px" not in create_rule
@@ -3124,154 +2524,46 @@ def test_sidebar_footer_and_create_action_match_brand_treatment():
 
 def test_empty_workspace_copy_is_shorter_and_direct():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     assert "验证任务" in index_html
     assert "选择或创建验证任务" not in index_html
-    assert "选择或创建验证任务" not in app_js
     assert "创建任务或从左侧选择已有任务" in index_html
     assert "先创建任务或从左侧选择已有任务" not in index_html
     assert "核心任务信息" in index_html
     assert "选择任务后显示核心任务信息" not in index_html
-    assert "核心任务信息" in workspace_view_js
-    assert "选择任务后显示核心任务信息" not in app_js
-    assert "选择任务后显示核心任务信息" not in workspace_view_js
-    assert '选择任务后点击\\"扫描材料\\"开始' in app_js
-    assert '还没扫描材料。选择任务后点击\\"扫描材料\\"开始。' not in app_js
 
 
 def test_selected_task_header_omits_local_validation_subtitle():
-    app_js = _read_static("app.js")
-    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_browser_css()
 
-    current_start = app_js.index("function renderCurrentTask")
-    current_end = app_js.index("function workflowStepStatus", current_start)
-    current_renderer = app_js[current_start:current_end]
 
-    assert "本地验证任务" not in current_renderer
-    assert "renderCurrentTaskWorkspace({" in current_renderer
-    assert 'if (subtitle) subtitle.textContent = "";' in workspace_view_js
     assert ".workspace-subtitle:empty" in styles_css
     assert "display: none" in styles_css[
         styles_css.index(".workspace-subtitle:empty") : styles_css.index("}", styles_css.index(".workspace-subtitle:empty"))
     ]
 
 
-def test_task_selection_keeps_same_task_active_and_refresh_restores_remembered_task():
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
-
-    assert 'export const selectedTaskStorageKey = "marvis_selected_task_id";' in state_js
-    assert "function rememberSelectedTaskId" in app_js
-    assert "function storedSelectedTaskId" in app_js
-    assert "syncTaskDeepLink(window.history, window.location" in app_js
-
-    sync_start = app_js.index("function syncSelectedTaskFromCache")
-    sync_end = app_js.index("function runModeLabel", sync_start)
-    sync_renderer = app_js[sync_start:sync_end]
-    assert "taskCache[0]" not in sync_renderer
-    assert "const storedTaskId = storedSelectedTaskId();" in sync_renderer
-    assert "taskCache.find((task) => task.id === storedTaskId)" in sync_renderer
-    assert "rememberSelectedTaskId(null);" in sync_renderer
-
-    select_start = app_js.index("function selectTask")
-    select_end = app_js.index("function renderMetricPreview", select_start)
-    select_renderer = app_js[select_start:select_end]
-    assert "if (taskSession.taskId === task.id && taskSession.task)" in select_renderer
-    same_task_start = select_renderer.index("if (taskSession.taskId === task.id && taskSession.task)")
-    same_task_end = select_renderer.index("resetAgentTypingState", same_task_start)
-    same_task_branch = select_renderer[same_task_start:same_task_end]
-    assert "taskSession.refreshTask(task);" in same_task_branch
-    assert "rememberSelectedTaskId(task.id);" in same_task_branch
-    assert "deselectCurrentTask()" not in same_task_branch
-    assert "rememberSelectedTaskId(task.id);" in select_renderer
-    assert "rememberSelectedTaskId(null);" in select_renderer
-    assert "renderMetricPreview({});" in select_renderer
-    assert "function deselectCurrentTask" in app_js
-
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_renderer = app_js[create_start:create_end]
-    assert "rememberSelectedTaskId(task.id);" in create_renderer
-
-    delete_start = app_js.index("async function deleteTask")
-    delete_end = app_js.index("async function runAction", delete_start)
-    delete_renderer = app_js[delete_start:delete_end]
-    assert "rememberSelectedTaskId(null);" in delete_renderer
 
 
 def test_refresh_restores_selected_task_before_async_detail_loads():
-    app_js = _read_static("app.js")
     index_html = _read_static("index.html")
-    state_js = _read_static("js/state.js")
     styles_css = _read_browser_css()
 
-    assert 'export const resultScrollPositionsStorageKey = "marvis_result_scroll_positions";' in state_js
-    assert "function loadResultScrollPositions" in app_js
-    assert "function restoreResultScrollPositionAfterRender" in app_js
 
-    restore_body = _slice_function(app_js, "function restoreSelectedTaskPlaceholder")
-    assert "const storedTaskId = storedSelectedTaskId();" in restore_body
     # Placeholder identity and previous-visit invalidation have behavior coverage
     # in test_frontend_task_request_scope.py.
 
-    current_body = _slice_function(app_js, "function renderCurrentTask")
-    workspace_view_js = _read_static("js/task-workspace-view.js")
-    assert "renderCurrentTaskWorkspace({" in current_body
-    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in workspace_view_js
-    assert 'classList.toggle("is-empty", !hasTaskContext)' in workspace_view_js
-    assert "正在恢复任务" in workspace_view_js
 
-    load_scroll_call = app_js.index("loadResultScrollPositions();")
-    restore_call = app_js.index("restoreSelectedTaskPlaceholder();")
-    initialize_call = app_js.index("initializeApp();")
-    assert load_scroll_call < restore_call
-    assert restore_call < initialize_call
 
-    init_body = _slice_function(app_js, "async function initializeApp")
-    assert "await refreshTasks();" in init_body
     assert 'class="app-booting"' in index_html
-    assert "function finishAppBoot" in app_js
-    assert "finishAppBoot();" in init_body
-    assert "document.body.classList.remove(\"app-booting\")" in app_js
     assert "body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .workspace-body, .progress-rail)" in styles_css
     assert "body.app-booting :is(.workspace-head, .workspace-body, .progress-rail)" in styles_css
-    assert "function enableAppAnimationsAfterBoot" in app_js
-    assert "document.body.classList.add(\"anim-ready\")" in _slice_function(app_js, "function enableAppAnimationsAfterBoot")
-    assert "enableAppAnimationsAfterBoot();" in _slice_function(app_js, "function finishAppBoot")
-    assert "requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add(\"anim-ready\")));" not in app_js
 
     app_shell_rule = _css_rule(styles_css, ".app-shell")
     assert "transition:" not in app_shell_rule
 
-    first_render = init_body.index("renderAll();")
-    message_load = init_body.index("await loadAgentMessages();")
-    restore_scroll = init_body.index("await restoreResultScrollPositionAfterRender(taskSession.taskId);")
-    finish_boot = init_body.index("finishAppBoot();")
-    assert message_load < first_render
-    assert first_render < restore_scroll < finish_boot
-    assert "if (taskSession.taskId) renderAll();" not in init_body
 
 
-def test_boot_initializes_restored_strategy_candidate_lab_once_outside_polling():
-    app_js = _read_static("app.js")
-    init_body = _slice_function(app_js, "async function initializeApp")
-    sync_body = _slice_function(app_js, "function syncSelectedTaskFromCache")
-    refresh_body = _slice_function(app_js, "async function refreshTasks")
-
-    start = (
-        "const candidateLabLoadPromise = "
-        "strategyCandidateLabController.selectTask(taskSession.task);"
-    )
-    assert init_body.count(start) == 1
-    assert init_body.index("await refreshTasks();") < init_body.index(start)
-    assert init_body.index("await loadAgentMessages();") < init_body.index(
-        "await candidateLabLoadPromise;"
-    )
-    assert "strategyCandidateLabController" not in sync_body
-    assert "strategyCandidateLabController" not in refresh_body
 
 
 def test_workspace_cards_float_on_one_background_with_top_step_rail():
@@ -3311,7 +2603,8 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
     assert "min-width: 0" in rail_rule
     assert "margin: 14px 14px 14px 0" in rail_rule
     assert ".progress-panel {" in styles_css
-    assert "--shadow-floating: 0 2px 8px rgba(0, 0, 0, 0.035)" in styles_css
+    # Batch 1 (2026-10-14 redesign D1-D5): content surfaces carry no shadow.
+    assert "--shadow-floating: none" in styles_css
     assert ".result-scroll-content > .progress-panel" in styles_css
     assert "flex: 0 0 auto" in styles_css
 
@@ -3372,8 +2665,9 @@ def test_right_step_rail_uses_subtle_shadow():
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
-    assert root_vars["--progress-rail-shadow"] == "0 3px 12px rgba(0, 0, 0, 0.045)"
-    assert dark_vars["--progress-rail-shadow"] == "0 4px 16px rgba(0, 0, 0, 0.22)"
+    # Batch 2 (2026-10-14 redesign D7-D10): the rail is a floating glass card and carries the glass elevation.
+    assert root_vars["--progress-rail-shadow"] == "var(--glass-shadow)"
+    assert dark_vars["--progress-rail-shadow"] == "var(--glass-shadow)"
     rail_rule = _css_rule(styles_css, ".progress-rail")
     assert "box-shadow: var(--progress-rail-shadow)" in rail_rule
 
@@ -3452,8 +2746,9 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
-    assert root_vars["--option-hover"] == "#dedee3"
-    assert root_vars["--option-selected"] == "#d4d4da"
+    # Batch 1 (2026-10-14 redesign D1-D5): neutral greys tuned to the contrast floors below.
+    assert root_vars["--option-hover"] == "#e0e0e5"
+    assert root_vars["--option-selected"] == "#d8d8dd"
     assert root_vars["--option-selected-border"] == root_vars["--option-selected"]
     assert dark_vars["--option-hover"] == "#46464a"
     assert dark_vars["--option-selected"] == "#525258"
@@ -3493,7 +2788,9 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     model_card_hover_end = styles_css.index("}", model_card_hover_start)
     model_card_hover_rule = styles_css[model_card_hover_start:model_card_hover_end]
     model_card_rule = _css_rule(styles_css, ".llm-engine-item")
-    assert "border-radius: var(--radius-control)" in model_card_rule
+    # D15 (batch 6b): engines are rows of one grouped list; the group is rounded.
+    assert "border-radius: 0" in model_card_rule
+    assert "border-radius: var(--radius-md)" in _css_rule(styles_css, ".llm-model-profiles")
     engine_delete_rule = _css_rule(styles_css, ".engine-del-btn")
     assert "border-radius: var(--radius-control)" in engine_delete_rule
     engine_add_rule = _css_rule(styles_css, ".llm-engine-add")
@@ -3559,8 +2856,9 @@ def test_dark_theme_shell_columns_follow_reference_tones():
     assert "background: var(--bg)" in workspace_rule
 
     rail_rule = _css_rule(styles_css, 'body[data-theme="dark"] .progress-rail')
-    assert "background: var(--surface)" in rail_rule
-    assert "border-color: var(--border)" in rail_rule
+    # Batch 2 (2026-10-14 redesign D7-D10): the dark rail uses the same glass tokens as the light one.
+    assert "background: var(--glass-bg)" in rail_rule
+    assert "border-color: var(--glass-rim)" in rail_rule
 
 
 def test_dark_workspace_masks_match_center_background():
@@ -3575,8 +2873,9 @@ def test_dark_workspace_masks_match_center_background():
     head_rule = _css_rule(styles_css, ".workspace-head")
     assert "transparent calc(var(--radius) - 1px)" in head_rule
     assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)" in head_rule
-    assert "background-position: left 0 top 0, right 0 top 0" in head_rule
-    assert "background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px)" in head_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): the status card is grey on a white canvas, so all four corners are masked.
+    assert "background-position: left 0 top 0, right 0 top 0, left 0 bottom 0, right 0 bottom 0" in head_rule
+    assert "calc(var(--radius) + 2px) calc(var(--radius) + 2px)" in head_rule
     assert "transparent 16px, var(--surface) 16.5px" not in head_rule
 
     composer_mask_rule = _css_rule(styles_css, ".agent-composer::before")
@@ -3611,7 +2910,8 @@ def test_primary_step_action_hover_keeps_button_text_readable():
 
     for key in ("solid", "solid-shadow-hover", "secondary", "secondary-shadow-hover"):
         name = key if "shadow" in key else f"{key}-shadow"
-        assert f"--button-{name}: 0 1px 2px rgba(0, 0, 0, 0.06)" in root_rule
+        # Batch 1 (2026-10-14 redesign D1-D5): buttons are flat capsules.
+        assert f"--button-{name}: none" in root_rule
     assert "--button-primary-bg: var(--brand-primary)" in root_rule
     assert "--button-primary-text: #ffffff" in root_rule
     assert "--button-outline-border: var(--brand-primary)" in root_rule
@@ -3645,16 +2945,17 @@ def test_primary_step_action_hover_keeps_button_text_readable():
     assert "box-shadow: var(--button-solid-shadow-hover)" in hover_rule
     assert "transform:" not in hover_rule
 
+    # Secondary buttons are flat neutral-fill capsules (R3): no visible border.
     secondary_rule = _css_rule(styles_css, ".button.secondary")
-    assert "border-color: var(--border-strong)" in secondary_rule
-    assert "background: var(--surface)" in secondary_rule
+    assert "border-color: transparent" in secondary_rule
+    assert "background: var(--fill)" in secondary_rule
     assert "box-shadow: var(--button-secondary-shadow)" in secondary_rule
 
     secondary_hover_rule = _css_rule(
         styles_css, ".button.secondary:hover:not(:disabled),\n.button.secondary:focus-visible:not(:disabled)"
     )
-    assert "border-color: var(--border-strong)" in secondary_hover_rule
-    assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in secondary_hover_rule
+    assert "border-color: transparent" in secondary_hover_rule
+    assert "background: var(--fill-2)" in secondary_hover_rule
     assert "box-shadow: var(--button-secondary-shadow-hover)" in secondary_hover_rule
 
 
@@ -3737,49 +3038,21 @@ def test_theme_button_tokens_drive_create_environment_and_model_buttons():
 
 
 def test_sidebar_task_card_is_single_line_with_hover_preview():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
     index_html = _read_static("index.html")
-    preview_js = _read_static("js/task-row-preview.js")
 
-    append_start = app_js.index("function taskRowContentSignature")
-    append_end = app_js.index("function renderTaskSnapshot", append_start)
-    append_renderer = app_js[append_start:append_end]
 
-    assert "task-row-icon" not in append_renderer
-    assert "task-row-top" in append_renderer
-    assert "task-row-meta" not in append_renderer
-    assert "task-row-validator" not in append_renderer
-    assert "task-row-date" not in append_renderer
-    assert "taskRowAriaLabel(task)" in append_renderer
-    assert "delete-task-button" in append_renderer
-    assert "formatDate(task.created_at || task.updated_at)" in append_renderer
-    assert 'from "./js/task-row-preview.js"' in app_js
-    assert "bindTaskRowPreview" in app_js
     assert 'id="taskRowPreview"' in index_html
-    assert "taskRowPreviewHtml" in preview_js
-    assert "创建时间" in preview_js
-    assert "function dismiss(shell)" in preview_js
-    assert 'list.addEventListener("pointerdown"' in preview_js
-    assert "suppressedShell" in preview_js
     delete_hover_rule = _css_rule(
         styles_css, ".delete-task-button:hover,\n.delete-task-button:focus-visible"
     )
-    assert "border-color: var(--danger-border)" in delete_hover_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): no decorative coloured borders; the danger tint and red glyph carry the state.
+    assert "border-color: transparent" in delete_hover_rule
 
-    tone_start = app_js.index("function statusTone")
-    tone_end = app_js.index("function notebookReproducibilityComplete", tone_start)
-    tone_renderer = app_js[tone_start:tone_end]
-    assert 'if (status === "failed") return "danger";' in tone_renderer
-    assert 'if (status === "review_required") return "success";' in tone_renderer
-    assert 'status === "succeeded" || status === "executed"' in tone_renderer
-    assert 'status === "running" || status === "computing_metrics") return "run";' in tone_renderer
-    assert 'status === "running" || status === "computing_metrics") return "warning";' not in tone_renderer
-    assert 'status === "failed" || status === "review_required"' not in tone_renderer
-    # writing_artifacts is dual-meaning (idle vs. report-job-running) so its
-    # tone must be resolved by taskStatusTone via active_job_kind, not by the
-    # status-only statusTone fallback.
-    assert '|| status === "writing_artifacts"' not in tone_renderer
+    # Batch 4 (2026-10-14 redesign): app.js keeps no local tone map; the row resolves
+    # through js/task-status.js, whose V1 table is pinned by test_frontend_status_vocabulary.
+    # writing_artifacts is dual-meaning (idle vs. report-job-running): the table
+    # says 待继续 and the resolver splits the report job off via active_job_kind.
 
     row_start = styles_css.index("\n.task-row {\n  --task-card-action-space")
     row_end = styles_css.index("}", row_start)
@@ -3801,27 +3074,26 @@ def test_sidebar_task_card_is_single_line_with_hover_preview():
     assert "min-width: 0" in name_rule
     assert "overflow: hidden" in name_rule
     assert "font-size: 14px" in name_rule
-    assert "font-weight: 550" in name_rule
+    assert "font-weight: 500" in name_rule
     assert "text-overflow: ellipsis" in name_rule
     assert "white-space: nowrap" in name_rule
 
     preview_rule = _css_rule(styles_css, ".task-row-preview")
     assert "position: fixed" in preview_rule
     assert "pointer-events: none" in preview_rule
-    assert "border-radius: var(--radius-control)" in preview_rule
-    assert "box-shadow: var(--shadow-floating)" in preview_rule
+    # Batch 1: the hover card is a floating layer (radius 12, shared popover elevation).
+    assert "border-radius: var(--radius-md)" in preview_rule
+    assert "box-shadow: var(--shadow-pop)" in preview_rule
 
-    pill_start = styles_css.index(".task-row-top .pill {")
-    pill_end = styles_css.index("}", pill_start)
-    pill_rule = styles_css[pill_start:pill_end]
-    assert "flex: 0 0 auto" in pill_rule
-    assert "white-space: nowrap" in pill_rule
-
-    run_pill_start = styles_css.index(".pill.run {")
-    run_pill_end = styles_css.index("}", run_pill_start)
-    run_pill_rule = styles_css[run_pill_start:run_pill_end]
-    assert "color: var(--accent)" in run_pill_rule
-    assert "background: var(--accent-soft)" in run_pill_rule
+    # Batch 4 (2026-10-14 redesign, D6): the row shows a status dot, not a word pill;
+    # running is the blue accent, as the run pill was.
+    assert ".task-row-top .pill {" not in styles_css
+    assert ".pill.run {" not in styles_css
+    dot_rule = _css_rule(styles_css, ".task-status-dot")
+    assert "flex: none" in dot_rule
+    assert "border-radius: 50%" in dot_rule
+    run_dot_rule = _css_rule(styles_css, ".task-status-dot.run")
+    assert "background: var(--accent)" in run_dot_rule
 
 
 def test_task_list_signature_tracks_plan_derived_status():
@@ -3835,26 +3107,7 @@ def test_task_list_signature_tracks_plan_derived_status():
     start = app_js.index("function taskListSignature")
     end = app_js.index("function metricPreviewSignature", start)
     signature_source = app_js[start:end]
-    script = "\n".join(
-        [
-            "function signatureFromParts(parts) { return JSON.stringify(parts); }",
-            "let taskSearchQuery = '';",
-            "let taskSortMode = 'created_desc';",
-            "let taskGroupMode = 'none';",
-            "let selectedTaskId = 'task-1';",
-            "let derivedLabel = '失败';",
-            "let derivedTone = 'danger';",
-            "function taskStatusLabel() { return derivedLabel; }",
-            "function taskStatusTone() { return derivedTone; }",
-            signature_source,
-            "const task = { id: 'task-1', name: '恢复任务', task_type: 'modeling', status: 'created', updated_at: '2026-07-19T00:00:00Z', active_job_kind: 'driver', validator: 'QA' };",
-            "const failed = taskListSignature([task], 1);",
-            "derivedLabel = '执行中';",
-            "derivedTone = 'run';",
-            "const running = taskListSignature([task], 1);",
-            "console.log(JSON.stringify({ failed, running }));",
-        ]
-    )
+    script = f"function signatureFromParts(parts) {{ return JSON.stringify(parts); }}\nlet taskSearchQuery = '';\nlet taskSortMode = 'created_desc';\nlet taskGroupMode = 'none';\nlet selectedTaskId = 'task-1';\nlet derivedLabel = '失败';\nlet derivedTone = 'danger';\nfunction taskStatusLabel() {{ return derivedLabel; }}\nfunction taskStatusTone() {{ return derivedTone; }}\n{signature_source}\nconst task = {{ id: 'task-1', name: '恢复任务', task_type: 'modeling', status: 'created', updated_at: '2026-07-19T00:00:00Z', active_job_kind: 'driver', validator: 'QA' }};\nconst failed = taskListSignature([task], 1);\nderivedLabel = '执行中';\nderivedTone = 'run';\nconst running = taskListSignature([task], 1);\nconsole.log(JSON.stringify({{ failed, running }}));"
 
     data = _run_node_capture_json(script)
     assert data["failed"] != data["running"], data
@@ -3878,8 +3131,6 @@ def test_task_list_selected_card_has_no_visible_border_or_outline():
 
 def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_browser_css()
 
     head_start = index_html.index('<header class="workspace-head"')
@@ -3889,9 +3140,6 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     result_workspace_end = index_html.index('id="scanSection"', result_workspace_start)
     result_workspace_markup = index_html[result_workspace_start:result_workspace_end]
 
-    snapshot_start = workspace_view_js.index("function snapshotItem")
-    snapshot_end = workspace_view_js.index("export function renderCurrentTaskWorkspace", snapshot_start)
-    snapshot_renderer = workspace_view_js[snapshot_start:snapshot_end]
 
     # status lives in the header hero, in order: name+pill, description, meta
     assert head_markup.index('id="actionStatus"') < head_markup.index('id="actionErrorDetail"')
@@ -3913,21 +3161,8 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     # meta uses monochrome icons, not colored squares
     assert ".task-snapshot-item .meta-ico" in styles_css
     assert ".workspace-task-meta .task-snapshot-item::before" not in styles_css
-    assert 'snapshotItem("状态"' not in snapshot_renderer
-    assert 'snapshotItem("字段来源"' not in snapshot_renderer
-    assert 'snapshotItem("显式材料"' not in snapshot_renderer
-    assert "task-meta-tile" in snapshot_renderer
     # validator was dropped from the task-hero snapshot per user feedback;
     # only the execution mode and source directory remain.
-    assert "验证人员" not in snapshot_renderer
-    assert "执行模式" in snapshot_renderer
-    assert "材料目录" in snapshot_renderer
-    assert 'snapshotItem("folder", "材料目录", selectedTask.source_dir, null, {' in snapshot_renderer
-    assert "copy: selectedTask.source_dir" in snapshot_renderer
-    assert 'class="task-snapshot-copy"' in snapshot_renderer
-    assert 'data-copy="${escapeHtml(options.copy)}"' in snapshot_renderer
-    assert 'aria-label="复制${escapeHtml(label)}路径"' in snapshot_renderer
-    assert "copyText(copyButton.dataset.copy)" in app_js
 
 
 def test_header_task_meta_values_stay_on_one_line():
@@ -3991,184 +3226,10 @@ def test_header_task_meta_values_stay_on_one_line():
     assert "max-width: 460px" in last_copy_rule
 
 
-def test_step_rail_embeds_notebook_steps_inside_notebook_action_card():
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
-
-    renderer_start = app_js.index("function stepActionButtonHtml")
-    renderer_end = app_js.index("function formatDate", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-
-    assert "data-step-action" in renderer
-    assert "step-action-button" in renderer
-    assert "renderNotebookStepRail" in renderer
-    assert 'step.id === "notebook"' in renderer
-    assert 'insertAdjacentHTML("beforeend", renderNotebookStepRail' not in renderer
-    assert "Notebook 标题步骤" not in app_js
-    assert "分段进度" in renderer
-    assert "扫描或执行后显示 Notebook 分段进度。" not in app_js
-    assert "notebookSteps.map" in app_js
-    assert "succeeded" in renderer
-    assert "running" in renderer
-    assert "failed" in renderer
-
-    steps_start = state_js.index("export const workflowSteps = [")
-    steps_end = state_js.index("];", steps_start)
-    steps_config = state_js[steps_start:steps_end]
-    assert 'title: "模型材料完备性验证"' in steps_config
-    assert 'hint: "巡检材料内容"' in steps_config
-    assert 'title: "模型可复现性验证"' in steps_config
-    assert 'hint: "执行建模代码"' in steps_config
-    assert 'title: "模型效果&稳定性验证"' in steps_config
-    assert 'hint: "指标概览"' in steps_config
-    assert 'title: "报告输出"' in steps_config
-    assert 'hint: "Word报告与Excel分析"' in steps_config
-    assert 'title: "材料识别"' not in steps_config
-    assert 'title: "执行 Notebook"' not in steps_config
-    assert 'title: "指标概览"' not in steps_config
-    assert 'title: "Word 输出"' not in steps_config
-    assert "模型验证报告自动编写" not in steps_config
-    assert "文件与 RMC 字段检查" not in steps_config
-    assert "按标题分段执行" not in steps_config
-    assert "生成指标与 Excel" not in steps_config
-    assert "填充模板并保存" not in steps_config
-
-    assert "handleWorkflowStepperClick" in app_js
-    for action_id in ["scan", "notebook", "metrics", "report"]:
-        assert action_id in renderer
 
 
-def test_step_rail_splits_notebook_and_metrics_progress_with_elapsed_time():
-    app_js = _read_static("app.js")
-
-    assert "function stepWorkflowStage" in app_js
-    assert "function stepElapsedSeconds" in app_js
-    assert "function formatStepElapsed" in app_js
-    assert "function stepAfterInLatestNotebookSteps" in app_js
-    assert "metricStepsForRail" in app_js
-    assert "notebookStepsForRail" in app_js
-    assert "v2WorkflowSubsteps" in app_js
-    assert 'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)' in app_js
-    assert "formatStepElapsed(step, notebookSteps[index + 1] || stepAfterInLatestNotebookSteps(step))" in app_js
-    assert "elapsed_seconds" in app_js
-    elapsed_start = app_js.index("function stepElapsedSeconds")
-    elapsed_end = app_js.index("function formatStepElapsed", elapsed_start)
-    elapsed_helper = app_js[elapsed_start:elapsed_end]
-    assert "nextStep = null" in elapsed_helper
-    assert "nextStartedAt" in elapsed_helper
-    assert 'step?.status !== "running" && Number.isFinite(step?.elapsed_seconds)' in elapsed_helper
-    assert "Date.now()" in elapsed_helper
-
-    elapsed_start = app_js.index("function formatStepElapsed")
-    elapsed_end = app_js.index("function renderNotebookStepRail", elapsed_start)
-    elapsed_formatter = app_js[elapsed_start:elapsed_end]
-    assert 'return "0s";' in elapsed_formatter
-    assert "totalSeconds === 0" in elapsed_formatter
 
 
-def test_v2_validation_rail_uses_stable_logical_subtasks_and_hides_notebook_preview():
-    app_js = _read_static("app.js")
-
-    for title in [
-        "材料文件识别",
-        "数据字典与特征元数据",
-        "验证输入契约",
-        "PMML 解析",
-        "PMML 全量评分",
-        "评分结果校验",
-        "指标数据准备",
-        "模型效果计算",
-        "稳定性分析",
-        "模型压力测试",
-        "总体判断",
-        "最终结论",
-        "Word 报告",
-        "Excel 分析",
-    ]:
-        assert title in app_js
-
-    notebook_body = _slice_function(app_js, "function notebookStepsForRail")
-    assert "usesPmmlScoringWorkflow" in notebook_body
-    assert 'id.startsWith("system-repro-")' in notebook_body
-    assert "stepWorkflowStage(step) === \"notebook\"" in notebook_body
-
-    logical_body = _slice_function(app_js, "function v2WorkflowSubsteps")
-    assert "v2WorkflowSubstepPlans[stageId]" in logical_body
-    assert "latestNotebookSteps.find" in logical_body
-    assert 'parentStatus === "succeeded"' in logical_body
-    assert 'status: "succeeded"' in logical_body
-
-    renderer = _slice_function(app_js, "function renderWorkflowStepper")
-    assert "usesPmmlScoringWorkflow(task)" in renderer
-    assert "v2WorkflowSubsteps(step.id, stepStatus)" in renderer
-    assert 'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)' in renderer
-    # V1 keeps its existing Notebook/metrics evidence rails.
-    assert 'renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook")' in renderer
-    assert 'renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics")' in renderer
-
-
-def test_report_download_buttons_render_after_report_substeps():
-    """预览 / Word / Excel 必须挂在报告子步骤下面，成为右侧栏最后一组控件。"""
-    app_js = _read_static("app.js")
-    renderer = _slice_function(app_js, "function renderWorkflowStepper")
-    download_at = renderer.index("stepDownloadActionsHtml(displayStep)")
-    child_rail_at = renderer.index(
-        'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)'
-    )
-    assert download_at > child_rail_at
-    download_html = _slice_function(app_js, "function stepDownloadActionsHtml")
-    assert 'data-step-action="previewWordReport"' in download_html
-    assert 'data-step-action="downloadWordReport"' in download_html
-    assert 'data-step-action="downloadExcelAnalysis"' in download_html
-
-
-def test_validate_action_primes_reproducibility_system_steps_immediately():
-    app_js = _read_static("app.js")
-
-    assert "function plannedReproducibilitySteps" in app_js
-    assert "function appendPendingReproducibilitySteps" in app_js
-    assert 'id: "system-repro-pmml"' in app_js
-    assert 'title: "PMML 打分"' in app_js
-    assert 'id: "system-repro-compare"' in app_js
-    assert 'title: "分数一致性对比"' in app_js
-
-    validate_start = app_js.index("async function validateCurrentTask")
-    validate_end = app_js.index("async function cancelCurrentNotebook", validate_start)
-    validate_renderer = app_js[validate_start:validate_end]
-    assert "appendPendingReproducibilitySteps();" in validate_renderer
-    assert validate_renderer.index("renderValidationResult(result)") < validate_renderer.index(
-        "appendPendingReproducibilitySteps();"
-    )
-    assert validate_renderer.index("appendPendingReproducibilitySteps();") < validate_renderer.index(
-        "pollValidationProgress"
-    )
-
-
-def test_metrics_action_primes_metric_system_steps_immediately():
-    app_js = _read_static("app.js")
-
-    assert "function plannedMetricSteps" in app_js
-    assert "function appendPendingMetricSteps" in app_js
-    for step_id, title in [
-        ("system-metrics-prepare", "指标数据准备"),
-        ("system-metrics-score", "RMC_SCORE_FN 全量打分"),
-        ("system-metrics-basic", "样本与变量概览"),
-        ("system-metrics-ks", "KS 计算"),
-        ("system-metrics-psi", "PSI 计算"),
-        ("system-metrics-binning", "分箱计算"),
-        ("system-metrics-stress", "压力测试"),
-        ("system-metrics-output", "写入指标产物"),
-    ]:
-        assert f'id: "{step_id}"' in app_js
-        assert f'title: "{title}"' in app_js
-
-    metrics_start = app_js.index("async function generateMetrics")
-    metrics_end = app_js.index("async function generateReport", metrics_start)
-    metrics_renderer = app_js[metrics_start:metrics_end]
-    assert "appendPendingMetricSteps();" in metrics_renderer
-    assert metrics_renderer.index("appendPendingMetricSteps();") < metrics_renderer.index(
-        "pollValidationProgress"
-    )
 
 
 def test_notebook_step_progress_items_are_single_line_and_compact():
@@ -4197,37 +3258,6 @@ def test_notebook_step_progress_items_are_single_line_and_compact():
     assert "tabular-nums" in cells_rule
 
 
-def test_running_step_buttons_turn_into_cancel_buttons():
-    app_js = _read_static("app.js")
-    renderer_start = app_js.index("function stepStopAction")
-    renderer_end = app_js.index("function notebookStepTone", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-    handler_start = app_js.index("function workflowActionConfig")
-    handler_end = app_js.index("function scrollStepTarget", handler_start)
-    handler = app_js[handler_start:handler_end]
-
-    assert "async function cancelCurrentNotebook" in app_js
-    assert "async function cancelCurrentMetrics" in app_js
-    assert "async function cancelCurrentReport" in app_js
-    assert "async function cancelCurrentScan" not in app_js
-    assert '`api/tasks/${taskId}/notebook/cancel`' in app_js
-    assert '`api/tasks/${taskId}/metrics/cancel`' in app_js
-    assert '`api/tasks/${taskId}/report/cancel`' in app_js
-    assert 'function stepStopAction' in app_js
-    assert '"cancelNotebook"' in renderer
-    assert '"cancelMetrics"' in renderer
-    assert '"cancelReport"' in renderer
-    assert '"cancelScan"' not in renderer
-    assert 'taskServerBusyAction(task) === "report"' in renderer
-    assert '"停止"' in renderer
-    assert "selectedBusy && !isStopAction" in renderer
-    assert 'actionId === "cancelNotebook"' in handler
-    assert 'actionId === "cancelMetrics"' in handler
-    assert 'actionId === "cancelReport"' in handler
-    assert 'actionId === "cancelScan"' not in handler
-    assert "cancelCurrentNotebook" in handler
-    assert "cancelCurrentMetrics" in handler
-    assert "cancelCurrentReport" in handler
 
 
 def test_running_visual_tone_uses_header_status_blue():
@@ -4275,49 +3305,6 @@ def test_running_indicators_stop_animating_when_motion_is_reduced():
     )
 
 
-def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
-    app_js = _read_static("app.js")
-
-    assert "const taskActivities = taskSession.activities;" in app_js
-    assert "let isBusy" not in app_js
-    assert "let busyAction" not in app_js
-    assert "function taskBusyAction" in app_js
-    assert "function taskServerBusyAction" in app_js
-    assert "function selectedTaskIsBusy" in app_js
-    assert "active_job_kind" in app_js
-    server_busy_start = app_js.index("function taskServerBusyAction")
-    server_busy_end = app_js.index("function selectedTaskIsBusy", server_busy_start)
-    server_busy = app_js[server_busy_start:server_busy_end]
-    assert server_busy.index('kind === "agent"') < server_busy.index("taskStopped(task)")
-    assert 'kind === "plan"' in server_busy
-    assert 'kind === "join"' in server_busy
-
-    renderer_start = app_js.index("function stepActionButtonHtml")
-    renderer_end = app_js.index("function notebookStepTone", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-    assert "const selectedBusy = selectedTaskIsBusy();" in renderer
-    assert "selectedBusy && !isStopAction" in renderer
-    assert "current task is running" not in renderer
-
-    downloads_ready_start = app_js.index("function completedReportReadyForDownloads")
-    downloads_ready_end = app_js.index("function stepDownloadActionsHtml", downloads_ready_start)
-    downloads_ready = app_js[downloads_ready_start:downloads_ready_end]
-    assert "const selectedBusyAction = taskBusyAction(task?.id);" in downloads_ready
-    assert "task?.report_available === true" in downloads_ready
-
-    status_snapshot = _slice_function(app_js, "function taskActionStatusSnapshot(")
-    assert 'task.active_job_kind === "join"' in status_snapshot
-    assert "数据拼接进行中。" in status_snapshot
-    assert 'task.active_job_kind === "plan"' in status_snapshot
-    assert "计划执行进行中。" in status_snapshot
-
-    action_start = app_js.index("async function runAction")
-    action_end = app_js.index("function handleTaskListKeydown", action_start)
-    action_runner = app_js[action_start:action_end]
-    assert "const taskScoped = options.taskScoped !== false;" in action_runner
-    assert 'Object.prototype.hasOwnProperty.call(options, "taskId")' in action_runner
-    assert 'claimBusy(actionId, options.busyText || "正在处理...", taskId, options.operation || actionId)' in action_runner
-    assert "releaseBusy(busy);" in action_runner
 
 
 def test_global_settings_actions_do_not_mark_selected_task_busy():
@@ -4380,63 +3367,16 @@ def test_global_settings_actions_do_not_mark_selected_task_busy():
     }
 
 
-def test_workflow_actions_are_gated_by_completed_previous_steps():
-    app_js = _read_static("app.js")
-
-    assert "function taskFailedDuringScan" in app_js
-    scan_start = app_js.index("function taskFailedDuringScan")
-    scan_end = app_js.index("function taskFailureWasRestartReclaim", scan_start)
-    scan_helper = app_js[scan_start:scan_end]
-    assert "status_message" not in scan_helper
-    assert 'normalizedFailureStage(task.failure_stage) === "scan"' in scan_helper
-    recommended_start = app_js.index("function recommendedAction")
-    recommended_end = app_js.index("function canRunStepAction", recommended_start)
-    recommended = app_js[recommended_start:recommended_end]
-    assert 'if (status === "created" || taskFailedDuringScan(taskSession.task)) return "scan";' in recommended
-    assert 'if (taskFailedDuringMetrics(taskSession.task)) return "metrics";' in recommended
-    assert 'if (taskFailedDuringReport(taskSession.task)) return "report";' in recommended
-    assert 'if (taskFailedDuringNotebook(taskSession.task)) return "notebook";' in recommended
-
-    can_run_start = app_js.index("function canRunStepAction")
-    can_run_end = app_js.index("function stepActionButtonHtml", can_run_start)
-    can_run = app_js[can_run_start:can_run_end]
-    assert 'return ["created", "scanned", "failed", "executed", "writing_artifacts", "succeeded", "review_required"].includes(status);' in can_run
-    assert 'case "notebook":' in can_run
-    assert 'if (taskFailedDuringScan(taskSession.task)) return false;' in can_run
-    assert 'return ["scanned", "configured", "executed", "writing_artifacts", "succeeded", "review_required"].includes(status)' in can_run
-    assert "|| taskFailedDuringNotebook(taskSession.task);" in can_run
-    assert 'case "metrics":' in can_run
-    assert 'return status === "executed" || taskFailedDuringMetrics(taskSession.task);' in can_run
-    assert 'case "report":' in can_run
-    assert 'return ["writing_artifacts", "review_required"].includes(status) || taskFailedDuringReport(taskSession.task);' in can_run
-
-    renderer_start = app_js.index("function stepActionButtonHtml")
-    renderer_end = app_js.index("function notebookStepTone", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-    assert "const canRunAction = isStopAction || canRunStepAction(step.action);" in renderer
-    assert "|| !canRunAction" in renderer
-    assert "请先完成上一步" in renderer
 
 
-def test_workflow_step_status_separates_next_action_from_running_action():
-    app_js = _read_static("app.js")
-
-    status_renderer = _slice_function(app_js, "function workflowStepStatus(")
-    running_start = app_js.index("function taskRunningStepId")
-    running_end = app_js.index("function workflowStepStatus", running_start)
-    running_helper = app_js[running_start:running_end]
-
-    assert "function taskRunningStepId" in app_js
-    assert 'return "notebook";' in running_helper
-    assert 'status === "executed"' in status_renderer
-    assert 'return index < 2 ? "succeeded" : "pending";' in status_renderer
-    assert 'status === "computing_metrics"' in status_renderer
-    assert 'return index < 2 ? "succeeded" : index === 2 ? "running" : "pending";' in status_renderer
-    assert 'taskServerBusyAction(task) === "report"' in status_renderer
-    assert 'return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction(task) === "report" ? "running" : "pending";' in status_renderer
-    assert 'if (status === "review_required") return "succeeded";' in status_renderer
-    assert 'if (runningStepId && step.id === runningStepId) return "running";' in status_renderer
-    assert "if (index === activeIndex) return \"running\";" not in status_renderer
+@pytest.mark.parametrize("status,expected", [
+    ("executed", ["succeeded", "succeeded", "pending", "pending"]),
+    ("computing_metrics", ["succeeded", "succeeded", "running", "pending"]),
+    ("writing_artifacts", ["succeeded", "succeeded", "succeeded", "pending"]),
+    ("review_required", ["succeeded"] * 4),
+])
+def test_workflow_step_status_separates_next_action_from_running_action(status, expected):
+    assert _workflow_step_statuses_for({"status": status}, []) == expected
 
 
 def test_modeling_create_dialog_has_algorithm_selector():
@@ -4444,9 +3384,6 @@ def test_modeling_create_dialog_has_algorithm_selector():
     (G2: 算法可选), gated to modeling tasks via the algorithmField flag, and
     posted as `payload.recipes` + `payload.target_type`."""
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskAlgorithmField"' in index_html
     assert 'id="modelAlgorithmChoices"' in index_html
@@ -4473,18 +3410,6 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'id="modelSampleWeightPolicy"' in index_html
     assert 'value="none">不使用样本权重' in index_html
     assert 'value="explicit">指定权重列' in index_html
-    assert "updateSampleWeightCreateState" in create_dialog_js
-    assert "algorithmField: true" in task_types_js
-    assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in create_dialog_js
-    assert "const targetType = modelTargetTypeForRecipes(payload.recipes);" in create_dialog_js
-    assert "payload.target_type = targetType;" in create_dialog_js
-    assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in create_dialog_js
-    assert "请填写样本权重列，或改选不使用样本权重。" in create_dialog_js
-    assert "payload.sample_weight_col = sampleWeightCol;" in create_dialog_js
-    assert "normalizeModelAlgorithmFamilies" in create_dialog_js
-    assert "二分类、回归与多分类算法不能混选。" in create_dialog_js
-    assert "请至少选择一个建模算法。" in create_dialog_js
-    assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
 
 
 def test_modeling_create_dialog_maps_every_non_lgb_recipe_to_payload_target_type():
@@ -4521,10 +3446,6 @@ assert.equal(modelTargetTypeForRecipes(["xgb_regressor", "xgb_multiclass"]), nul
 def test_strategy_vintage_and_portfolio_welcome_cards_are_enabled():
     """风险分析、策略开发和组合分析都是已接通的 PlanDriver 入口。"""
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    task_types_js = _read_static("js/task-types.js")
-    toast_js = _read_static("js/toast.js")
     for card_id in (
         "welcomeVintageAnalysisCard",
         "welcomeStrategyDevelopmentCard",
@@ -4536,28 +3457,7 @@ def test_strategy_vintage_and_portfolio_welcome_cards_are_enabled():
         assert "data-coming-soon" not in tag, card_id
         assert 'class="welcome-task-card available"' in tag, card_id
         assert 'aria-describedby="welcomeComingSoonHint"' not in tag, card_id
-    definitions = task_types_js[
-        task_types_js.index("export const taskTypeDefinitions = {"):
-        task_types_js.index("export const taskTypeDisplayOrder")
-    ]
-    for task_type in ("strategy", "vintage", "portfolio"):
-        task_start = definitions.index(f"  {task_type}: {{")
-        task_end = definitions.index("\n  },", task_start)
-        task_definition = definitions[task_start:task_end]
-        assert 'available: false' not in task_definition
-        assert 'manualEnabled: false' not in task_definition
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
-    assert 'export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio"]);' in plan_js
     # The toast path remains available for future explicitly unavailable task definitions.
-    assert "card.dataset.comingSoon" not in app_js
-    assert "definition.available === false" in create_dialog_js
-    assert "unavailableMessage" in create_dialog_js
-    assert "export function createComingSoonToastController" in toast_js
-    assert 'from "./js/toast.js"' in app_js
-    assert "function showComingSoonToast" not in app_js
-    assert "const { showComingSoonToast } = createComingSoonToastController" in app_js
-    assert 'setActionStatus(message, "info"' in app_js
-    assert "新功能开发中，敬请期待" in create_dialog_js
 
 
 def test_coming_soon_toast_controller_reuses_node_and_resets_timer():
@@ -4641,16 +3541,6 @@ process.stdout.write("ok");
     assert result.stdout == "ok"
 
 
-def test_acceptance_chip_relabels_auto_accept_per_task_type():
-    """The auto-accept chip label tracks the task type (自动拼接/分析/建模), not always
-    自动审查 (ACCEPT-RELABEL)."""
-    app_js = _read_static("app.js")
-    assert "function autoAcceptLabel" in app_js
-    for label in ("自动拼接", "自动分析", "自动建模", "自动审查"):
-        assert label in app_js
-    assert "autoOption.textContent = autoAcceptLabel(taskSession.task?.task_type)" in app_js
-
-
 def test_feature_create_dialog_has_optional_metric_selector():
     """Every feature metric is an explicit manual-mode choice (spec §2: 选了才算).
 
@@ -4658,8 +3548,6 @@ def test_feature_create_dialog_has_optional_metric_selector():
     meaning consistency clearly advertises its Agent + dictionary gate.
     """
     index_html = _read_static("index.html")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskMetricField"' in index_html
     assert 'id="featureMetricChoices"' in index_html
@@ -4677,27 +3565,15 @@ def test_feature_create_dialog_has_optional_metric_selector():
         assert f'name="featureMetric" value="{metric}"' in index_html
         assert f'name="featureMetric" value="{metric}" checked' not in index_html
     assert 'name="featureMetric" value="meaning_consistency" disabled' in index_html
-    assert "input.checked = Boolean(input.defaultChecked)" in create_dialog_js
-    assert "metricField: true" in task_types_js
-    assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in create_dialog_js
 
 
-def test_stage_failures_keep_completed_previous_steps_green():
-    app_js = _read_static("app.js")
-
-    status_renderer = _slice_function(app_js, "function workflowStepStatus(")
-    helper_start = app_js.index("function taskFailureStage")
-    helper_end = app_js.index("function taskFailureActionStatusTitle", helper_start)
-    helper_renderer = app_js[helper_start:helper_end]
-
-    assert "function taskFailureStage" in app_js
-    assert "function normalizedFailureStage" in app_js
-    assert "const structuredStage = normalizedFailureStage(task.failure_stage);" in helper_renderer
-    assert "status_message" not in helper_renderer
-    assert "return earliestFailureStage(structuredStage, notebookStepStageFailure());" in helper_renderer
-    assert "const failedIndex = workflowSteps.findIndex((candidate) => candidate.id === failedStepId);" in status_renderer
-    assert 'if (step.id === failedStepId) return "failed";' in status_renderer
-    assert 'if (failedIndex >= 0) return index < failedIndex ? "succeeded" : "pending";' in status_renderer
+@pytest.mark.parametrize("stage", ["scan", "notebook", "metrics", "report"])
+def test_stage_failures_keep_completed_previous_steps_green(stage):
+    steps = ["scan", "notebook", "metrics", "report"]
+    index = steps.index(stage)
+    expected = ["succeeded"] * index + ["failed"] + ["pending"] * (3 - index)
+    assert _workflow_step_statuses_for({"status": "failed", "failure_stage": stage,
+                                        "status_message": "不同的失败文案"}, []) == expected
 
 
 def test_review_required_marks_all_workflow_steps_as_completed():
@@ -4724,11 +3600,6 @@ def test_structured_failure_stage_overrides_legacy_status_message():
 
 
 def test_restart_reclaimed_task_keeps_completed_notebook_and_metrics_steps_green():
-    app_js = _read_static("app.js")
-    restart_body = _slice_function(app_js, "function taskFailureWasRestartReclaim")
-    assert "failure_reason_code" in restart_body
-    assert "status_message" not in restart_body
-
     notebook_steps = [
         {"id": "notebook-load", "status": "succeeded"},
         {"id": "system-repro-pmml", "status": "succeeded"},
@@ -4755,19 +3626,6 @@ def test_restart_reclaimed_task_keeps_completed_notebook_and_metrics_steps_green
 
 
 def test_missing_structured_failure_stage_stays_unknown():
-    app_js = _read_static("app.js")
-
-    helper_start = app_js.index("function taskFailureStage")
-    helper_end = app_js.index("function taskFailedDuringMetrics", helper_start)
-    helper_renderer = app_js[helper_start:helper_end]
-    index_start = app_js.index("function workflowIndex")
-    index_end = app_js.index("function taskFailureStepId", index_start)
-    index_renderer = app_js[index_start:index_end]
-
-    assert "status_message" not in helper_renderer
-    assert "return null;" in helper_renderer
-    assert 'if (taskFailedDuringMetrics(task)) return 2;' in index_renderer
-    assert 'if (taskFailedDuringReport(task)) return 3;' in index_renderer
     assert _workflow_step_statuses_for(
         {
             "status": "failed",
@@ -4779,55 +3637,11 @@ def test_missing_structured_failure_stage_stays_unknown():
     ) == ["pending", "pending", "pending", "pending"]
 
 
-def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
-    app_js = _read_static("app.js")
-
-    renderer_start = app_js.index("function renderWorkflowStepper")
-    renderer_end = app_js.index("function formatDate", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-
-    assert "const renderTaskId = workbenchTaskId() || \"\";" in renderer
-    assert "const previousScrollTop = stepper.dataset.taskId === renderTaskId ? stepper.scrollTop : 0;" in renderer
-    assert "stepper.dataset.taskId = renderTaskId;" in renderer
-    assert "stepper.scrollTop = previousScrollTop;" in renderer
-    assert "stepper.scrollTop = 0;" not in renderer
-
-
 def test_result_workspace_preserves_scroll_position_per_task_switch():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    assert "const resultScrollPositionsByTask = new Map();" in app_js
-    assert "let resultScrollPersistFrame = null;" in app_js
-    assert "function rememberResultScrollPosition" in app_js
-    assert "function loadResultScrollPositions" in app_js
-    assert "function persistResultScrollPositions" in app_js
-    assert "function prepareResultScrollRestoreForTask" in app_js
-    assert "function applyResultScrollPosition" in app_js
-    assert "function restoreResultScrollPositionAfterRender" in app_js
-    assert "function beginTaskContentLoad" in app_js
-    assert "function finishTaskContentLoad" in app_js
-    assert 'addEventListener("scroll", handleResultScroll' in app_js
-    assert "scheduleResultScrollPositionsPersist();" in _slice_function(app_js, "function rememberResultScrollPosition")
-    assert "persistResultScrollPositions();" in _slice_function(app_js, "async function deleteTask")
-    assert "await restoreResultScrollPositionAfterRender(taskSession.taskId);" in _slice_function(app_js, "async function initializeApp")
 
-    select_start = app_js.index("function selectTask")
-    select_end = app_js.index("function deselectCurrentTask", select_start)
-    select_renderer = app_js[select_start:select_end]
-    assert "rememberResultScrollPosition();" in select_renderer
-    assert "beginTaskContentLoad(task.id);" in select_renderer
-    assert "prepareResultScrollRestoreForTask(task.id);" in select_renderer
-    assert "applyResultScrollPosition(task.id);" not in select_renderer
-    assert "scheduleResultScrollRestore(task.id);" not in select_renderer
-    assert "renderAll();" in select_renderer
-    assert "await restoreResultScrollPositionAfterRender(task.id);" in select_renderer
-    assert "finishTaskContentLoad(task.id);" in select_renderer
-    assert "}, { renderAfter: false });" in select_renderer
 
-    run_action = _slice_function(app_js, "async function runAction")
-    assert "let shouldRenderAfter = options.renderAfter !== false;" in run_action
-    assert "shouldRenderAfter = true;" in run_action
     # Late action failures/finalizers are exercised with real visit identities.
 
     assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .report-draft-workspace, .agent-composer, .progress-rail)" in styles_css
@@ -4839,104 +3653,20 @@ def test_result_workspace_preserves_scroll_position_per_task_switch():
     assert ".validation-workspace.is-task-content-settling :is(.task-hero)" in styles_css
     assert ".validation-workspace.is-projected-child-loading" not in styles_css
 
-    agent_scroll_start = app_js.index("function requestAgentConversationScrollToLatest")
-    agent_scroll_end = app_js.index("function renderAgentConversation", agent_scroll_start)
-    agent_scroll_renderer = app_js[agent_scroll_start:agent_scroll_end]
-    assert "if (suppressAgentAutoScrollTaskId === taskSession.taskId) return;" in agent_scroll_renderer
-    assert "scrollContent.scrollTo({ top: scrollContent.scrollHeight, behavior: \"auto\" });" in agent_scroll_renderer
+    # Suppression while a scroll restores: test_frontend_task_panels.py (F13).
 
 
-def test_workspace_blank_area_wheel_scrolls_center_result_only():
-    app_js = _read_static("app.js")
-
-    assert "function routeWorkspaceWheelToResult" in app_js
-    handler_start = app_js.index("function routeWorkspaceWheelToResult")
-    handler_end = app_js.index("function scrollTargetIsWithin", handler_start)
-    handler = app_js[handler_start:handler_end]
-
-    assert "if (event.defaultPrevented || event.ctrlKey) return;" in handler
-    assert 'scrollTargetIsWithin(target, "#taskSidebar, #progressRail, #workflowStepper")' in handler
-    assert 'scrollTargetIsWithin(target, "#resultScrollContent")' in handler
-    assert 'scrollTargetIsWithin(target, "dialog, textarea, select, input, .metric-table-scroll")' in handler
-    assert "scrollContent.scrollTop += event.deltaY;" in handler
-    assert "if (scrollContent.scrollTop !== previousTop" in handler
-    assert "event.preventDefault();" in handler
-    assert 'document.addEventListener("wheel", routeWorkspaceWheelToResult, { passive: false });' in app_js
 
 
-def test_scan_failure_sets_top_status_instead_of_success_message():
-    app_js = _read_static("app.js")
-
-    scan_start = app_js.index("async function scanCurrentTask")
-    scan_end = app_js.index("async function createTaskAndScan", scan_start)
-    scanner = app_js[scan_start:scan_end]
-
-    assert 'selectedTaskIsAgentMode(taskSession.task) ? "材料完备性识别完成。" : "材料扫描完成。"' in scanner
-    assert "if (taskSession.task?.status === \"failed\")" in scanner
-    assert "setTaskFailureActionStatus(taskSession.task)" in scanner
-    assert "return;" in scanner
-
-
-def test_create_task_auto_scans_materials_after_creation():
-    app_js = _read_static("app.js")
-
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_renderer = app_js[create_start:create_end]
-    assert "return task" in create_renderer
-
-    handler_start = app_js.index("function createTaskAndScan")
-    handler_end = app_js.index("function handleTaskListKeydown", handler_start)
-    handler_renderer = app_js[handler_start:handler_end]
-    assert "await createTask()" in handler_renderer
-    assert "await scanCurrentTask()" in handler_renderer
-    assert "await loadTaskEvidence(task.id)" in handler_renderer
 
 
 def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
     index_html = _read_static("index.html")
 
-    click_start = app_js.index('$("createTaskButton").onclick')
-    click_end = app_js.index('$("workflowStepper").onclick', click_start)
-    click_handler = app_js[click_start:click_end]
-    assert 'runAction(createTaskAndScan);' in click_handler
-    assert 'actionId: "scan"' not in click_handler
+    # Batch 5: the dialog creates through createTaskFromDialog, which only adds
+    # the home sentence (when opened from 高级设置) before createTaskAndScan.
 
-    keydown_start = app_js.index('event.key === "Enter"')
-    keydown_end = app_js.index('document.addEventListener("click"', keydown_start)
-    keydown_handler = app_js[keydown_start:keydown_end]
-    assert 'runAction(createTaskAndScan);' in keydown_handler
-    assert 'actionId: "scan"' not in keydown_handler
     assert 'id="statusMessage" class="status" role="status" aria-live="polite"' in index_html
-    assert 'setCreateStatus("请选择执行模式。", "error")' in create_dialog_js
-    assert 'setCreateStatus("请先选择要上传的材料文件。", "error")' in create_dialog_js
-    assert 'setCreateStatus(\n        definition.reportFields ? "请先填写模型名称、验证人员和材料目录。"' in create_dialog_js
-
-
-def test_dialogs_close_when_clicking_backdrop():
-    app_js = _read_static("app.js")
-    dialogs_js = _read_static("js/dialogs.js")
-    index_html = _read_static("index.html")
-
-    for dialog_id in [
-        "taskDialog",
-        "llmEngineEditDialog",
-        "governanceSettingsDialog",
-        "wordPreviewDialog",
-    ]:
-        assert f'<dialog id="{dialog_id}"' in index_html
-
-    assert "export function closeDialogOnBackdropClick" in dialogs_js
-    assert "export function bindDialogBackdropDismissal" in dialogs_js
-    assert 'root.querySelectorAll("dialog").forEach((dialog) =>' in dialogs_js
-    assert 'dialog.addEventListener("click", closeDialogOnBackdropClick);' in dialogs_js
-    assert "event.target !== dialog || !dialog.open" in dialogs_js
-    assert 'from "./js/dialogs.js"' in app_js
-    assert "function closeDialogOnBackdropClick" not in app_js
-    assert "function bindDialogBackdropDismissal" not in app_js
-    assert "bindDialogBackdropDismissal();" in app_js
 
 
 def test_dialog_backdrop_dismissal_closes_only_open_backdrop_clicks():
@@ -5002,7 +3732,6 @@ process.stdout.write("ok");
 
 def test_dialog_close_buttons_render_as_x_controls():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
     for button_id in [
@@ -5030,7 +3759,7 @@ def test_dialog_close_buttons_render_as_x_controls():
     assert "border: 0" in close_button_rule
     assert "background: transparent" in close_button_rule
     assert "color: var(--text-secondary)" in close_button_rule
-    assert "font-size: 18px" in close_button_rule
+    assert "font-size: 17px" in close_button_rule
 
     close_button_hover_rule = _css_rule(
         styles_css,
@@ -5057,10 +3786,6 @@ def test_dialog_close_buttons_render_as_x_controls():
 
     assert 'id="governanceRefreshButton" class="governance-icon-button is-unavailable"' in index_html
     assert 'aria-hidden="true" disabled' in index_html
-    assert 'button.hidden = !governanceRefreshActions[navKey]' not in app_js
-    assert 'button.classList.toggle("is-unavailable", unavailable);' in app_js
-    assert "button.disabled = unavailable;" in app_js
-    assert 'button.setAttribute("aria-hidden", unavailable ? "true" : "false");' in app_js
 
     head_rule = _css_rule(styles_css, ".governance-settings-head")
     assert "position: relative" in head_rule
@@ -5125,19 +3850,10 @@ def test_dialog_close_buttons_render_as_x_controls():
     assert "stroke-width: 2.25" in refresh_icon_rule
 
 
-def test_initial_load_restores_task_evidence_for_selected_task():
-    app_js = _read_static("app.js")
-    bootstrap_start = app_js.index("restoreTheme();")
-    bootstrap = app_js[bootstrap_start:]
-
-    assert "await refreshTasks()" in bootstrap
-    assert "await loadReportFields()" in bootstrap
-    assert "await loadTaskEvidence()" in bootstrap
 
 
 def test_sort_group_and_theme_live_in_sidebar_settings():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
@@ -5178,51 +3894,23 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     assert 'data-settings-panel=' not in settings_markup
     assert 'class="task-controls"' not in index_html
 
-    assert 'const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);' in app_js
-    assert 'const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);' in app_js
-    assert "function restoreTaskListSettings" in app_js
-    assert "function saveTaskListSettings" in app_js
-    assert 'localStorage.getItem("marvis_task_list_settings")' in app_js
-    assert 'localStorage.setItem("marvis_task_list_settings"' in app_js
-    assert "taskSortMode = normalizeTaskSortMode(stored.sort);" in app_js
-    assert "taskGroupMode = normalizeTaskGroupMode(stored.group);" in app_js
 
-    change_start = app_js.index("function handleSettingsMenuChange")
-    change_end = app_js.index("async function loadExecutionEnvironmentSettings", change_start)
-    change_renderer = app_js[change_start:change_end]
-    assert "saveTaskListSettings();" in change_renderer
 
-    bootstrap_start = app_js.index("restoreTheme();")
-    bootstrap = app_js[bootstrap_start:]
-    assert bootstrap.index("restoreTaskListSettings();") < bootstrap.index("renderSettingsState();")
-    assert bootstrap.index("restoreTaskListSettings();") < bootstrap.index("await refreshTasks();")
 
 
 def test_task_group_setting_supports_created_month_and_task_type():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    task_types_js = _read_static("js/task-types.js")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
     assert '<option value="task_type">按任务类型</option>' in settings_markup
     assert '<option value="created_month">按创建月份</option>' in settings_markup
-    assert 'taskGroupMode === "task_type"' in app_js
-    assert 'taskGroupMode === "created_month"' in app_js
-    assert 'export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "portfolio", "modeling", "validation", "strategy"];' in task_types_js
-    assert "sortTaskTypeGroups" in app_js
-    assert "name: taskTypeLabel(taskType)," in app_js
-    assert "function taskCreatedMonth" in app_js
-    assert "task.created_at || task.updated_at" in app_js
-    assert "未知创建月份" in app_js
-    assert "sortMonthGroups" in app_js
 
 
 def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
 
     assert 'class="settings-tabs"' not in index_html
     assert 'class="settings-content"' not in index_html
@@ -5260,8 +3948,9 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert "width: min(520px" not in menu_rule
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
-    assert root_vars["--settings-menu-shadow"] == "0 10px 24px rgba(0, 0, 0, 0.10)"
-    assert dark_vars["--settings-menu-shadow"] == "0 10px 24px rgba(0, 0, 0, 0.10)"
+    # Batch 1 (2026-10-14 redesign D1-D5): floating layers share one elevation.
+    assert root_vars["--settings-menu-shadow"] == "var(--shadow-pop)"
+    assert dark_vars["--settings-menu-shadow"] == "var(--shadow-pop)"
     section_rule = _css_rule(styles_css, ".settings-menu-section")
     assert "padding: 0" in section_rule
     assert "border: 0" in section_rule
@@ -5345,31 +4034,11 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert "max-width: none" in collapsed_menu_rule
     assert "width: 268px" not in collapsed_menu_rule
 
-    assert "function renderSettingsState" in app_js
-    assert "function handleSettingsMenuChange" in app_js
-    assert "function setActiveSettingsSection" not in app_js
-    assert "function markSettingsOptions" not in app_js
-    assert '$("settingsMenu").onchange = handleSettingsMenuChange' in app_js
-    assert "data-settings-section" not in app_js
-    assert "data-settings-panel" not in app_js
 
 
 def test_appearance_setting_supports_light_dark_and_system_modes():
-    app_js = _read_static("app.js")
-    theme_js = _read_static("js/theme.js")
     index_html = _read_static("index.html")
 
-    assert 'from "./js/theme.js"' in app_js
-    assert "const themeController = createThemeController" in app_js
-    assert "function systemTheme" in theme_js
-    assert "const watchSystemTheme = () =>" in theme_js
-    assert "function syncBrowserChromeTheme" in theme_js
-    assert 'const browserChromeThemeColors = {' in theme_js
-    assert 'light: "#ffffff"' in theme_js
-    assert 'dark: "#181818"' in theme_js
-    assert '$("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");' in theme_js
-    assert 'preference === "system"' in theme_js
-    assert 'localStorage.setItem("marvis_theme", preference)' in theme_js
     assert 'id="settingsThemeSelect"' in index_html
     assert 'value="system"' in index_html
     assert "跟随系统" in index_html
@@ -5393,28 +4062,9 @@ def test_appearance_setting_supports_light_dark_and_system_modes():
 
 
 def test_sidebar_settings_closes_on_outside_click_only():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    assert "function closeSidebarSettingsOnOutsideClick" in app_js
-    assert "function openGovernanceSettingsFromSidebar" in app_js
-    assert 'document.addEventListener("click", closeSidebarSettingsOnOutsideClick)' in app_js
 
-    handler_start = app_js.index("function closeSidebarSettingsOnOutsideClick")
-    handler_end = app_js.index("function workflowActionConfig", handler_start)
-    handler = app_js[handler_start:handler_end]
-    assert '$("sidebarSettings")' in handler
-    assert "settings.open" in handler
-    assert 'target.closest("#sidebarSettings")' in handler
-    assert "settings.open = false" in handler
-    assert "function closeSidebarSettingsMenu" in app_js
-    assert "function scheduleGovernanceSettingsFromSidebar" in app_js
-    assert "function handleGovernanceSettingsPointerDown" in app_js
-    assert "window.requestAnimationFrame" in app_js
-    assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
-    assert "function setSidebarSettingsSuppressed" not in app_js
-    assert "modal-suppressed" not in app_js
-    assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
 
     assert ".sidebar-settings.modal-suppressed" not in styles_css
     closed_menu_rule = _css_rule(styles_css, ".sidebar-settings:not([open]) .settings-menu")
@@ -5459,7 +4109,7 @@ def test_system_settings_exposes_execution_environment_panel():
     settings_group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
     assert "border: 1px solid var(--border)" in settings_group_rule
     assert "border-radius: var(--radius-lg)" in settings_group_rule
-    assert "background: var(--surface)" in settings_group_rule
+    assert "background: var(--card)" in settings_group_rule
     assert "overflow: hidden" in settings_group_rule
     settings_row_rule = _css_rule(styles_css, ".governance-panel .settings-row")
     assert "padding: 13px 16px" in settings_row_rule
@@ -5468,26 +4118,30 @@ def test_system_settings_exposes_execution_environment_panel():
         index_html.index('data-governance-panel-content="llm"')
     ]
 
+    # D15 (batch 6b): 执行环境 and 模型引擎 are grouped lists (one rounded
+    # white group, hairline rows, no per-row box); the checkmark marks the
+    # current environment.
     env_list_rule = _css_rule(styles_css, ".exec-env-list")
-    assert "display: flex" in env_list_rule
-    assert "gap: 8px" in env_list_rule
-    assert "border: 0" in env_list_rule
-    assert "background: transparent" in env_list_rule
+    llm_list_rule = _css_rule(styles_css, ".llm-model-profiles")
+    for rule in (env_list_rule, llm_list_rule):
+        assert "display: flex" in rule
+        assert "gap: 0" in rule
+        assert "border-radius: var(--radius-md)" in rule
+        assert "background: var(--surface)" in rule
+        assert "overflow: hidden" in rule
     env_row_rule = _css_rule(styles_css, ".exec-env-row")
     llm_card_rule = _css_rule(styles_css, ".llm-engine-item")
-    assert "background: var(--surface-soft)" in env_row_rule
-    assert "background: var(--surface-soft)" in llm_card_rule
-    assert "border: 1px solid var(--border)" in env_row_rule
-    assert "border: 1px solid var(--border)" in llm_card_rule
-    assert "border-radius: var(--radius-control)" in env_row_rule
-    assert "border-radius: var(--radius-control)" in llm_card_rule
+    for rule in (env_row_rule, llm_card_rule):
+        assert "border: 0" in rule
+        assert "border-radius: 0" in rule
+        assert "background: transparent" in rule
+    assert "box-shadow: inset 0 1px 0 var(--sep)" in _css_rule(styles_css, ".exec-env-row + .exec-env-row")
+    assert "box-shadow: inset 0 1px 0 var(--sep)" in _css_rule(styles_css, ".llm-engine-item + .llm-engine-item")
     env_row_hover_rule = _css_rule(styles_css, ".exec-env-row:hover")
-    assert "border-color: var(--option-hover)" in env_row_hover_rule
     assert "background: var(--option-hover)" in env_row_hover_rule
     env_row_selected_rule = _css_rule(styles_css, ".exec-env-row.selected")
-    assert "border-color: var(--option-selected)" in env_row_selected_rule
-    assert "background: var(--option-selected)" in env_row_selected_rule
-    assert "box-shadow: none" in env_row_selected_rule
+    assert "background: transparent" in env_row_selected_rule
+    assert "opacity: 1" in _css_rule(styles_css, ".exec-env-row.selected .exec-env-check")
 
 
 def test_capability_tier_rows_match_execution_environment_density():
@@ -5496,13 +4150,15 @@ def test_capability_tier_rows_match_execution_environment_density():
 
     env_list_rule = _css_rule(styles_css, ".exec-env-list")
     tier_settings_rule = _css_rule(v2_css, ".tier-settings")
-    assert "gap: 8px" in env_list_rule
+    # D15 (batch 6b): both single-select lists are grouped lists with no gap.
+    assert "gap: 0" in env_list_rule
     assert "gap: 8px" in tier_settings_rule
     tier_settings_head_rule = _css_rule(v2_css, ".tier-settings-head")
     assert "padding: 0 2px 2px" in tier_settings_head_rule
     tier_settings_list_rule = _css_rule(v2_css, ".tier-settings-list")
     assert "display: grid" in tier_settings_list_rule
-    assert "gap: 8px" in tier_settings_list_rule
+    assert "gap: 0" in tier_settings_list_rule
+    assert "background: var(--surface)" in tier_settings_list_rule
 
     capability_tier_start = v2_css.index("/* Capability tiers:")
     tier_row_start = v2_css.index(".tier-row {", capability_tier_start)
@@ -5597,7 +4253,8 @@ def test_governance_settings_uses_shared_typography_scale():
 
     token_vars = _css_vars(_css_rule(v2_css, ".governance-settings-dialog"))
     assert token_vars["--settings-row-title-size"] == "14px"
-    assert token_vars["--settings-row-title-weight"] == "650"
+    # Batch 1 (2026-10-14 redesign D1-D5): weights are 400 / 500 / 600 / 700 only.
+    assert token_vars["--settings-row-title-weight"] == "600"
     assert token_vars["--settings-body-size"] == "12.5px"
     assert token_vars["--settings-body-line-height"] == "1.45"
     assert token_vars["--settings-label-size"] == "12px"
@@ -5747,6 +4404,7 @@ assert.deepEqual(
   ["danhuang", "buou", "ragdoll-cat", "unknown", "none"].map(catalog.normalizePreference),
   ["naitang", "xiaojiu", "xiaojiu", "auditbot", "none"],
 );
+// Batch 4 (2026-10-14 redesign): the pet is opt-in, so nothing stored (or a stored none) shows no pet.
 assert.deepEqual(
   [
     catalog.resolveStoredPreference(null, false),
@@ -5754,7 +4412,7 @@ assert.deepEqual(
     catalog.resolveStoredPreference("none", true),
     catalog.resolveStoredPreference("danhuang", false),
   ],
-  ["auditbot", "auditbot", "none", "naitang"],
+  ["none", "none", "none", "naitang"],
 );
 
 const options = [];
@@ -5832,11 +4490,16 @@ process.stdout.write(JSON.stringify(context.MarvisPetCatalog));
         assert asset_path == f"static/pets/{pet_id}/spritesheet.webp"
         assert (STATIC_DIR / asset_path.removeprefix("static/")).is_file()
         assert not (pets_dir / pet_id / "pet.json").exists()
+    # Each pet ships its spritesheet plus one avatar head per Agent face
+    # (css/agent-face.css), cropped from that spritesheet.
+    agent_faces = ("idle", "busy", "wait", "done", "fail")
     assert sorted(path.relative_to(pets_dir).as_posix() for path in pets_dir.rglob("*") if path.is_file()) == sorted(
-        f"{pet_id}/spritesheet.webp" for pet_id in asset_definitions
+        [f"{pet_id}/spritesheet.webp" for pet_id in asset_definitions]
+        + [f"{pet_id}/faces/{face}.webp" for pet_id in asset_definitions for face in agent_faces]
     )
 
     assert '"static/pets/*/*"' in pyproject
+    assert '"static/pets/*/faces/*"' in pyproject
     for pet_id in asset_definitions:
         assert f'"static/pets/{pet_id}/*"' not in pyproject
 
@@ -5979,76 +4642,9 @@ assert.equal(controller.isActive(), false);
     subprocess.run(["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True)
 
 
-def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
-    app_js = _read_static("app.js")
-
-    assert "function clampPetPosition" in app_js
-    assert "function ensurePetWithinViewport" in app_js
-    assert "ensurePetWithinViewport({ persist });" in app_js
-    assert "function petCssPx" in app_js
-    assert "function petIsPinnedToWorkspaceLeftEdge" in app_js
-    assert "function pinPetToWorkspaceLeftEdge" in app_js
-    sidebar_renderer = _slice_function(app_js, "function applySidebarCollapsed")
-    assert "const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();" in sidebar_renderer
-    assert "pinPetToWorkspaceLeftEdge({ persist: true });" in sidebar_renderer
-
-    restore_start = app_js.index("function restorePetPosition")
-    restore_end = app_js.index("function petDragBounds", restore_start)
-    restore_renderer = app_js[restore_start:restore_end]
-    assert "Number.isFinite(stored.workspaceOffsetLeft)" in restore_renderer
-    assert "workspace.left + stored.workspaceOffsetLeft" in restore_renderer
-    assert "const next = clampPetPosition(storedLeft, stored.top);" in restore_renderer
-    assert "applyPetPosition(next.left, next.top);" in restore_renderer
-    assert "!Number.isFinite(stored.workspaceOffsetLeft)" in restore_renderer
-    assert "savePetPosition(next.left, next.top);" in restore_renderer
-
-    apply_start = app_js.index("function applyPetPosition")
-    apply_end = app_js.index("function savePetPosition", apply_start)
-    apply_renderer = app_js[apply_start:apply_end]
-    assert 'pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);' in apply_renderer
-    assert 'pet.style.left = "";' in apply_renderer
-
-    save_start = app_js.index("function savePetPosition")
-    save_end = app_js.index("function restorePetPosition", save_start)
-    save_renderer = app_js[save_start:save_end]
-    assert "payload.workspaceOffsetLeft = left - workspace.left;" in save_renderer
-
-    bounds_start = app_js.index("function petDragBounds")
-    bounds_end = app_js.index("function clampPetPosition", bounds_start)
-    bounds_renderer = app_js[bounds_start:bounds_end]
-    assert 'petCssPx("--pet-min-workspace-offset", padding)' in bounds_renderer
-    assert "workspace ? workspace.left + minWorkspaceOffset : minWorkspaceOffset" in bounds_renderer
-
-    pinned_start = app_js.index("function petIsPinnedToWorkspaceLeftEdge")
-    pinned_end = app_js.index("function pinPetToWorkspaceLeftEdge", pinned_start)
-    pinned_renderer = app_js[pinned_start:pinned_end]
-    assert "Math.abs(offset - minWorkspaceOffset) <= 2" in pinned_renderer
-
-    pin_start = app_js.index("function pinPetToWorkspaceLeftEdge")
-    pin_end = app_js.index("function clampPetPosition", pin_start)
-    pin_renderer = app_js[pin_start:pin_end]
-    assert "workspace.left + minWorkspaceOffset" in pin_renderer
-    assert "applyPetPosition(next.left, next.top);" in pin_renderer
-    assert "if (persist) savePetPosition(next.left, next.top);" in pin_renderer
-
-    drag_start = app_js.index("function startPetDrag")
-    drag_end = app_js.index("function renderSettingsState", drag_start)
-    drag_renderer = app_js[drag_start:drag_end]
-    assert "const next = clampPetPosition(" in drag_renderer
-    assert "applyPetPosition(next.left, next.top);" in drag_renderer
-
-
 def test_naitang_uses_pet_atlas_rows_and_drag_directions():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    assert 'return "success";' in app_js
-    assert 'return "failed";' in app_js
-    assert 'return "running";' in app_js
-    assert 'return "complete";' in app_js
-    assert 'return "review";' in app_js
-    assert 'pet.dataset.petMood = next.left >= current.left ? "running-right" : "running-left";' in app_js
-    assert "renderPetState();" in app_js[app_js.index("function startPetDrag") : app_js.index("function renderSettingsState")]
 
     expected_rows = {
         'data-pet-mood="idle"': ("0%", "6", "85.7143%"),
@@ -6121,48 +4717,14 @@ def test_pet_companion_does_not_auto_float_vertically():
     running_end = styles_css.index("}", running_start)
     running_rule = styles_css[running_start:running_end]
     assert '[data-pet-mood="running"] .pet-sticker' not in running_rule
-    assert "pet-playful-bounce" in running_rule
-
-
-def test_pet_reaction_moods_return_to_idle_after_feedback_window():
-    app_js = _read_static("app.js")
-
-    assert "const PET_REACTION_DURATION_MS = 6500;" in app_js
-    assert 'const petReactionMoods = new Set(["success", "failed", "complete", "review"]);' in app_js
-    assert "let petReactionMood = null;" in app_js
-    assert "let petReactionKey = \"\";" in app_js
-    assert "let petReactionTimer = null;" in app_js
-    assert "function basePetMoodFromTask()" in app_js
-    assert "function petReactionKeyForMood(mood)" in app_js
-    assert "function schedulePetReactionReset(key)" in app_js
-    assert "clearTimeout(petReactionTimer);" in app_js
-    assert "petReactionMood = null;" in app_js
-    assert 'return petReactionMood || "idle";' in app_js
-    assert "petReactionMoods.has(mood)" in app_js
-    assert "task?.updated_at" in app_js
+    # 2026-10-19 user feedback: moods change the face only, never the position.
+    assert "pet-playful-bounce" not in running_rule
+    assert "animation: none" in running_rule
 
 
 def test_pet_companion_is_draggable_and_reacts_to_task_status():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
 
-    assert "function petMoodFromTask" in app_js
-    assert "function startPetDrag" in app_js
-    assert "function restorePetPosition" in app_js
-    assert "function savePetPosition" in app_js
-    assert 'taskSession.task?.status || ""' in app_js
-    assert 'if (selectedTaskIsBusy()) return "running";' in app_js
-    assert 'if (status === "succeeded") return "success";' in app_js
-    assert 'if (status === "failed") return "failed";' in app_js
-    assert 'if (status === "review_required") return "review";' in app_js
-    assert '["running", "computing_metrics"].includes(status)' in app_js
-    assert '["scanned", "executed", "writing_artifacts"].includes(status)' in app_js
-    assert 'target.id === "settingsPetSelect"' in app_js
-    assert 'pet.addEventListener("pointerdown", startPetDrag)' in app_js
-    assert 'window.addEventListener("pointermove", onPointerMove)' in app_js
-    assert 'window.addEventListener("pointerup", onPointerUp)' in app_js
-    assert "clamp(" in app_js
-    assert "renderPetState();" in app_js
 
     for removed_element_id in [
         "executionModeJupyterKernel",
@@ -6176,13 +4738,9 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
 
 
 def test_execution_environment_panel_is_in_system_settings():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
     index_html = _read_static("index.html")
 
-    assert "executionEnvironmentSettingsLabel" in app_js
-    assert "renderExecutionEnvironmentSummary" in app_js
-    assert "settingsExecutionEnvironmentValue" not in app_js
     assert 'data-governance-nav="execution-environment"' in index_html
     assert 'data-governance-panel-content="execution-environment"' in index_html
 
@@ -6194,62 +4752,25 @@ def test_execution_environment_panel_is_in_system_settings():
     assert ".governance-panel-actions" in styles_css
 
 
-def test_execution_environment_api_fields_are_wired():
-    app_js = _read_static("app.js")
-
-    assert "/api/settings/execution-environment/options" in app_js
-    assert "loadExecutionEnvironmentSettings" in app_js
-    assert "saveExecutionEnvironmentSettings" in app_js
-    assert "renderExecutionEnvironmentOptions" in app_js
-
-    for field in [
-        "execution_mode",
-        "jupyter_kernel",
-        "conda_env",
-        "python_executable",
-        "kernel_name",
-        "conda_env_name",
-        "python_executable",
-    ]:
-        assert field in app_js
 
 
 def test_realtime_panel_keeps_only_reproducibility_evidence_in_center():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
 
     assert 'id="reproducibilitySummary"' in index_html
     assert 'id="notebookSummary"' not in index_html
     assert 'id="notebookStepsSummary"' not in index_html
     assert 'id="contractSummary"' not in index_html
 
-    assert "api/tasks/${taskId}/evidence" in app_js
-    assert "renderEvidence" in app_js
-    assert "notebook_steps" in app_js
-    assert "reproducibility" in app_js
-    assert "renderNotebookSteps(result.notebook_steps || [], result.notebook_cells || notebookCells)" in app_js
     assert "暂无 PMML 打分证据，完成 PMML 全量评分后展示结果" in index_html
-    assert "暂无分数一致性证据，运行完建模代码后展示结果" in app_js
     assert "暂无 Notebook 契约证据" not in index_html
     assert "还没运行验证。扫描材料后运行当前任务验证。" not in index_html
 
 
 def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    renderer_start = app_js.index("function renderReproducibilityEvidence")
-    renderer_end = app_js.index("function renderEvidence", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
 
-    assert "const rows = Array.isArray(reproducibility?.rows) ? reproducibility.rows : [];" in renderer
-    assert "score-compare-list" in renderer
-    assert "score-diff-bar" in renderer
-    assert "score_code_model" in renderer
-    assert "score_submitted_pmml" in renderer
-    assert "abs_diff" in renderer
-    assert "const rowLimit = 10;" in renderer
-    assert '"<strong>分数一致性</strong>"' not in renderer
     assert ".score-compare-list" in styles_css
     assert ".score-diff-bar" in styles_css
     assert "border-color: var(--danger-border)" in _css_rule(
@@ -6261,19 +4782,9 @@ def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
 
 
 def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_tone():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    renderer_start = app_js.index("function renderReproducibilityEvidence")
-    renderer_end = app_js.index("function renderEvidence", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
 
-    assert "<span>6位小数一致条数</span>" not in renderer
-    assert "match_count: summary.match_count" not in app_js
-    assert "<span>6位小数不一致条数</span>" in renderer
-    assert "<span>随机种子</span>" not in renderer
-    assert "reproducibilityStatusClass(summary.status)" in renderer
-    assert "function reproducibilityStatusClass" in app_js
     summary_grid_rule = _css_rule(styles_css, ".summary-grid")
     summary_item_rule = _css_rule(styles_css, ".summary-item")
     assert "grid-template-columns: repeat(4, minmax(176px, 1fr))" in summary_grid_rule
@@ -6287,23 +4798,10 @@ def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_
 
 
 def test_reproducibility_panel_renders_precision_consistency_chart():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    precision_js = _read_static("js/precision-consistency.js")
 
-    renderer_start = app_js.index("function renderReproducibilityEvidence")
-    renderer_end = app_js.index("function renderEvidence", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
 
-    assert "export function buildPrecisionConsistencyBars" in precision_js
-    assert "export function renderPrecisionConsistencyChart" in precision_js
-    assert "for (let decimals = 1; decimals <= 6; decimals += 1)" in precision_js
-    assert "roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)" in precision_js
-    assert 'from "./js/precision-consistency.js"' in app_js
-    assert "function buildPrecisionConsistencyBars" not in app_js
-    assert "function renderPrecisionConsistencyChart" not in app_js
-    assert "renderPrecisionConsistencyChart(rows, {" in renderer
     assert ".score-precision-chart" in styles_css
     assert ".score-precision-bars" in styles_css
     assert ".score-precision-bar" in styles_css
@@ -6322,79 +4820,24 @@ def test_reproducibility_panel_renders_precision_consistency_chart():
 # just text-pattern drift.
 
 
-def test_reproducibility_panel_formats_null_scores_as_missing_values():
-    app_js = _read_static("app.js")
-
-    formatter_start = app_js.index("function formatScoreValue")
-    formatter_end = app_js.index("function reproducibilityStatusLabel", formatter_start)
-    formatter = app_js[formatter_start:formatter_end]
-    renderer_start = app_js.index("function renderReproducibilityEvidence")
-    renderer_end = app_js.index("function renderEvidence", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-
-    assert "value === null || value === undefined || value === \"\"" in formatter
-    assert "row.abs_diff === null || row.abs_diff === undefined" in renderer
-
-
 def test_reproducibility_card_is_hidden_until_notebook_success():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
     styles_css = _read_browser_css()
 
     assert 'id="notebookSection" class="progress-panel hidden"' in index_html
     assert ".progress-panel.hidden" in styles_css
-    assert "function shouldShowReproducibilitySection" in app_js
-    assert "export const notebookReproducibilityCompleteStatuses = new Set([" in state_js
-    for status in ["executed", "computing_metrics", "writing_artifacts", "succeeded", "review_required"]:
-        assert f'"{status}"' in state_js
-    assert "notebookReproducibilityCompleteStatuses.has(task?.status || \"\")" in app_js
-    assert '$("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection())' in app_js
 
 
 def test_metric_card_is_hidden_until_metric_validation_success():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
     styles_css = _read_browser_css()
 
     assert 'id="metricSection" class="progress-panel hidden"' in index_html
     assert ".progress-panel.hidden" in styles_css
-    assert "function shouldShowMetricSection" in app_js
-    assert "export const metricOverviewCompleteStatuses = new Set([" in state_js
-    for status in ["writing_artifacts", "succeeded"]:
-        assert f'"{status}"' in state_js
-    helper_start = state_js.index("export const metricOverviewCompleteStatuses = new Set([")
-    helper_end = state_js.index("export const workflowSteps = [", helper_start)
-    helper_block = state_js[helper_start:helper_end]
-    assert '"computing_metrics"' not in helper_block
-    assert '"executed"' not in helper_block
-    assert "metricOverviewCompleteStatuses.has(task?.status || \"\")" in app_js
-    assert '$("metricSection")?.classList.toggle("hidden", !shouldShowMetricSection())' in app_js
 
 
-def test_metric_sparkline_html_requires_local_spec_marker():
-    metric_tables_js = _read_static("js/metric-tables.js")
-    renderer_start = metric_tables_js.index("export function renderCellByKind")
-    renderer_end = metric_tables_js.index("export function metricHeaderShouldRightAlign", renderer_start)
-    renderer = metric_tables_js[renderer_start:renderer_end]
-    trend_start = metric_tables_js.index("export function renderTrendTable")
-    trend_end = metric_tables_js.index("export function renderSparklineSvg", trend_start)
-    trend_renderer = metric_tables_js[trend_start:trend_end]
-
-    assert 'kind === "trend-spark" && spec && spec.__localHtml === true' in renderer
-    assert 'trendSpecs.splice(insertAt, 0, { kind: "trend-spark", __localHtml: true });' in trend_renderer
 
 
-def test_metric_tooltip_uses_document_delegation_for_rebuilt_preview():
-    metric_tables_js = _read_static("js/metric-tables.js")
-    tooltip_start = metric_tables_js.index("export function attachMetricTooltip")
-    tooltip_end = metric_tables_js.index("export function renderEnhancedTable", tooltip_start)
-    tooltip = metric_tables_js[tooltip_start:tooltip_end]
-
-    assert 'document.addEventListener("mouseover"' in tooltip
-    assert 'event.target.closest("#metricPreview [data-tip]")' in tooltip
-    assert 'rootEl.addEventListener("mouseover"' not in tooltip
 
 
 def test_metric_kpi_footer_values_are_centered_in_each_column():
@@ -6410,7 +4853,6 @@ def test_metric_kpi_footer_values_are_centered_in_each_column():
 
 def test_metric_tables_use_tabular_right_aligned_numeric_cells():
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
 
     table_start = styles_css.index(".metric-table-section .metric-table {")
     table_end = styles_css.index("}", table_start)
@@ -6422,12 +4864,10 @@ def test_metric_tables_use_tabular_right_aligned_numeric_cells():
     assert "font-variant-numeric: tabular-nums" in table_rule
     assert "text-align: right" in number_rule
     assert "font-variant-numeric: tabular-nums" in number_rule
-    assert 'return { cls: "cell-number"' in app_js
 
 
 def test_metric_overview_uses_semantic_visual_tokens():
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
     metric_section = styles_css[styles_css.index("/* ====== Metric overview redesign ====== */") :]
@@ -6485,15 +4925,10 @@ def test_metric_overview_uses_semantic_visual_tokens():
         "#6B7280",
     ]:
         assert legacy_color not in metric_section
-    metric_tables_js = _read_static("js/metric-tables.js")
-    assert "#0EA5E9" not in app_js
-    assert "#0EA5E9" not in metric_tables_js
-    assert 'var(--metric-databar-accent)' in metric_tables_js
 
 
 def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
     for selector, accent_token, soft_token in [
@@ -6544,98 +4979,23 @@ def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
         'body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) '
         "tr:hover :is(.databar-label, .period-text, .psi-value)"
     ) in styles_css
-    metric_tables_js = _read_static("js/metric-tables.js")
     assert 'body[data-theme="dark"] .roc-axis-label' in styles_css
-    assert 'class="roc-axis-label"' in metric_tables_js
-    assert 'fill="#6B7280"' not in app_js
-    assert 'fill="#6B7280"' not in metric_tables_js
 
 
-def test_agent_progress_refreshes_metric_preview_before_streaming_analysis_messages():
-    app_js = _read_static("app.js")
-    poll_start = app_js.index("async function pollValidationProgress")
-    poll_end = app_js.index("async function validateCurrentTask", poll_start)
-    poll_body = app_js[poll_start:poll_end]
-
-    assert "metricOverviewComplete(polledTask)" in poll_body
-    assert "await loadReportFields(taskId);" in poll_body
-    assert poll_body.index("await loadReportFields(taskId);") < poll_body.index("await loadAgentMessages(taskId);")
-
-
-def test_evidence_restore_renders_persisted_scan_result():
-    app_js = _read_static("app.js")
-    renderer_start = app_js.index("function renderEvidence")
-    renderer_end = app_js.index("async function loadTaskEvidence", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-
-    assert "evidence.scan" in renderer
-    assert "renderScanResult(evidence.scan, evidence.notebook_cells || [])" in renderer
 
 
 def test_scan_result_renders_structured_preflight_checks():
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
-    renderer_start = app_js.index("function renderScanResult")
-    renderer_end = app_js.index("function renderValidationResult", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
 
-    assert "result.checks" in renderer
-    assert "preflight-check-list" in renderer
-    assert "notebook_contract" in app_js
-    assert "file-list" not in renderer
-    assert "ambiguity-list" not in renderer
-    for selector, token in [
-        (".preflight-check-item.danger", "--danger-border"),
-        (".preflight-check-item.warning", "--warning-border"),
-        (".preflight-check-item.success", "--success-border"),
-    ]:
-        assert f"border-color: var({token})" in _css_rule(styles_css, selector)
-
-
-def test_validate_action_polls_task_status_and_evidence_until_terminal():
-    app_js = _read_static("app.js")
-
-    assert "pollValidationProgress" in app_js
-    assert "terminalTaskStatuses" in app_js
-    assert "activeValidationStatuses" in app_js
-    assert 'await pollValidationProgress(new Set(["executed", "failed", "scanned"]), taskId)' in app_js
-    assert 'await pollValidationProgress(new Set(["executed", "writing_artifacts", "failed"]), taskId)' in app_js
-    assert "await pollValidationProgress(terminalTaskStatuses, taskId)" in app_js
-    assert "await loadTaskEvidence(taskId)" in app_js
-    assert "验证进行中" in app_js
-
-
-def test_validate_action_reloads_notebook_evidence_after_completion():
-    app_js = _read_static("app.js")
-    validate_start = app_js.index("async function validateCurrentTask")
-    validate_end = app_js.index("async function cancelCurrentNotebook", validate_start)
-    validate_renderer = app_js[validate_start:validate_end]
-
-    assert "await loadReportFields(taskId);\n  await loadTaskEvidence(taskId);" in validate_renderer
-
-
-def test_evidence_fetch_failure_preserves_completed_notebook_evidence():
-    app_js = _read_static("app.js")
-    loader_start = app_js.index("async function loadTaskEvidence")
-    loader_end = app_js.index("function renderActionError", loader_start)
-    loader = app_js[loader_start:loader_end]
-
-    assert "notebookReproducibilityComplete(workbenchTask())" in loader
-    assert "isWorkbenchTaskId(taskId)" in loader
-    assert "resetEvidenceSummaries();" in loader
-
-
-def test_notebook_step_renderer_does_not_cap_steps_at_eight():
-    app_js = _read_static("app.js")
-    renderer_start = app_js.index("function renderNotebookSteps")
-    renderer_end = app_js.index("function renderReproducibilityEvidence", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-
-    assert ".slice(0, 8)" not in renderer
-    assert "notebookSteps.map" not in renderer
-    assert "latestNotebookSteps = mergePendingSystemSteps(normalizeNotebookSteps(notebookSteps, notebookCells))" in renderer
-    assert "renderWorkflowStepper()" in renderer
-    assert "Notebook 步骤（共" not in app_js
+    # Errors keep a semantic red edge; warnings keep a tinted fill; passed checks are
+    # neutral rows whose green label carries the state (no decorative coloured borders).
+    assert "border-color: var(--danger-border)" in _css_rule(styles_css, ".preflight-check-item.danger")
+    warning_rule = _css_rule(styles_css, ".preflight-check-item.warning")
+    assert "border-color: transparent" in warning_rule
+    assert "background: var(--warning-soft)" in warning_rule
+    success_rule = _css_rule(styles_css, ".preflight-check-item.success")
+    assert "border-color: transparent" in success_rule
+    assert "background: var(--card)" in success_rule
 
 
 def test_notebook_step_renderer_uses_latest_retried_system_cell_status():
@@ -6693,34 +5053,6 @@ def test_notebook_step_renderer_uses_latest_retried_system_cell_status():
     assert normalized[1]["cell_indexes"] == [49]
 
 
-def test_failed_task_error_detail_moves_to_current_status_only():
-    app_js = _read_static("app.js")
-    workspace_view_js = _read_static("js/task-workspace-view.js")
-
-    append_start = app_js.index("function taskRowContentSignature")
-    append_end = app_js.index("function renderTaskSnapshot", append_start)
-    append_renderer = app_js[append_start:append_end]
-    assert "task.status_message" not in append_renderer
-
-    snapshot_start = workspace_view_js.index("export function renderTaskSnapshot")
-    snapshot_end = workspace_view_js.index("export function renderCurrentTaskWorkspace", snapshot_start)
-    snapshot_renderer = workspace_view_js[snapshot_start:snapshot_end]
-    assert "selectedTask.status_message" not in snapshot_renderer
-
-    step_start = app_js.index("function renderWorkflowStepper")
-    step_end = app_js.index("function formatDate", step_start)
-    step_renderer = app_js[step_start:step_end]
-    assert "taskSession.task.status_message" not in step_renderer
-    assert "step-error" not in step_renderer
-
-    assert "function taskFailureActionStatusMessage" in app_js
-    assert "function taskFailureActionStatusTitle" in app_js
-    status_renderer = "\n".join(_slice_function(app_js, f"function {name}(") for name in (
-        "taskFailureActionStatusMessage", "setTaskFailureActionStatus",
-    ))
-    assert "task.status_message" in status_renderer
-    assert 'const kind = task.status === "review_required" ? "success" : "error";' in status_renderer
-    assert "setActionStatus(taskFailureActionStatusTitle(task), kind, message)" in status_renderer
 
 
 def test_review_required_status_bar_uses_completed_green_copy_not_failure_detail():
@@ -6732,9 +5064,10 @@ def test_review_required_status_bar_uses_completed_green_copy_not_failure_detail
         }
     )
 
+    # Batch 4 (2026-10-14 redesign): review_required is sent with its own kind, not success.
     assert result == {
         "title": "验证已完成，需复核报告。",
-        "kind": "success",
+        "kind": "review",
         "detail": "全部流程已完成，请查看右侧报告并进行人工复核。",
     }
     rendered = json.dumps(result, ensure_ascii=False).lower()
@@ -6759,10 +5092,11 @@ def test_review_required_status_bar_uses_completed_green_copy_not_failure_detail
         action_message="验证已完成，需复核报告。",
         action_kind="success",
     )
+    # Batch 4 (2026-10-14 redesign): sidebar and title share one word and tone (待复核/green + 已完成 -> 需复核/review).
     assert display == {
-        "rowLabel": "待复核",
-        "rowTone": "success",
-        "heroPill": {"label": "已完成", "tone": "ok"},
+        "rowLabel": "需复核",
+        "rowTone": "review",
+        "heroPill": {"label": "需复核", "tone": "review"},
     }
 
 
@@ -6793,7 +5127,8 @@ def test_intermediate_stage_success_never_claims_the_whole_task_is_complete():
     assert scanned["heroPill"] == {"label": "待继续", "tone": "review"}
     assert portfolio_setup["heroPill"] == {"label": "待确认", "tone": "review"}
     assert portfolio_setup["rowLabel"] == "待确认"
-    assert portfolio_setup["rowTone"] == ""
+    # Batch 4 (2026-10-14 redesign): the row tone joins the shared set ('' -> review, matching the title).
+    assert portfolio_setup["rowTone"] == "review"
 
 
 def test_stopped_agent_task_status_copy_is_not_failure_or_busy():
@@ -6814,10 +5149,11 @@ def test_stopped_agent_task_status_copy_is_not_failure_or_busy():
         }
     )
 
+    # Batch 4 (2026-10-14 redesign): 停止 -> the canonical 已停止, neutral on both surfaces.
     assert display == {
-        "rowLabel": "停止",
-        "rowTone": "",
-        "heroPill": {"label": "停止", "tone": "neutral"},
+        "rowLabel": "已停止",
+        "rowTone": "neutral",
+        "heroPill": {"label": "已停止", "tone": "neutral"},
     }
     assert result == {
         "title": "已停止当前动作。",
@@ -6838,9 +5174,10 @@ def test_stopped_agent_task_does_not_spin_running_substeps():
         {"id": "system-repro-compare", "status": "running"},
     ]
 
+    # Batch 4 (2026-10-14 redesign): the step the task stopped on reads stopped, like the title.
     assert _workflow_step_statuses_for(task, notebook_steps) == [
         "succeeded",
-        "pending",
+        "stopped",
         "pending",
         "pending",
     ]
@@ -6904,24 +5241,9 @@ def test_later_started_substep_clears_stale_running_rail_tone():
     assert json.loads(result.stdout) == ["succeeded", "succeeded", "pending"]
 
 
-def test_stopped_step_checker_has_no_stop_square_mark():
-    step_checker_js = _read_static("js/step-checker.js")
-    source = step_checker_js[step_checker_js.index("export function stepCheckerHtml"):]
-    stopped_start = source.index('if (state === "stopped")')
-    stopped_end = source.index('if (state === "review")', stopped_start)
-    stopped_branch = source[stopped_start:stopped_end]
-
-    assert '<span class="check-icon stopped" aria-hidden="true"></span>' in stopped_branch
-    assert "<svg" not in stopped_branch
-    assert "<rect" not in stopped_branch
-
-
 def test_skipped_step_uses_dash_and_only_skipped_titles_are_struck_out():
-    step_checker_js = _read_static("js/step-checker.js")
     styles_css = _read_browser_css()
 
-    assert '<span class="check-icon skipped" aria-hidden="true">' in step_checker_js
-    assert 'd="M3 8h10"' in step_checker_js
     assert "text-decoration: line-through" in _css_rule(styles_css, ".step.skipped .step-title")
     assert "text-decoration" not in _css_rule(styles_css, ".step.succeeded .step-title")
 
@@ -6949,7 +5271,7 @@ def test_current_status_error_detail_is_compact_accessible_and_collapsible():
     assert 'detail.setAttribute("role", kind === "error" ? "alert" : "status");' in status_renderer
     assert 'detail.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");' in status_renderer
     assert 'detail.className = `action-error-detail ${kind === "error" ? "error" : ""}`.trim();' in status_renderer
-    assert "setActionErrorDetail(describeActionStatus(message, kind, detail), kind)" in status_renderer
+    assert "setActionErrorDetail(describeActionStatus(message, kind, detail), kind, detailParts)" in status_renderer
     assert "actionErrorDetail" in status_renderer
     describe_body = _slice_function(app_js, "function describeActionStatus")
     compact_body = _slice_function(app_js, "function compactActionStatusDetail")
@@ -6985,14 +5307,16 @@ def test_current_status_error_detail_is_compact_accessible_and_collapsible():
 
     # failures are signalled by a red status pill, not a red box
     assert "function actionStatusPill" in app_js
+    # Batch 4 (2026-10-14 redesign): one failure word (验证失败 -> 失败); stage copy stays in the detail line.
     assert _task_display_status_for(
         {"task_type": "validation", "status": "failed"},
         action_message="复核前检查失败。", action_kind="error",
-    )["heroPill"] == {"label": "验证失败", "tone": "fail"}
+    )["heroPill"] == {"label": "失败", "tone": "fail"}
+    # Batch 4 (2026-10-14 redesign): 需复核 waits on the user, so it takes the review tone, not ok.
     assert _task_display_status_for(
         {"task_type": "validation", "status": "review_required"},
         action_message="报告需要复核。", action_kind="error",
-    )["heroPill"] == {"label": "需复核", "tone": "ok"}
+    )["heroPill"] == {"label": "需复核", "tone": "review"}
     assert '.task-pill.fail' in styles_css
 
     detail_start = styles_css.index(".action-error-detail {")
@@ -7061,19 +5385,22 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     hero_rule = styles_css[hero_start:hero_end]
     assert "overflow: hidden;" in hero_rule
     assert "isolation: isolate;" in hero_rule
-    assert "border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);" in hero_rule
-    assert "border: 1px solid transparent;" not in hero_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): the status card is a flat grey card.
+    assert "border: 1px solid transparent;" in hero_rule
+    assert "background: var(--card);" in hero_rule
     assert "transform: translateZ(0);" in hero_rule
     assert "contain: paint;" not in hero_rule
     assert "will-change: transform;" in hero_rule
-    assert "backdrop-filter: blur(18px) saturate(1.55);" in hero_rule
-    assert "background: linear-gradient" in hero_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): no blur on the status card; glass toolbar capsules arrive in batch 2.
+    assert "backdrop-filter" not in hero_rule
+    assert "background: linear-gradient" not in hero_rule
     assert "transition: border-color 140ms ease;" in hero_rule
     assert "background 180ms" not in hero_rule
     assert "box-shadow 180ms" not in hero_rule
     assert "0 14px" not in hero_rule
     assert ".task-hero.is-glass-active" in styles_css
-    assert ".task-hero.is-glass-active::after" in styles_css
+    # Batch 2 (2026-10-14 redesign D7-D10): the glass rim replaces the dark-theme highlight line.
+    assert "body[data-theme=\"dark\"] .task-hero.is-glass-active::after {" not in styles_css
 
     after_start = styles_css.index(".task-hero::after {")
     after_end = styles_css.index("}", after_start)
@@ -7087,8 +5414,13 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     active_start = styles_css.index(".task-hero.is-glass-active {")
     active_end = styles_css.index("}", active_start)
     active_rule = styles_css[active_start:active_end]
-    assert "border-color: color-mix(in srgb, var(--border) 62%, transparent);" in active_rule
-    assert "border-color: transparent;" not in active_rule
+    # Batch 2 (2026-10-14 redesign D7-D10): once content scrolls beneath it, the header becomes toolbar glass.
+    # Batch 6a removed the validation tabs, so every task header floats as glass.
+    assert "#resultWorkspace .task-hero.is-glass-active {" in styles_css
+    assert "data-validation-view" not in styles_css
+    assert "border-color: var(--glass-rim);" in active_rule
+    assert "background: var(--glass-bg);" in active_rule
+    assert "backdrop-filter: blur(var(--glass-blur)) saturate(180%);" in active_rule
     assert "var(--accent)" not in active_rule
     assert "rgba(0, 113, 227" not in active_rule
     assert "0 18px" not in active_rule
@@ -7097,14 +5429,12 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     dark_hero_start = styles_css.index('body[data-theme="dark"] .task-hero {')
     dark_hero_end = styles_css.index("}", dark_hero_start)
     dark_hero_rule = styles_css[dark_hero_start:dark_hero_end]
-    assert "border-color: color-mix(in srgb, var(--border) 58%, transparent);" in dark_hero_rule
-    assert "border-color: transparent;" not in dark_hero_rule
+    # Batch 1 (2026-10-14 redesign): light and dark share one style, only colours differ,
+    # so the dark status card is the same flat card as the light one.
+    assert "border-color: transparent;" in dark_hero_rule
+    assert "background: var(--card);" in dark_hero_rule
+    assert "backdrop-filter: none;" in dark_hero_rule
     assert "0 16px 42px" not in dark_hero_rule
-    # VD-8: the dark task-hero now sources its glass edge from the shared
-    # --glass-edge token (raised into the 0.14-0.18 highlight range with an
-    # added bottom inner shadow for real depth) instead of a hardcoded
-    # near-invisible 0.08 highlight.
-    assert "box-shadow: var(--glass-edge);" in dark_hero_rule
 
     assert 'id="resultScrollContent"' in index_html
     assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html
@@ -7139,36 +5469,6 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     assert "static/app.js?v=20260603-dark-masks" not in index_html
 
 
-def test_status_card_glass_glow_tracks_inner_scroll_position():
-    app_js = _read_static("app.js")
-
-    assert "function updateTaskHeroGlassState" in app_js
-    assert "function scheduleTaskHeroGlassState" in app_js
-    assert "function syncTaskHeroGlassLayout" in app_js
-    assert "let taskHeroGlassActive = null;" in app_js
-    assert "let taskHeroCanScroll = false;" in app_js
-    assert "function setTaskHeroGlassActive" in app_js
-    assert "if (taskHeroGlassActive === glassActive) return;" in app_js
-    assert "updateTaskHeroGlassState({ measureScroll: true });" in app_js
-    state_start = app_js.index("function updateTaskHeroGlassState")
-    state_end = app_js.index("function scheduleTaskHeroGlassState", state_start)
-    state_body = app_js[state_start:state_end]
-    assert "if (measureScroll)" in state_body
-    assert "taskHeroCanScroll = scrollContent.scrollHeight > scrollContent.clientHeight + 1;" in state_body
-    assert "const glassActive = taskHeroCanScroll && scrollContent.scrollTop > 6;" in state_body
-    assert 'workspace.style.setProperty("--workspace-head-space"' in app_js
-    assert 'hero.classList.toggle("is-glass-active", glassActive)' in app_js
-    assert 'workspace.classList.toggle("is-glass-active", glassActive)' in app_js
-    assert "function handleResultScroll" in app_js
-    result_scroll_start = app_js.index("function handleResultScroll")
-    result_scroll_end = app_js.index("function syncTaskHeroGlassLayout", result_scroll_start)
-    result_scroll_body = app_js[result_scroll_start:result_scroll_end]
-    assert "if (pendingResultScrollRestoreTaskId !== taskSession.taskId)" in result_scroll_body
-    assert "rememberResultScrollPosition();" in result_scroll_body
-    assert "scheduleTaskHeroGlassState();" in result_scroll_body
-    assert '$("resultScrollContent").addEventListener("scroll", handleResultScroll, { passive: true });' in app_js
-    assert 'window.addEventListener("resize", syncTaskHeroGlassLayout);' in app_js
-    assert "requestAnimationFrame(syncTaskHeroGlassLayout)" in app_js
 
 
 def test_task_hero_keeps_unclipped_top_glass_edge():
@@ -7178,7 +5478,8 @@ def test_task_hero_keeps_unclipped_top_glass_edge():
     hero_rule = _css_rule(styles_css, ".task-hero")
     assert "border: 1px solid" in hero_rule
     assert "contain: paint;" not in hero_rule
-    assert "backdrop-filter: blur(18px) saturate(1.55);" in hero_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): no blur on the status card; glass toolbar capsules arrive in batch 2.
+    assert "backdrop-filter" not in hero_rule
     workspace_rule = _css_rule(styles_css, ".result-workspace")
     assert "overflow: hidden;" in workspace_rule
     assert "padding: 1px 0 0;" in workspace_rule
@@ -7198,81 +5499,10 @@ def test_workbench_has_no_full_width_top_hairline():
     assert "background-position: left 0 top 0, right 0 top 0" in head_rule
 
 
-def test_validation_failure_writes_error_detail_to_global_action_status():
-    app_js = _read_static("app.js")
-
-    validate_start = app_js.index("async function validateCurrentTask")
-    validate_end = app_js.index("async function loadReportFields", validate_start)
-    validate_renderer = app_js[validate_start:validate_end]
-    assert "setTaskFailureActionStatus(taskSession.task || finalTask)" in validate_renderer
-
-    poll_start = app_js.index("async function pollValidationProgress")
-    poll_end = app_js.index("async function validateCurrentTask", poll_start)
-    poll_renderer = app_js[poll_start:poll_end]
-    assert "setTaskFailureActionStatus(polledTask)" in poll_renderer
-    assert "setActionStatus(\"\")" not in poll_renderer
 
 
-def test_agent_mode_creation_and_stepper_hide_manual_buttons():
-    app_js = _read_static("app.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
-    driver_confirm_js = _read_static("js/v2/driver_gate_confirm.js")
-
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_body = app_js[create_start:create_end]
-    assert "Agent 模式当前暂不支持创建任务" not in create_body
-    assert "const task = await createTaskDialog.createTask();" in create_body
-    assert "run_mode: selectedRunMode" in create_dialog_js
-
-    assert "function selectedTaskIsAgentMode" in app_js
-    # Manual mode owns clickable gate actions. Agent mode owns the natural-
-    # language channel and must never render a second one-click continuation.
-    assert "agentGateUsesConversationOnly" in app_js
-    assert "stripGateButtonsHtml" in app_js
-    assert "data-gate-passive-control" in app_js
-    assert "(?![^>]*\\bdata-gate-passive-control\\b)" in app_js
-    plan_rail_js = _read_static("js/v2/plan_rail_controller.js")
-    assert "data-plan-retry-open" not in plan_rail_js
-    # Actual controller tests cover Agent-mode form hiding and read-only
-    # completion reconciliation in test_frontend_plan_reconciliation.py.
-    assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
-    assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
-    assert "startAgentValidation" in app_js
 
 
-def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_composer():
-    app_js = _read_static("app.js")
-
-    create_scan_start = app_js.index("async function createTaskAndScan")
-    create_scan_end = app_js.index("async function pollValidationProgress", create_scan_start)
-    create_scan_body = app_js[create_scan_start:create_scan_end]
-    agent_branch_start = create_scan_body.index('if (task.run_mode === "agent")')
-    agent_branch_end = create_scan_body.index('const busy = claimBusy("scan"', agent_branch_start)
-    agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
-
-    assert 'const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";' in create_scan_body
-    assert "const activeDialogTaskType = createTaskDialog.activeTaskType();" in agent_branch
-    assert "const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);" in agent_branch
-    # Risk analysis starts its deterministic intake immediately; other
-    # non-validation Agent tasks still route to the inline composer.
-    assert 'if (!isValidationTask && task.task_type === "vintage")' in agent_branch
-    assert "await dispatchDriverStart(taskId);" in agent_branch
-    assert "请先告诉 Agent 要分析什么" in agent_branch
-    assert "if (!isValidationTask && definition.initialGoal)" in agent_branch
-    assert '$("agentComposerInput")?.focus?.();' in agent_branch
-    assert "已填入建议目标，确认后发送即可。" in agent_branch
-    assert 'setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");' in agent_branch
-    assert "openV2WorkspaceWithGoal(" not in agent_branch
-    assert "已打开 V2 Workflow 计划面板" not in agent_branch
-    assert "await dispatchAgentValidation(taskId);" not in agent_branch
-    assert "await scanCurrentTask();" not in agent_branch
-    assert "正在自动识别材料" not in agent_branch
-    assert "开始验证" not in agent_branch
-    assert "const taskId = task.id || taskSession.taskId;" in agent_branch
-
-    assert "async function dispatchAgentValidation" in app_js
-    assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in app_js
 
 
 def test_welcome_task_cards_share_the_same_visual_treatment():
@@ -7299,81 +5529,8 @@ def test_welcome_task_cards_share_the_same_visual_treatment():
         assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card available"'
 
 
-def test_agent_task_creation_prefills_conversation_composer_with_goal():
-    app_js = _read_static("app.js")
-    task_types_js = _read_static("js/task-types.js")
-
-    # The V2 plan-composer dialog is retired; agent tasks now prefill the inline
-    # conversation composer with the task type's suggested goal.
-    helper_start = app_js.index("function prefillAgentTaskInstruction")
-    helper_end = app_js.index("async function createTask", helper_start)
-    helper_body = app_js[helper_start:helper_end]
-
-    assert 'if (task?.run_mode !== "agent") return;' in helper_body
-    assert 'const input = $("agentComposerInput");' in helper_body
-    # Only seed when the composer is empty, so a user's draft is never clobbered.
-    assert "if (!input || input.value.trim()) return;" in helper_body
-    assert "const definition = taskTypeDefinition(task.task_type || createTaskDialog.activeTaskType());" in helper_body
-    assert "input.value = definition.initialGoal;" in helper_body
-    assert "autoGrowComposerInput();" in helper_body
-    assert "updateAgentSendDisabled();" in helper_body
-    assert "先创建任务并说明要分析什么" in task_types_js
-    for goal in (
-        'initialGoal: "开始数据处理"',
-        'initialGoal: "开始特征分析"',
-        'initialGoal: "开始建模"',
-        'initialGoal: "开始模型验证"',
-        'initialGoal: "开始策略开发"',
-    ):
-        assert goal in task_types_js
-    assert "deferredMaterials: true" in task_types_js
-    assert 'initialGoal: ""' in task_types_js
-    assert "请基于当前任务材料" not in task_types_js
-    assert "先识别 cohort、MOB 和坏账标签字段" not in task_types_js
-    assert "计算资产 Vintage 曲线并给出风险观察" not in task_types_js
-    assert "营利性测算" not in app_js
-
-    # createTask() invokes the prefill once the task is created.
-    assert "prefillAgentTaskInstruction(task);" in app_js
-    assert 'task.task_type === "vintage"' in app_js
-    assert "await dispatchDriverStart(taskId);" in app_js
-    # The retired V2 workspace composer helpers are gone.
-    assert "function seedV2GoalComposer" not in app_js
-    assert "function openV2WorkspaceWithGoal" not in app_js
-    assert "function showV2WorkspaceDialog" not in app_js
 
 
-def test_driver_manual_analysis_omits_plan_overview_messages():
-    app_js = _read_static("app.js")
-    module_js = _read_static("js/v2/driver_manual_analysis.js")
-    body = _slice_function(module_js, "export function driverManualAnalysisHtml")
-    wrapper = _slice_function(app_js, "function driverManualAnalysisHtml")
-    render = _slice_function(app_js, "function renderDriverManualAnalysis")
-
-    assert 'meta.kind === "overview" || meta.kind === "plan_overview"' in body
-    assert "driverManualAnalysisHtmlController(messages" in app_js
-    assert "visibleMessages" in body
-    assert "filterRecoveredWorkflowFailures(messages, stepStatus)" in body
-    assert "driverManualMessageStepStatus" in wrapper
-    assert "planStepStatuses" in render
-    assert "currentPlanId" in render
-    assert "planStepStatuses," in render
-
-
-def test_driver_manual_analysis_preserves_failures_from_previous_plans_as_history():
-    app_js = _read_static("app.js")
-    plan_rail_js = _read_static("js/v2/plan_rail_controller.js")
-    render = _slice_function(app_js, "function renderDriverManualAnalysis")
-
-    assert "function driverManualMessageStepStatus" in app_js
-    assert "metadata.failure_envelope?.failed_step_id" in app_js
-    assert 'return "historical";' in app_js
-    assert "planRailController.planId" in app_js
-    assert "function planId" in plan_rail_js
-    assert "planId," in plan_rail_js
-    assert "currentPlanId" in render
-    assert "driverManualMessageStepStatus(message)" in render
-    assert "historicalWorkflowFailureHtml" in _read_static("js/v2/driver_manual_analysis.js")
 
 
 def test_agent_driver_timeline_hides_recovered_failures_and_tracks_plan_status():
@@ -7520,6 +5677,10 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "function taskTypeDefinition() { return { initialGoal: '', label: '建模' }; }",
             "const defaultTaskType = 'modeling';",
             "function prefillAgentTaskInstruction() {}",
+            # Batch 5: createTask resets the home card and remembers the owner.
+            "const homeComposer = { reset() {} };",
+            "const LAST_VALIDATOR_KEY = 'marvis_last_validator';",
+            "const localStorage = { setItem() {} };",
             "function setCreateStatus(message, kind = '') { statuses.push({ message, kind }); }",
             "function collectCreateTaskReportValues() { return {}; }",
             "async function uploadMaterialFiles() { throw new Error('upload should not run'); }",
@@ -7563,42 +5724,11 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
     assert payload["renderAllCalls"] == 1
 
 
-def test_api_paths_stay_below_current_mount_and_agent_start_rejects_missing_task_id():
-    app_js = _read_static("app.js")
-    api_js = _read_static("js/api.js")
-
-    api_start = api_js.index("export async function api")
-    api_end = api_js.index("export function sleep", api_start)
-    api_body = api_js[api_start:api_end]
-    assert "function normalizedApiEndpoint" in api_js
-    assert 'value.replace(/^\\/+/, "")' in api_js
-    assert "new URL(relative, base).toString()" in api_js
-    assert "fetch(normalizedEndpoint" in api_body
-
-    dispatch_start = app_js.index("async function dispatchAgentValidation")
-    dispatch_end = app_js.index("async function waitForAgentValidation", dispatch_start)
-    dispatch_body = app_js[dispatch_start:dispatch_end]
-    assert 'requireTaskId(taskId || taskSession.taskId, "Agent 初始化")' in dispatch_body
-    assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in dispatch_body
-    assert "api(`api/tasks/${taskId}/agent/start`" not in app_js
-
-
-def test_delete_task_blocks_active_jobs_instead_of_stale_running_status():
-    app_js = _read_static("app.js")
-
-    delete_start = app_js.index("async function deleteTask")
-    delete_end = app_js.index("async function runAction", delete_start)
-    delete_body = app_js[delete_start:delete_end]
-
-    assert "taskServerBusyAction(targetTask)" in delete_body
-    assert 'task.status === "running"' not in delete_body
 
 
 def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
-    platform_confirm_js = _read_static("js/platform-confirm.js")
 
     assert 'id="platformConfirmDialog"' in index_html
     assert 'id="platformConfirmTitle"' in index_html
@@ -7653,37 +5783,12 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     assert "@keyframes platform-confirm-sheen-sweep" in styles_css
     assert "@keyframes platform-confirm-lid-peek" in styles_css
     assert "prefers-reduced-motion: reduce" in styles_css
-    assert "export function createPlatformConfirmController" in platform_confirm_js
-    assert 'from "./js/platform-confirm.js"' in app_js
-    assert "const platformConfirm = createPlatformConfirmController({ getElementById: $ });" in app_js
-    assert "const showPlatformConfirm = platformConfirm.showPlatformConfirm;" in app_js
-    assert "const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;" in app_js
-    assert "function showPlatformConfirm" not in app_js
-    assert "function bindPlatformConfirmDialog" not in app_js
-    assert "bindPlatformConfirmDialog();" in app_js
-    assert "window.confirm" not in app_js
 
     # Controller renders the danger-list as structured chips and supports an
     # emphasized (strong) task name, without ever using innerHTML for user text.
-    assert "renderPlatformConfirmPurge" in platform_confirm_js
-    assert "renderPlatformConfirmMessage" in platform_confirm_js
-    assert "createTextNode" in platform_confirm_js
 
-    delete_start = app_js.index("async function deleteTask")
-    delete_end = app_js.index("async function runAction", delete_start)
-    delete_body = app_js[delete_start:delete_end]
 
-    assert "await showPlatformConfirm({" in delete_body
-    assert "window.confirm" not in delete_body
-    assert 'title: "删除任务"' in delete_body
-    assert 'confirmText: "删除"' in delete_body
-    assert 'cancelText: "取消"' in delete_body
-    assert 'tone: "danger"' in delete_body
     # Purge counts now flow through as structured chip items, not appended text.
-    assert "loadTaskPurgeSummary(targetTask)" in delete_body
-    assert "purgeItems," in delete_body
-    assert "messageParts:" in delete_body
-    assert "strong: true" in delete_body
 
     confirm_action_rule = _css_rule(
         styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative'
@@ -7865,33 +5970,6 @@ def test_delete_task_cannot_clear_a_pending_local_operation_from_server_idle():
     assert "正在处理" in payload["statuses"][-1]["message"]
 
 
-def test_agent_stop_response_polls_until_active_agent_job_finishes():
-    app_js = _read_static("app.js")
-
-    start_agent_start = app_js.index("async function startAgentValidation")
-    start_agent_end = app_js.index("async function dispatchAgentValidation", start_agent_start)
-    start_agent_body = app_js[start_agent_start:start_agent_end]
-
-    assert 'result.status === "cancel_requested"' in start_agent_body
-    assert "await waitForAgentValidation(taskId, { stopping: true });" in start_agent_body
-
-    wait_start = app_js.index("async function waitForAgentValidation")
-    wait_end = app_js.index("function agentValidationStopped", wait_start)
-    wait_body = app_js[wait_start:wait_end]
-    assert '"scanned"' in wait_body
-    assert '"executed"' in wait_body
-    assert "{ stopping, settleWhenServerIdle: true }" in wait_body
-    assert "agentValidationStopped(finalTask" in wait_body
-    assert "finally" in wait_body
-    assert 'const busy = claimBusy("agent"' in wait_body
-    assert 'releaseBusy(busy)' in wait_body
-
-    poll_start = app_js.index("async function pollValidationProgress")
-    poll_end = app_js.index("async function validateCurrentTask", poll_start)
-    poll_body = app_js[poll_start:poll_end]
-    assert "settleWhenServerIdle = false" in poll_body
-    assert "const serverBusyAction = taskServerBusyAction(polledTask);" in poll_body
-    assert "doneStatuses.has(status) && !serverBusyAction" in poll_body
 
 
 def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
@@ -7901,47 +5979,7 @@ def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
 
     assert "settleWhenServerIdle: true" in wait_body
 
-    script = "\n".join(
-        [
-            "const progressPolls = new Map();",
-            "let selectedTaskId = 'task-1';",
-            "let selectedTask = { id: 'task-1', status: 'created', active_job_kind: null };",
-            "let projectedValidationChildTaskId = '';",
-            "let projectedValidationChildTask = null;",
-            "function isWorkbenchTaskId() { return true; }",
-            "function usesAgentValidationWorkbench() { return false; }",
-            "const taskCache = [selectedTask];",
-            "const statuses = [];",
-            "let refreshCount = 0;",
-            "let nowCall = 0;",
-            "Date.now = () => nowCall++ === 0 ? 0 : 3600001;",
-            "function claimProgressPoll(registry, taskId) {",
-            "  const pollState = { cancelled: false, promise: null };",
-            "  registry.set(taskId, pollState);",
-            "  return { claimed: true, pollState };",
-            "}",
-            "function releaseProgressPoll(registry, taskId, pollState) {",
-            "  if (registry.get(taskId) === pollState) registry.delete(taskId);",
-            "}",
-            "async function sleep() {}",
-            "async function refreshTasks() { refreshCount += 1; }",
-            "function findTaskInCache(taskId) { return taskCache.find((task) => task.id === taskId) || null; }",
-            "async function loadTaskEvidence() {}",
-            "function metricOverviewComplete() { return false; }",
-            "function currentMetricPreviewHasValues() { return false; }",
-            "async function loadReportFields() {}",
-            "function selectedTaskIsAgentMode() { return true; }",
-            "async function loadAgentMessages() {}",
-            "function renderChangedValidationViews() {}",
-            "function renderTaskList() {}",
-            "function taskServerBusyAction(task) { return task.active_job_kind || null; }",
-            "function setActionStatus(message, kind) { statuses.push({ message, kind }); }",
-            "function setTaskFailureActionStatus() {}",
-            poll_body,
-            "const result = await pollValidationProgress(new Set(['scanned', 'failed']), 'task-1', { settleWhenServerIdle: true });",
-            "process.stdout.write(JSON.stringify({ result, refreshCount, statuses }));",
-        ]
-    )
+    script = f"const progressPolls = new Map();\nlet selectedTaskId = 'task-1';\nlet selectedTask = {{ id: 'task-1', status: 'created', active_job_kind: null }};\nlet projectedValidationChildTaskId = '';\nlet projectedValidationChildTask = null;\nfunction isWorkbenchTaskId() {{ return true; }}\nfunction usesAgentValidationWorkbench() {{ return false; }}\nconst taskCache = [selectedTask];\nconst statuses = [];\nlet refreshCount = 0;\nlet nowCall = 0;\nDate.now = () => nowCall++ === 0 ? 0 : 3600001;\nfunction claimProgressPoll(registry, taskId) {{\n  const pollState = {{ cancelled: false, promise: null }};\n  registry.set(taskId, pollState);\n  return {{ claimed: true, pollState }};\n}}\nfunction releaseProgressPoll(registry, taskId, pollState) {{\n  if (registry.get(taskId) === pollState) registry.delete(taskId);\n}}\nasync function sleep() {{}}\nasync function refreshTasks() {{ refreshCount += 1; }}\nfunction findTaskInCache(taskId) {{ return taskCache.find((task) => task.id === taskId) || null; }}\nasync function loadTaskEvidence() {{}}\nfunction metricOverviewComplete() {{ return false; }}\nfunction currentMetricPreviewHasValues() {{ return false; }}\nasync function loadReportFields() {{}}\nfunction selectedTaskIsAgentMode() {{ return true; }}\nasync function loadAgentMessages() {{}}\nfunction renderChangedValidationViews() {{}}\nfunction renderTaskList() {{}}\nfunction taskServerBusyAction(task) {{ return task.active_job_kind || null; }}\nfunction setActionStatus(message, kind) {{ statuses.push({{ message, kind }}); }}\nfunction setTaskFailureActionStatus() {{}}\n{poll_body}\nconst result = await pollValidationProgress(new Set(['scanned', 'failed']), 'task-1', {{ settleWhenServerIdle: true }});\nprocess.stdout.write(JSON.stringify({{ result, refreshCount, statuses }}));"
     script = _with_workbench_context(script, app_js)
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -7957,57 +5995,10 @@ def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
     assert payload["statuses"] == []
 
 
-def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
-    app_js = _read_static("app.js")
-    mount_js = _read_static("js/agent-conversation-mount.js")
-
-    stored_start = app_js.index("function renderStoredStateSummaries")
-    stored_end = app_js.index("function renderAll", stored_start)
-    stored_body = app_js[stored_start:stored_end]
-
-    assert "updateAgentScanSectionVisibility();" in stored_body
-    assert '"等待你输入“开始验证”后执行材料识别"' not in stored_body
-    assert '"材料完备性识别将自动开始"' not in stored_body
-
-    visibility_start = app_js.index("function updateAgentScanSectionVisibility")
-    visibility_end = app_js.index("function renderStoredStateSummaries", visibility_start)
-    visibility_body = app_js[visibility_start:visibility_end]
-    assert "selectedTaskIsAgentMode(workbenchTask())" in visibility_body
-    assert 'const hasScanResult = scanSummaryHasResult();' in visibility_body
-    assert 'scanSection.classList.toggle("hidden", !hasScanResult);' in visibility_body
-
-    scan_start = app_js.index("function renderScanResult")
-    scan_end = app_js.index("function renderValidationResult", scan_start)
-    scan_body = app_js[scan_start:scan_end]
-    assert "updateAgentScanSectionVisibility();" in scan_body
-
-    timeline_start = app_js.index("function renderAgentTimeline")
-    timeline_end = app_js.index("function resetAgentTypingState", timeline_start)
-    timeline_body = app_js[timeline_start:timeline_end]
-    assert "agentTimelineVisibleStages()" in timeline_body
-    assert "renderAgentTimelineDom(messages, {" in timeline_body
-    assert "taskFrozenSectionSnapshots" in timeline_body
-    assert "agentTimelineItems(messages, deps.visibleStages || [], {" in mount_js
-    assert "snapshotsByTrigger: deps.snapshotsByTrigger || agentFrozenSnapshotsByTriggerId({" in mount_js
-
-    report_visibility_start = app_js.index("function updateAgentReportSectionVisibility")
-    report_visibility_end = app_js.index(
-        "function renderStoredStateSummaries",
-        report_visibility_start,
-    )
-    report_visibility_body = app_js[report_visibility_start:report_visibility_end]
-    assert "selectedTaskIsAgentMode()" not in report_visibility_body
-    assert "reportSummary" not in report_visibility_body
-    assert "wordReportTitle" not in report_visibility_body
-    assert "reportFieldsForm" not in report_visibility_body
-    assert '"agentReportLeadMessages"' in report_visibility_body
-    assert '"agentReportMessages"' in report_visibility_body
-    assert 'reportSection.setAttribute("aria-hidden", hasReportMessages ? "false" : "true");' in report_visibility_body
 
 
 def test_llm_settings_panel_and_agent_model_selector_exist():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
     assert "模型引擎" in index_html
@@ -8031,17 +6022,6 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     assert 'class="llm-engine-toolbar"' not in index_html
     assert 'id="llmDefaultModelSelect"' not in index_html
 
-    assert "api/settings/llm" in app_js
-    assert "loadLLMSettings" in app_js
-    assert "saveLLMSettings" in app_js
-    assert "renderAgentModelOptions" in app_js
-    assert "openLLMEngineEdit" in app_js
-    assert "saveLLMEngineEdit" in app_js
-    assert 'openGovernanceSettingsCenter("llm")' in app_js
-    assert "enabled: model.enabled !== false" in app_js
-    assert "enable_thinking: Boolean(model.enable_thinking)" in app_js
-    assert "$(\"llmEngineEnableThinking\").checked = Boolean(model.enable_thinking)" in app_js
-    assert "llm-engine-item" in app_js
     assert ".llm-engine-item" in styles_css
     assert ".checkbox-field" in styles_css
 
@@ -8049,7 +6029,7 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     # card-stripping), and its heading carries a leading monochrome icon.
     settings_group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
     assert "border: 1px solid var(--border)" in settings_group_rule
-    assert "background: var(--surface)" in settings_group_rule
+    assert "background: var(--card)" in settings_group_rule
     assert "overflow: hidden" in settings_group_rule
     llm_markup = index_html[
         index_html.index('data-governance-panel-content="llm"'):
@@ -8075,8 +6055,8 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     assert ".llm-engine-edit-actions .button.secondary:hover" not in styles_css
 
     llm_cancel_rule = _css_rule(styles_css, ".button.secondary")
-    assert "border-color: var(--border-strong)" in llm_cancel_rule
-    assert "background: var(--surface)" in llm_cancel_rule
+    assert "border-color: transparent" in llm_cancel_rule
+    assert "background: var(--fill)" in llm_cancel_rule
     assert "box-shadow: var(--button-secondary-shadow)" in llm_cancel_rule
 
     llm_cancel_hover_rule = _css_rule(
@@ -8084,7 +6064,7 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     )
     assert "#9fbfe4" not in llm_cancel_hover_rule
     assert "#f8fbff" not in llm_cancel_hover_rule
-    assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in llm_cancel_hover_rule
+    assert "background: var(--fill-2)" in llm_cancel_hover_rule
 
 
 
@@ -8093,21 +6073,14 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
 
 def test_llm_engine_edit_dialog_has_test_connection_button():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
 
     assert 'id="testLLMEngineConnectionButton"' in index_html
     assert 'id="llmEngineTestResult"' in index_html
 
-    assert "async function testLLMEngineConnection()" in app_js
-    assert '$("testLLMEngineConnectionButton").onclick = testLLMEngineConnection;' in app_js
-    assert "/api/settings/llm/test" in app_js
-    assert "setLLMEngineTestResult" in app_js
 
 
 def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    draft_tools_panel_js = _read_static("js/draft-tools-panel.js")
     styles_css = _read_browser_css()
     v2_css = _read_browser_css()
 
@@ -8172,7 +6145,6 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert 'id="addLLMModelButton"' in index_html
     assert "Notebook 和工具运行使用的 Python 环境" in index_html
     assert "配置本地会话可调用的大模型连接信息" in index_html
-    assert "控制 Agent 记忆的引用范围" in app_js
     # Memory policies are checkbox switches now; only the platform-forced
     # (sensitive-material) row still renders a status badge.
     assert 'class="memory-policy-switch" data-memory-policy="reference_cross_task"' in index_html
@@ -8181,7 +6153,6 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert 'class="governance-status-badge required">平台强制</span>' in index_html
     assert 'class="governance-toggle"' not in index_html
     assert "复核 Agent 产出的工具草稿" in index_html
-    assert "管理可调用工具包" in app_js
     assert 'id="draftToolsDialog"' not in index_html
     assert 'id="v2WorkspaceDialog"' not in index_html
     assert 'id="agentMemoryDialog"' not in index_html
@@ -8241,110 +6212,10 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert '<circle cx="14" cy="6" r="2"></circle>' in memory_nav_markup
     assert '<circle cx="16" cy="18" r="2"></circle>' in memory_nav_markup
 
-    assert "function openGovernanceSettingsCenter" in app_js
-    assert "function openGovernanceSettingsFromSidebar" in app_js
-    assert "function closeSidebarSettingsMenu" in app_js
-    assert "function scheduleGovernanceSettingsFromSidebar" in app_js
-    assert "function handleGovernanceSettingsPointerDown" in app_js
-    assert "function setSidebarSettingsSuppressed" not in app_js
-    assert "function handleGovernanceSettingsDialogClose" not in app_js
-    assert "function setGovernanceSettingsPanel" in app_js
-    assert "handleGovernanceSettingsSearch" in app_js
-    assert '$("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;' in app_js
-    assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
-    assert (
-        'runAction(loadExecutionEnvironmentSettings, {\n'
-        '      actionId: "executionEnvironment",\n'
-        '      busyText: "正在读取执行环境...",\n'
-        "      taskScoped: false,\n"
-        "    });"
-    ) in app_js
-    assert (
-        'runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆...", taskScoped: false });'
-        in app_js
-    )
-    assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
-    assert 'openGovernanceSettingsCenter("llm")' in app_js
-    assert '$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);' in app_js
-    assert 'import { createDraftToolsPanelController } from "./js/draft-tools-panel.js";' in app_js
-    assert "const draftToolsPanel = createDraftToolsPanelController" in app_js
-    assert "let draftTools = [];" not in app_js
-    assert "let draftTools = [];" in draft_tools_panel_js
     # Drafts open via the plugins extension <details> toggle (lazy load) and the
     # status filter, not a dedicated dialog or nav key.
-    assert '$("draftManageDetails").addEventListener("toggle"' in app_js
-    assert "!draftToolsPanel.hasLoaded()" in app_js
-    assert (
-        'runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(runDraftTool, { actionId: "draftTools", busyText: "正在试运行草稿...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(promoteDraftTool, { actionId: "draftTools", busyText: "正在转正草稿...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(rejectDraftTool, { actionId: "draftTools", busyText: "正在拒绝草稿...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(saveLLMEngineEdit, { actionId: "llmSettings", busyText: "正在保存模型...", taskScoped: false });'
-        in app_js
-    )
-    assert (
-        'runAction(() => removeLLMModelProfile(Number(removeButton.dataset.llmRemove)), {\n'
-        '      actionId: "llmSettings",\n'
-        '      busyText: "正在删除模型...",\n'
-        "      taskScoped: false,\n"
-        "    });"
-    ) in app_js
-    assert "function openDraftToolsDialog" not in app_js
-    assert 'openGovernanceSettingsCenter("drafts")' not in app_js
-    assert "async function loadDraftTools" in app_js
-    assert "async function runDraftTool" in app_js
-    assert "async function promoteDraftTool" in app_js
-    assert "async function rejectDraftTool" in app_js
-    assert "return draftToolsPanel.load({ preserveSelection });" in app_js
-    assert "return draftToolsPanel.run();" in app_js
-    assert "return draftToolsPanel.promote();" in app_js
-    assert "return draftToolsPanel.reject();" in app_js
-    assert 'api("/api/drafts' in draft_tools_panel_js
-    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/run`' in draft_tools_panel_js
-    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in draft_tools_panel_js
-    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in draft_tools_panel_js
-    assert '"X-MARVIS-Plugin-Admin": pluginAdminToken()' in draft_tools_panel_js
     # The hardcoded magic-header *value* is gone (a mention in an explanatory
     # comment is fine); the header is now sourced from the injected token.
-    assert '"X-MARVIS-Plugin-Admin": "local-dev"' not in draft_tools_panel_js
-    assert "document.body?.dataset?.marvisPluginAdminToken" in draft_tools_panel_js
-    assert "function governanceExtensionActions" in app_js
-    assert "pluginActions:" in app_js
-    assert "skillActions:" in app_js
-    assert "draftActions:" not in app_js
-    assert "memoryActions:" not in app_js
-    assert "function mountV2Runtime" not in app_js
-    assert "function mountGovernanceExtensions" in app_js
-    assert "function runV2WorkspaceAction" not in app_js
-    assert "function runGovernanceExtensionAction" in app_js
-    assert 'title: "移除插件"' in app_js
-    assert "showError: showExtensionError" in app_js
-    assert "confirmRemove: (name) => showPlatformConfirm({" in app_js
-    assert "await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions)" in app_js
-    assert "await renderSkillManager(mounted.panels.skillPanel, actions.skillActions)" in app_js
-    assert "await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions)" in app_js
-    assert "请填写转正测试用例。" in draft_tools_panel_js
-    assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in draft_tools_panel_js
 
     assert "dialog.governance-settings-dialog" in styles_css
     assert ".governance-settings-dialog" in styles_css
@@ -8471,7 +6342,9 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
         ".governance-settings-dialog .memory-distillation-row,\n"
         ".governance-settings-dialog .memory-distillation-detail-inner",
     )
-    assert "border: 1px solid var(--border)" in memory_row_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): settings rows are flat grey tiles.
+    assert "border: none" in memory_row_rule
+    assert "background: var(--card)" in memory_row_rule
     assert "border-radius: var(--radius-control)" in memory_row_rule
     memory_rollback_rule = _css_rule(
         v2_css, ".governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation]"
@@ -8483,7 +6356,7 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     # leading monochrome icon and a switch/badge pinned right.
     memory_group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
     assert "border: 1px solid var(--border)" in memory_group_rule
-    assert "background: var(--surface)" in memory_group_rule
+    assert "background: var(--card)" in memory_group_rule
     assert "overflow: hidden" in memory_group_rule
     divider_rule = _css_rule(
         styles_css, ".governance-panel .settings-group > .settings-row + .settings-row"
@@ -8530,35 +6403,20 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
 
 def test_execution_environment_exposes_notebook_memory_limit_field():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
     styles_css = _read_browser_css()
 
     assert 'id="notebookMemoryLimitInput"' in index_html
     assert 'placeholder="不限制"' in index_html
     assert "Notebook 内存上限" in index_html
     # Default settings shape carries the field so PUT payloads round-trip it.
-    assert "notebook_memory_limit_mb" in state_js
     # Save-on-change wiring exists and is bound.
-    assert "function handleNotebookMemoryLimitChange" in app_js
-    assert (
-        '$("notebookMemoryLimitInput").addEventListener("change", handleNotebookMemoryLimitChange)'
-        in app_js
-    )
     # Selecting a kernel must preserve the configured limit, not reset it.
-    assert (
-        "settings.notebook_memory_limit_mb = executionEnvironmentSettings?.notebook_memory_limit_mb"
-        in app_js
-    )
     assert ".exec-env-memory-field" in styles_css
 
 
 def test_agent_conversation_panel_layout_and_message_shapes():
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
-    conversation_js = _read_static("js/agent-conversation-view.js")
-    mount_js = _read_static("js/agent-conversation-mount.js")
 
     assert 'id="agentConversationPanel"' in index_html
     assert 'id="agentScanLeadMessages"' in index_html
@@ -8589,16 +6447,11 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     bar_open = index_html.index('class="agent-composer-bar"')
     assert bar_open < index_html.index('id="agentModelSelect"')
     assert bar_open < index_html.index('id="agentEffortSelect"')
-    assert "agentEffort" in app_js
     assert ".agent-composer-chip" in styles_css
-    assert "agent-composer-active" in app_js
     assert ".result-workspace.agent-composer-active .result-scroll-content" in styles_css
     assert "--agent-composer-gap: 28px;" in styles_css
     assert "--agent-composer-clearance: 118px;" in styles_css
     assert "--agent-composer-clearance: 154px;" not in styles_css
-    assert "function syncAgentComposerClearance" in app_js
-    assert 'workspace.style.setProperty("--agent-composer-clearance"' in app_js
-    assert "composerHeight + composerGap" in app_js
     assert ".agent-send:hover:not(:disabled)" in styles_css
     assert ".agent-send:hover {" not in styles_css
     send_start = styles_css.index(".agent-send {")
@@ -8690,7 +6543,8 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     bar_start = styles_css.index(".agent-composer-bar {")
     bar_end = styles_css.index("}", bar_start)
     bar_rule = styles_css[bar_start:bar_end]
-    assert "inset 0 1px 0" in bar_rule
+    # Batch 1 (2026-10-14 redesign D1-D5): the composer floats above the conversation and uses the glass tokens.
+    assert "box-shadow: var(--glass-shadow)" in bar_rule
     assert "0 16px 44px" not in bar_rule
     assert "0 4px 14px" not in bar_rule
 
@@ -8741,103 +6595,21 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "background:" not in assistant_rule
     assert "border:" not in assistant_rule
 
-    assert "renderAgentConversation" in app_js
-    assert "agentTypingState" in app_js
-    assert "function agentMessageIsStreaming" in app_js
-    assert "function agentMessageIsThinking" in app_js
-    assert "function agentThinkingHtml" in app_js
-    assert "function agentVisibleContent" in app_js
-    assert "function tickAgentTyping" in app_js
-    assert "const AGENT_STREAM_POLL_INTERVAL_MS = 180;" in app_js
-    assert "const AGENT_TYPEWRITER_INTERVAL_MS = 12;" in app_js
-    assert "const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;" in app_js
-    assert "const AGENT_TYPEWRITER_CATCHUP_TICKS" in app_js
-    assert "metadata.streaming === true" in app_js
-    assert "data-agent-streaming" in app_js
-    assert "data-agent-thinking" in app_js
-    assert "正在思考" in app_js
-    assert "agent-thinking" in app_js
     assert ".agent-thinking" in styles_css
-    assert "agent-thinking-icon" not in app_js
     assert ".agent-thinking-icon" not in styles_css
     assert "agent-thinking-pulse" in styles_css
     assert "agent-thinking-dot" in styles_css
-    assert "agent-typing-cursor" not in app_js
     assert ".agent-typing-cursor" not in styles_css
     assert "agent-typing-cursor-blink" not in styles_css
-    assert "function requestAgentConversationScrollToLatest" in app_js
-    assert "scrollContent.scrollTo({ top: scrollContent.scrollHeight, behavior: \"auto\" });" in app_js
-    assert "agent/report-draft/confirm" in app_js
-    assert "确认并生成报告" in app_js
-    assert "confirmAgentDraft" not in app_js
-    assert "confirmDraft" not in app_js
-    assert "确认写入" not in app_js
-    assert "agent-empty" not in app_js
-    assert "Agent 将按流程自动执行" not in app_js
-    assert "agent-message user" in app_js
-    assert "agent-message assistant" in app_js
-    assert "renderAgentTimeline" in app_js
-    render_start = app_js.index("function renderAgentConversation")
-    render_end = app_js.index("function agentStructuralSignature", render_start)
-    render_body = app_js[render_start:render_end]
     # v2 wiring: renderAgentTimeline must be fed via agentReportMessagesForDisplay.
-    assert "agentReportMessagesForDisplay(taskSession.messages)" in render_body
-    assert "renderAgentTimeline(" in render_body
-    assert "agentMessages.filter((message, index) => !agentMessageTargetId(message, index, agentMessages))" not in render_body
-    assert "requestAgentConversationScrollToLatest();" in render_body
-    assert "function agentTimelineItems" in conversation_js
-    assert "function agentTimelineInsertionIndex" in conversation_js
-    assert "function agentReportMessagesForDisplay" in conversation_js
-    assert "function agentMessagesHtml" in conversation_js
-    assert "function agentMessageHtml(message, labelStage = message?.stage, options = {})" in app_js
-    assert "agentMessagesHtml(item.messages, undefined, {" in mount_js
-    assert "export function renderAgentTimeline" in mount_js
-    assert "agentMessageMetaLabel(message, labelStage)" in app_js
-    alias_start = app_js.index("function agentValidatorAlias")
-    stage_label_start = app_js.index("function agentStageLabel", alias_start)
-    stage_label_end = app_js.index("function formatAgentMessageContent", stage_label_start)
-    alias_and_stage_label_body = app_js[alias_start:stage_label_end]
-    stage_label_body = app_js[stage_label_start:stage_label_end]
-    assert "function agentValidatorAlias" in alias_and_stage_label_body
-    assert 'return agentValidatorAlias(taskSession.task?.validator) || "Agent";' in stage_label_body
     # Real validator names must not be hard-coded in the shipped bundle: the alias
     # map is sourced from the workspace brand.json via agentValidatorAliases.
-    assert "agentValidatorAliases[String(validator" in alias_and_stage_label_body
-    assert "于添" not in alias_and_stage_label_body
-    assert "张雯萱" not in alias_and_stage_label_body
-    assert "材料完备性" not in stage_label_body
-    assert "分数一致性" not in stage_label_body
-    assert "效果与稳定性" not in stage_label_body
-    assert 'metadata.tool_call?.name === "scan_materials"' in conversation_js
-    assert "function agentMessageIsAdvanceIntent" in conversation_js
-    assert 'metadata.intent === "advance"' in conversation_js
-    assert "agentTimelineVisibleStages" in app_js
-    assert "restoreResultScrollDefaultOrder" in app_js
-    assert 'if (message.role === "user" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
-    assert 'if (message.stage === "chat" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
-
-
-def test_agent_message_meta_label_includes_plan_step_context():
-    app_js = _read_static("app.js")
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
-    meta_start = app_js.index("function agentMessageMetaLabel")
-    meta_end = app_js.index("function formatAgentMessageContent", meta_start)
-    meta_body = app_js[meta_start:meta_end]
-
-    assert "function agentMessagePlanStep" in meta_body
-    assert "planRailController.planStep(metadata, taskSession.taskId)" in meta_body
-    assert "metadata.step_id" in plan_js
-    assert "metadata.step_title || step?.title" in meta_body
-    assert "metadata.phase || step?.phase" in meta_body
-    assert "metadata.run_seq" in meta_body
-    assert "第 ${runSeq} 轮" in meta_body
 
 
 def test_agent_memory_has_no_permanent_task_top_block():
     """V1.1 memory may appear in the agent conversation and management UI,
     but must not become a fixed gray task-level panel above the workflow.
     """
-    app_js = _read_static("app.js")
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
     result_area = index_html[index_html.index('id="resultWorkspace"') : index_html.index('id="agentComposer"')]
@@ -8855,7 +6627,6 @@ def test_agent_memory_has_no_permanent_task_top_block():
         assert f'class="{name}"' not in result_area
         assert f"#{name}" not in styles_css
         assert f".{name}" not in styles_css
-        assert f'$("${name}")' not in app_js
 
     assert 'id="governanceSettingsDialog"' in index_html
     assert 'id="agentMemoryList"' in index_html
@@ -8934,8 +6705,6 @@ def test_agent_message_renderer_outputs_distillation_reference_audit_fields():
 
 
 def test_agent_memory_management_view_wires_actions_and_api_paths():
-    app_js = _read_static("app.js")
-    memory_panel_js = _read_static("js/agent-memory-panel.js")
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
 
@@ -8957,37 +6726,9 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
         "risk_analysis_experience",
     ):
         assert f'<option value="{memory_type}">' in index_html
-    assert 'data-agent-memory-action="inspect"' in memory_panel_js
-    assert 'data-agent-memory-action="disable"' in memory_panel_js
-    assert 'data-agent-memory-action="enable"' in memory_panel_js
-    assert 'data-agent-memory-action="not_useful"' in memory_panel_js
-    assert 'data-agent-memory-action="delete"' in memory_panel_js
-    assert 'data-agent-memory-action="rollback"' in memory_panel_js
-    assert 'data-agent-memory-action="load_more"' in memory_panel_js
-    assert 'params.set("limit", String(pageLimit));' in memory_panel_js
-    assert 'params.set("offset", String(offset));' in memory_panel_js
-    assert "hasMoreItems = Boolean(payload?.has_more)" in memory_panel_js
-    assert "function mergeRawMemoryItems" in memory_panel_js
-    assert "function rawMemoryGroupKey" in memory_panel_js
-    assert "data-agent-memory-merged-count" in memory_panel_js
-    assert "合并 ${memory._merged_count} 条原始记忆" in memory_panel_js
-    assert "合并展示为 ${displayCount} 组" in memory_panel_js
     assert ".agent-memory-load-more" in styles_css
     assert ".agent-memory-item.merged" in styles_css
-    assert 'memoryStatus === "active" && !memory.superseded_by' in memory_panel_js
 
-    assert '"api/agent-memory"' in memory_panel_js
-    assert '"api/agent-memory/distillations"' in memory_panel_js
-    assert '`api/agent-memory/distillations/${encodeURIComponent(memoryId)}`' in memory_panel_js
-    assert 'api(`api/agent-memory/distillations/${encodeURIComponent(memoryId)}/rollback`, { method: "POST" })' in memory_panel_js
-    assert '`api/agent-memory/${encodeURIComponent(memoryId)}`' in memory_panel_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in memory_panel_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in memory_panel_js
-    assert '`api/agent-memory/${encodeURIComponent(memoryId)}/negative-feedback`' in memory_panel_js
-    assert 'async function reportNotUseful' in memory_panel_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in memory_panel_js
-    assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
-    assert "function setAgentMemoryViewMode" in app_js
     assert "dialog.agent-memory-dialog" in styles_css
     assert ".governance-settings-dialog" in styles_css
     assert ".governance-settings-shell" in styles_css
@@ -9033,7 +6774,6 @@ def test_agent_memory_item_actions_do_not_overlap_long_text():
 
 
 def test_agent_memory_detail_view_uses_structured_cards():
-    memory_panel_js = _read_static("js/agent-memory-panel.js")
     styles_css = _read_browser_css()
 
     for fragment in [
@@ -9047,10 +6787,8 @@ def test_agent_memory_detail_view_uses_structured_cards():
         "agent-memory-audit-timeline",
         "agent-memory-audit-event",
     ]:
-        assert fragment in memory_panel_js
         assert f".{fragment}" in styles_css
 
-    assert "<h3>${escapeHtml(memoryTitle(memory))}</h3>" not in memory_panel_js
 
     detail_start = styles_css.index("\n.agent-memory-detail-inner {")
     detail_rule = styles_css[detail_start : styles_css.index("}", detail_start)]
@@ -9064,17 +6802,6 @@ def test_agent_memory_detail_view_uses_structured_cards():
 
     grid_rule = _css_rule(styles_css, ".agent-memory-detail-grid")
     assert "grid-template-columns:" in grid_rule
-
-
-def test_agent_memory_delete_keeps_audit_detail_visible():
-    memory_panel_js = _read_static("js/agent-memory-panel.js")
-    delete_start = memory_panel_js.index("async function remove")
-    delete_end = memory_panel_js.index("async function rollbackDistillation", delete_start)
-    delete_body = memory_panel_js[delete_start:delete_end]
-
-    assert "renderDetail(payload?.memory || null, payload?.events || [])" in delete_body
-    assert "await loadItems()" not in delete_body
-    assert "renderItems()" in delete_body
 
 
 def test_agent_timeline_keeps_messages_in_occurrence_order_around_stage_outputs():
@@ -9540,33 +7267,8 @@ def test_agent_label_uses_validator_aliases_from_workspace_config():
     assert json.loads(result.stdout) == ["蛋黄", "小九", "Agent", "蛋黄"]
 
 
-def test_agent_send_clears_composer_and_renders_user_message_before_network_wait():
-    app_js = _read_static("app.js")
-
-    assert "function appendOptimisticAgentUserMessage" in app_js
-    assert "function appendOptimisticAgentThinkingMessage" in app_js
-    assert "function removeOptimisticAgentMessage" in app_js
-
-    send_start = app_js.index("async function startAgentValidation")
-    send_end = app_js.index("async function dispatchAgentValidation", send_start)
-    send_body = app_js[send_start:send_end]
-    post_call = 'api(`api/tasks/${taskId}/agent/messages`'
-    assert "const originalValue = input.value;" in send_body
-    assert "const optimisticMessage = appendOptimisticAgentUserMessage(content, modelId);" in send_body
-    assert "const optimisticThinkingMessage = appendOptimisticAgentThinkingMessage(modelId);" in send_body
-    assert "const requestPromise = api(" in send_body
-    assert "pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true })" in send_body
-    assert send_body.index('input.value = "";') < send_body.index(post_call)
-    assert send_body.index("autoGrowComposerInput();") < send_body.index(post_call)
-    assert send_body.index("updateAgentSendDisabled();") < send_body.index(post_call)
-    assert send_body.index("appendOptimisticAgentUserMessage(content, modelId)") < send_body.index(post_call)
-    assert send_body.index("appendOptimisticAgentThinkingMessage(modelId)") < send_body.index(post_call)
-    assert "removeOptimisticAgentMessage(optimisticMessage.id);" in send_body
-    assert "removeOptimisticAgentMessage(optimisticThinkingMessage.id);" in send_body
-    assert "input.value = originalValue;" in send_body
-
-
-def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
+@pytest.mark.parametrize("task_type", ["validation", "modeling", "feature_analysis", "strategy", "vintage", "portfolio", "data_join"])
+def test_agent_send_without_enabled_model_shows_inline_guidance_before_post(task_type):
     app_js = _read_static("app.js")
 
     helpers_start = app_js.index("function setAgentComposerNotice")
@@ -9576,7 +7278,7 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
     script = "\n".join(
         [
             "let selectedTaskId = 'task-1';",
-            "let selectedTask = { task_type: 'validation' };",
+            f"let selectedTask = {{ task_type: {json.dumps(task_type)} }};",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "function selectedTaskNeedsManualRiskIntake() { return false; }",
             "function selectedTaskNeedsDeterministicPortfolioTurn() { return false; }",
@@ -9623,44 +7325,10 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
     assert "配置并启用大模型" in payload["status"]["message"]
 
 
-def test_agent_send_always_requires_llm():
-    """Agent mode IS "manual mode whose operator decisions are made by an LLM", so
-    it always requires a configured model — no task type bypasses the gate, and
-    there is no canned/default agent conversation. The deterministic no-LLM path is
-    the separate manual mode."""
-    app_js = _read_static("app.js")
-    send_start = app_js.index("async function startAgentValidation")
-    send_end = app_js.index("async function dispatchAgentValidation", send_start)
-    body = app_js[send_start:send_end]
-    assert "const unavailableModelMessage = agentModelUnavailableMessage();" in body
-    assert "showAgentModelGuidance(unavailableModelMessage)" in body
-    # no task-type bypass of the model-availability gate
-    assert "requiresLlm" not in body
-    assert "taskUsesPlanRail(taskSession.task)" not in body
-
-
-def test_agent_material_selection_response_forces_dialog_then_requires_rescan():
-    app_js = _read_static("app.js")
-    send_body = _slice_function(app_js, "async function startAgentValidation")
-
-    assert 'result.status === "awaiting_material_selection"' in send_body
-    assert 'result.ui_action?.type === "select_validation_materials"' in send_body
-    assert "handleAgentMaterialSelectionRequest(taskId)" in send_body
-    assert send_body.index("handleAgentMaterialSelectionRequest(taskId)") < send_body.index(
-        'result.status !== "accepted"'
-    )
-
-    handler_body = _slice_function(app_js, "async function handleAgentMaterialSelectionRequest")
-    assert "materialBindingDialog.ensureMaterialSelection(task, { force: true })" in handler_body
-    assert "await refreshTasks();" in handler_body
-    assert "请重新扫描材料" in handler_body
-    assert "dispatchAgentValidation" not in handler_body
-    assert "waitForAgentValidation" not in handler_body
 
 
 def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
     assert 'data-agent-send-state="send"' in index_html
@@ -9668,32 +7336,8 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     assert 'class="agent-send-icon agent-send-icon-stop"' in index_html
     assert '<rect x="4" y="4" width="16" height="16" rx="3.4" fill="currentColor" />' in index_html
 
-    assert "function agentSendIsStopMode" in app_js
-    assert "function renderAgentSendButtonState" in app_js
-    assert "function stopAgentValidation" in app_js
-    assert 'api(`api/tasks/${normalizedTaskId}/agent/stop`' in app_js
-    assert 'button.dataset.agentSendState = stopMode ? "stop" : "send";' in app_js
-    assert 'button.setAttribute("aria-label", stopMode ? "停止当前 Agent 动作" : "发送消息");' in app_js
-    assert "button.disabled = stopMode ? false : !input.value.trim();" in app_js
 
-    click_start = app_js.index('$("sendAgentMessageButton").onclick')
-    click_end = app_js.index('$("agentComposerInput").addEventListener("keydown"', click_start)
-    click_handler = app_js[click_start:click_end]
-    assert "if (agentSendIsStopMode())" in click_handler
-    for callback, busy_text in (
-        ("stopAgentValidation", "Agent 正在停止..."),
-        ("startAgentValidation", "Agent 正在处理..."),
-    ):
-        options = click_handler.split(f"runAction({callback}, {{", 1)[1].split("});", 1)[0]
-        assert 'actionId: "agent",' in options
-        assert f'busyText: "{busy_text}",' in options
-        assert "taskId: workbenchTaskId()," in options
 
-    keydown_start = app_js.index('$("agentComposerInput").addEventListener("keydown"')
-    keydown_end = app_js.index('$("agentComposerInput").addEventListener("input"', keydown_start)
-    keydown_handler = app_js[keydown_start:keydown_end]
-    assert "agentComposerStopIntent" in keydown_handler
-    assert "stopAgentValidationByMessage" in keydown_handler
 
     assert '.agent-send[data-agent-send-state="stop"]' in styles_css
     assert ".agent-send-icon-stop" in styles_css
@@ -9714,20 +7358,7 @@ def test_agent_running_composer_only_submits_explicit_stop_intent():
     app_js = _read_static("app.js")
     helper = _slice_function(app_js, "function agentComposerStopIntent")
 
-    script = "\n".join(
-        [
-            helper,
-            "process.stdout.write(JSON.stringify([",
-            "  agentComposerStopIntent('停止当前调参'),",
-            "  agentComposerStopIntent('cancel'),",
-            "  agentComposerStopIntent('不要停止'),",
-            "  agentComposerStopIntent('继续执行'),",
-            "  agentComposerStopIntent('为什么停止了？'),",
-            "  agentComposerStopIntent('开始执行这个计划，先到数据划分确认处停下。'),",
-            "  agentComposerStopIntent('确认开始执行这个计划，并在数据划分确认处停下。')",
-            "]));",
-        ]
-    )
+    script = f"{helper}\nprocess.stdout.write(JSON.stringify([\n  agentComposerStopIntent('停止当前调参'),\n  agentComposerStopIntent('cancel'),\n  agentComposerStopIntent('不要停止'),\n  agentComposerStopIntent('继续执行'),\n  agentComposerStopIntent('为什么停止了？'),\n  agentComposerStopIntent('开始执行这个计划，先到数据划分确认处停下。'),\n  agentComposerStopIntent('确认开始执行这个计划，并在数据划分确认处停下。')\n]));"
     script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -9737,17 +7368,6 @@ def test_agent_running_composer_only_submits_explicit_stop_intent():
     )
 
     assert json.loads(result.stdout) == [True, True, False, False, False, False, False]
-
-
-def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
-    app_js = _read_static("app.js")
-    poll_start = app_js.index("async function pollValidationProgress")
-    poll_end = app_js.index("async function validateCurrentTask", poll_start)
-    poll_body = app_js[poll_start:poll_end]
-
-    assert "settleWhenServerIdle = false" in poll_body
-    assert "if (stopping && !serverBusyAction)" in poll_body
-    assert "return polledTask;" in poll_body
 
 
 def test_agent_send_shows_thinking_message_before_network_wait():
@@ -9790,9 +7410,10 @@ def test_agent_send_shows_thinking_message_before_network_wait():
             "const sendPromise = startAgentValidation();",
             "await new Promise((resolve) => setTimeout(resolve, 0));",
             "const pendingMessages = agentMessages.map((message) => ({ role: message.role, content: message.content, metadata: message.metadata || {} }));",
+            "const pendingInputValue = input.value;",
             "resolveApi({ status: 'message_saved', messages: [{ role: 'user', stage: 'chat', content: '开始', metadata: {} }, { role: 'assistant', stage: 'chat', content: '收到。', metadata: { streaming: false } }] });",
             "await sendPromise;",
-            "process.stdout.write(JSON.stringify({ inputValue: input.value, pendingMessages, finalMessages: agentMessages, renderSnapshots }));",
+            "process.stdout.write(JSON.stringify({ inputValue: input.value, pendingInputValue, pendingMessages, finalMessages: agentMessages, renderSnapshots }));",
         ]
     )
     script = _with_workbench_context(script, app_js)
@@ -9806,6 +7427,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
     payload = json.loads(result.stdout)
 
     assert payload["inputValue"] == ""
+    assert payload["pendingInputValue"] == ""
     assert payload["pendingMessages"][0]["role"] == "user"
     assert payload["pendingMessages"][0]["content"] == "开始"
     assert payload["pendingMessages"][1]["role"] == "assistant"
@@ -9967,96 +7589,12 @@ def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state
     assert payload["statuses"][-1]["message"] == "已停止当前动作，请问有什么指示？"
 
 
-def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_changes_them():
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
-
-    assert 'export const agentComposerPreferenceStorageKey = "marvis_agent_composer_preferences";' in state_js
-    assert "const agentComposerPreferences = restoreAgentComposerPreferences();" in app_js
-    assert 'let agentSelectedModelId = agentComposerPreferences.model_id || "";' in app_js
-    assert 'let agentSelectedEffort = agentComposerPreferences.effort || "high";' in app_js
-    assert 'localStorage.getItem(agentComposerPreferenceStorageKey)' in app_js
-    assert 'localStorage.setItem(agentComposerPreferenceStorageKey' in app_js
-    assert "function normalizeAgentEffort" in app_js
-    assert "function renderAgentEffortPreference" in app_js
-
-    model_options_start = app_js.index("function renderAgentModelOptions")
-    model_options_end = app_js.index("function renderAgentConversation", model_options_start)
-    model_options = app_js[model_options_start:model_options_end]
-    assert "saveAgentComposerPreferences()" not in model_options
-    assert 'agentSelectedModelId = "";' not in model_options
-    assert "agentSelectedModelId = select.value;" not in model_options
-    assert "renderAgentEffortPreference()" in app_js
-
-    conversation_start = app_js.index("function renderAgentConversation")
-    conversation_end = app_js.index("function agentStructuralSignature", conversation_start)
-    conversation = app_js[conversation_start:conversation_end]
-    assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!showConversation)")
-    assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!showConversation)")
-
-    model_change_start = app_js.index('$("agentModelSelect").onchange')
-    model_change_end = app_js.index('$("sendAgentMessageButton").onclick', model_change_start)
-    model_change = app_js[model_change_start:model_change_end]
-    assert "agentSelectedModelId = event.target.value;" in model_change
-    # Changes are persisted via the per-task dispatcher; the global save call
-    # is reserved for the fallback path when no task is selected.
-    assert "persistCurrentAgentComposerPreference({ model_id: agentSelectedModelId });" in model_change
-
-    assert '$("agentEffortSelect").onchange = (event) =>' in app_js
-    effort_change_start = app_js.index('$("agentEffortSelect").onchange')
-    effort_change_end = app_js.index('$("sendAgentMessageButton").onclick', effort_change_start)
-    effort_change = app_js[effort_change_start:effort_change_end]
-    assert "agentSelectedEffort = normalizeAgentEffort(event.target.value);" in effort_change
-    assert "persistCurrentAgentComposerPreference({ effort: agentSelectedEffort });" in effort_change
 
 
-def test_agent_composer_preferences_are_kept_per_task_in_local_storage():
-    # Mode / model / effort must persist per task so that two tasks can
-    # remember different configurations. The global preference acts as the
-    # seed when a task is opened for the first time.
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
-
-    assert 'export const agentTaskComposerStorageKey = "marvis_agent_task_composer_preferences";' in state_js
-    assert "function loadAgentTaskComposerOverrides" in app_js
-    assert "function persistAgentTaskComposerOverrides" in app_js
-    assert "function getAgentTaskComposerOverride" in app_js
-    assert "function updateAgentTaskComposerOverride" in app_js
-    assert "function applyAgentTaskComposerPreferences" in app_js
-    assert "function resetAgentComposerToGlobalDefaults" in app_js
-
-    # selectTask wires the per-task overrides into the live composer state.
-    select_start = app_js.index("function selectTask(task)")
-    select_end = app_js.index("function deselectCurrentTask", select_start)
-    select_body = app_js[select_start:select_end]
-    assert "applyAgentTaskComposerPreferences(task.id);" in select_body
-
-    # Deselecting a task falls back to the global seed so the composer
-    # state is coherent if a fresh task is selected next.
-    deselect_start = app_js.index("function deselectCurrentTask()")
-    deselect_end = app_js.index("function renderMetricPreview", deselect_start)
-    deselect_body = app_js[deselect_start:deselect_end]
-    assert "resetAgentComposerToGlobalDefaults();" in deselect_body
-
-    # Dispatcher: persist to per-task override when a task is selected;
-    # only fall back to the legacy global save when no task is active.
-    dispatcher_start = app_js.index("function persistCurrentAgentComposerPreference")
-    dispatcher_end = dispatcher_start + 400
-    dispatcher = app_js[dispatcher_start:dispatcher_end]
-    assert "updateAgentTaskComposerOverride(taskSession.taskId, patch);" in dispatcher
-    assert "saveAgentComposerPreferences();" in dispatcher
-
-    # Acceptance mode change handler must also route through the per-task
-    # dispatcher rather than the global-only saver.
-    accept_change_start = app_js.index('$("agentAcceptanceModeSelect").onchange')
-    accept_change_end = app_js.index("function blurChipSelectIfFocused", accept_change_start)
-    accept_change = app_js[accept_change_start:accept_change_end]
-    assert "persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });" in accept_change
 
 
 def test_agent_composer_acceptance_mode_selector_controls_auto_accept_payload():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
     assert 'id="agentAcceptanceModeSelect"' in index_html
@@ -10066,15 +7604,6 @@ def test_agent_composer_acceptance_mode_selector_controls_auto_accept_payload():
     assert 'value="auto_accept">自动审查</option>' in index_html
     assert index_html.index('id="agentAcceptanceModeSelect"') < index_html.index('id="agentModelSelect"')
 
-    assert "function normalizeAgentAcceptanceMode" in app_js
-    assert 'let agentAcceptanceMode = agentComposerPreferences.acceptance_mode || "normal";' in app_js
-    assert "acceptance_mode: normalizeAgentAcceptanceMode(agentAcceptanceMode)" in app_js
-    assert "function renderAgentAcceptanceModePreference" in app_js
-    assert "function agentAcceptanceModeValue" in app_js
-    assert "renderAgentAcceptanceModePreference();" in app_js
-    assert '$("agentAcceptanceModeSelect").onchange = (event) =>' in app_js
-    assert '"agentAcceptanceModeSelect"' in app_js
-    assert "acceptance_mode: agentAcceptanceModeValue()" in app_js
 
     mode_rule_start = styles_css.index(".agent-composer-acceptance")
     mode_rule_end = styles_css.index(".agent-composer-model", mode_rule_start)
@@ -10122,29 +7651,6 @@ def test_agent_composer_select_accent_does_not_stick_after_native_dropdown_close
     assert "var(--danger)" not in focus_rule
 
 
-def test_agent_composer_selects_are_not_rebuilt_on_every_poll_render():
-    app_js = _read_static("app.js")
-
-    model_options_start = app_js.index("function renderAgentModelOptions")
-    model_options_end = app_js.index("function renderAgentEffortPreference", model_options_start)
-    model_options = app_js[model_options_start:model_options_end]
-
-    assert "agentModelOptionsSignature" in model_options
-    assert "const preferred = agentPreferredModelId(enabledModels);" in model_options
-    assert "agentSelectedModelId || llmSettings.default_model_id" not in model_options
-    assert "preferredStillAvailable" in model_options
-    assert "select.dataset.agentModelOptionsSignature === signature" in model_options
-    assert "select.innerHTML = \"\";" in model_options
-    assert (
-        model_options.index("select.dataset.agentModelOptionsSignature === signature")
-        < model_options.index("select.innerHTML = \"\";")
-    )
-
-    effort_start = app_js.index("function renderAgentEffortPreference")
-    effort_end = app_js.index("function requestAgentConversationScrollToLatest", effort_start)
-    effort_renderer = app_js[effort_start:effort_end]
-    assert "if (select.value !== agentSelectedEffort)" in effort_renderer
-
 
 def test_agent_model_preference_ignores_disabled_saved_model():
     app_js = _read_static("app.js")
@@ -10176,16 +7682,8 @@ def test_agent_model_preference_ignores_disabled_saved_model():
 
 
 def test_agent_assistant_messages_render_markdown_safely():
-    app_js = _read_static("app.js")
-    render_agent_js = _read_static("js/render-agent.js")
     styles_css = _read_browser_css()
 
-    assert 'import { renderAgentMarkdown } from "./js/render-agent.js";' in app_js
-    assert "export function renderAgentMarkdown" in render_agent_js
-    assert "export function renderMarkdownInline" in render_agent_js
-    assert "export function renderMarkdownInlineText" in render_agent_js
-    assert 'formatAgentMessageContent(visibleContent, { markdown: role === "assistant" })' in app_js
-    assert 'import { escapeHtml } from "./ui-utils.js";' in render_agent_js
     assert ".agent-markdown" in styles_css
     assert ".agent-markdown ul" in styles_css
     assert ".agent-markdown code" in styles_css
@@ -10200,12 +7698,6 @@ def test_agent_assistant_messages_render_markdown_safely():
     assert "color: inherit;" in em_rule
     assert "color: var(--text-secondary);" not in em_rule
     assert ".agent-markdown a" in styles_css
-    assert "renderMarkdownInlineText(segment)" in render_agent_js
-    assert "export function isSafeMarkdownHref" in render_agent_js
-    assert "export function markdownAnchorHtml" in render_agent_js
-    assert ".replace(/\\[([^\\]\\n]+)\\]\\(" not in render_agent_js
-    assert ".replace(/_([^_]+)_/g" not in render_agent_js
-    assert "isMarkdownBoundary" in render_agent_js
 
 
 def test_agent_markdown_rejects_browser_normalization_origin_bypasses():
@@ -10258,14 +7750,6 @@ def test_persisted_download_urls_are_limited_to_same_origin_api_paths():
     assert _safe_api_hrefs(safe_hrefs) == [href.removeprefix("/") for href in safe_hrefs]
 
 
-def test_report_and_strategy_download_renderers_use_same_origin_url_guard():
-    app_js = _read_static("app.js")
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
-
-    report_start = app_js.index("function agentMessageReportDownloadHtml")
-    report_end = app_js.index("\nif (typeof document", report_start)
-    assert "safeSameOriginApiHref(report?.download_url)" in app_js[report_start:report_end]
-    assert "safeSameOriginApiHref(artifact?.download_url)" in plan_js
 
 
 def test_report_download_presenter_drops_unsafe_persisted_urls():
@@ -10290,15 +7774,7 @@ def test_report_download_presenter_drops_unsafe_persisted_urls():
 def test_agent_markdown_renders_highlighted_code_blocks():
     styles_css = _read_browser_css()
     html = _render_agent_markdown(
-        "\n".join(
-            [
-                "```python",
-                "def score(df):",
-                "    threshold = 0.5",
-                "    return df[\"prob\"] > threshold  # pass",
-                "```",
-            ]
-        )
+        '```python\ndef score(df):\n    threshold = 0.5\n    return df["prob"] > threshold  # pass\n```'
     )
 
     assert '<code class="language-python">' in html
@@ -10333,31 +7809,10 @@ def test_agent_markdown_renders_highlighted_code_blocks():
     assert "color: var(--text-muted)" in _css_rule(styles_css, ".agent-code-token.comment")
 
 
-def test_agent_markdown_preserves_ordered_section_numbers_after_blank_lines():
-    render_agent_js = _read_static("js/render-agent.js")
-
-    renderer_start = render_agent_js.index("export function renderAgentMarkdown")
-    renderer_end = render_agent_js.index("export function normalizeMarkdownCodeLanguage", renderer_start)
-    renderer = render_agent_js[renderer_start:renderer_end]
-
-    assert r"^\s*(\d+)\.\s+(.+)$" in renderer
-    assert 'openList("ol", ordered[1])' in renderer
-    assert "startAttr" in renderer
-    assert 'html.push(`<${type}${startAttr}>`);' in renderer
-    assert "renderMarkdownInline(ordered[2])" in renderer
-
-
 def test_agent_markdown_renders_pipe_tables():
     styles_css = _read_browser_css()
     html = _render_agent_markdown(
-        "\n".join(
-            [
-                "| 文件类型 | 描述 | 信贷风控适用性 |",
-                "|:---|:---|:---|",
-                "| **PFA** | 基于 JSON/YAML 的模型交换标准 | 在部分场景中可被审计 |",
-                "| Pickle (.pkl) | Python 原生序列化格式 | **不推荐上线部署** |",
-            ]
-        )
+        "| 文件类型 | 描述 | 信贷风控适用性 |\n|:---|:---|:---|\n| **PFA** | 基于 JSON/YAML 的模型交换标准 | 在部分场景中可被审计 |\n| Pickle (.pkl) | Python 原生序列化格式 | **不推荐上线部署** |"
     )
 
     assert "<table>" in html
@@ -10404,30 +7859,7 @@ def test_agent_markdown_rejects_unsafe_links_and_escapes_html():
 
 
 def test_branding_normalizer_rejects_unsafe_asset_urls():
-    script = "\n".join(
-        [
-            # Browser startup installs the catalog through index.html's blocking
-            # classic script before app.js imports branding/state. Reproduce that
-            # public entrypoint contract explicitly for this standalone Node probe.
-            "await import('./marvis/static/js/pet_catalog.js');",
-            "const { isSafeAssetUrl, normalizeBranding, normalizeValidatorAliases } = "
-            "await import('./marvis/static/js/branding.js');",
-            "const probes = {",
-            "  absolute: isSafeAssetUrl('/branding/assets/logo.png'),",
-            "  relative: isSafeAssetUrl('static/brand/logo.png'),",
-            "  https: isSafeAssetUrl('https://cdn.test/logo.png'),",
-            "  protocolRelative: isSafeAssetUrl('//evil.test/x'),",
-            "  javascript: isSafeAssetUrl('javascript:alert(1)'),",
-            "  data: isSafeAssetUrl('data:text/html,x'),",
-            "};",
-            "const fallback = normalizeBranding({ logoUrl: 'javascript:alert(1)', "
-            "workspaceLogoUrl: 'data:image/png,x', faviconUrl: '//evil.test/f.ico' });",
-            "const aliases = normalizeValidatorAliases({ '  A  ': '  a  ', B: '', C: 5, D: 'd' });",
-            "process.stdout.write(JSON.stringify({ probes, logoUrl: fallback.logoUrl, "
-            "workspaceLogoUrl: fallback.workspaceLogoUrl, faviconUrl: fallback.faviconUrl, "
-            "aliases, brandingAliases: fallback.validatorAliases }));",
-        ]
-    )
+    script = "await import('./marvis/static/js/pet_catalog.js');\nconst { isSafeAssetUrl, normalizeBranding, normalizeValidatorAliases } = await import('./marvis/static/js/branding.js');\nconst probes = {\n  absolute: isSafeAssetUrl('/branding/assets/logo.png'),\n  relative: isSafeAssetUrl('static/brand/logo.png'),\n  https: isSafeAssetUrl('https://cdn.test/logo.png'),\n  protocolRelative: isSafeAssetUrl('//evil.test/x'),\n  javascript: isSafeAssetUrl('javascript:alert(1)'),\n  data: isSafeAssetUrl('data:text/html,x'),\n};\nconst fallback = normalizeBranding({ logoUrl: 'javascript:alert(1)', workspaceLogoUrl: 'data:image/png,x', faviconUrl: '//evil.test/f.ico' });\nconst aliases = normalizeValidatorAliases({ '  A  ': '  a  ', B: '', C: 5, D: 'd' });\nprocess.stdout.write(JSON.stringify({ probes, logoUrl: fallback.logoUrl, workspaceLogoUrl: fallback.workspaceLogoUrl, faviconUrl: fallback.faviconUrl, aliases, brandingAliases: fallback.validatorAliases }));"
     script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -10452,19 +7884,6 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
     # Validator aliases are trimmed; empty / non-string entries are dropped.
     assert data["aliases"] == {"A": "a", "D": "d"}
     assert data["brandingAliases"] == {}
-
-
-def test_frozen_snapshot_sanitizer_strips_scripts_and_event_handlers():
-    app_js = _read_static("app.js")
-    start = app_js.index("function stripIdsFromHtml(")
-    end = app_js.index("\n}", start)
-    body = app_js[start:end]
-    # Frozen snapshots must be inert: the sanitizer drops <script> and inline on*
-    # handlers in addition to id attributes (defense-in-depth re-insertion guard).
-    assert 'querySelectorAll("script")' in body
-    assert ".remove()" in body
-    assert 'removeAttribute("id")' in body
-    assert "/^on/i" in body
 
 
 def test_step_rail_bottom_padding_is_visually_balanced():
@@ -10496,113 +7915,6 @@ def _gate_controller_context_region(app_js: str) -> str:
     return app_js[start:end]
 
 
-def test_poll_validation_progress_does_not_call_render_all_in_loop():
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "async function pollValidationProgress")
-    assert "renderAll();" not in body, (
-        "pollValidationProgress() must not call renderAll() in its steady-state "
-        "loop; use renderChangedValidationViews() instead so unchanged regions "
-        "are not repainted every second."
-    )
-    assert "renderChangedValidationViews" in body
-
-
-def test_action_status_writer_is_idempotent():
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function setActionStatus")
-    assert "renderSignatures.actionStatus" in body, (
-        "setActionStatus() must short-circuit on identical (message, kind, "
-        "detail) writes so the top status pill does not flicker during polling."
-    )
-    # The guard must be an early return before the DOM is touched.
-    guard_index = body.index("renderSignatures.actionStatus")
-    pill_write_index = body.index('$("actionStatus")')
-    assert guard_index < pill_write_index
-
-
-def test_action_status_signature_is_scoped_to_selected_task():
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function setActionStatus")
-    assert "taskSession.taskId" in body, (
-        "switching between tasks with the same status copy must still repaint "
-        "the persistent status detail for the newly selected task"
-    )
-
-
-def test_metric_preview_skips_unchanged_payload():
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function renderMetricPreview")
-    guard_index = body.index("renderSignatures.metricPreview")
-    html_index = body.index('"metricPreview").innerHTML')
-    assert guard_index < html_index, (
-        "renderMetricPreview() must short-circuit on identical payloads before "
-        "any innerHTML assignment so animated metric cards do not replay every "
-        "polling tick."
-    )
-
-
-def test_workflow_stepper_guard_refreshes_elapsed_time():
-    """The skip-path must still tick elapsed seconds on running steps."""
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function renderWorkflowStepper")
-    assert "refreshWorkflowStepperElapsedTimes" in body, (
-        "renderWorkflowStepper() must call refreshWorkflowStepperElapsedTimes() "
-        "so running steps' elapsed seconds tick even when the structural "
-        "signature guard skips a rebuild."
-    )
-    guard_idx = body.index("renderSignatures.workflowStepper === nextSignature")
-    refresh_idx = body.index("refreshWorkflowStepperElapsedTimes")
-    assert guard_idx < refresh_idx, (
-        "The elapsed-time refresher must be reachable from the skip branch "
-        "(i.e. positioned after the signature comparison)."
-    )
-
-
-def test_step_fingerprint_excludes_clock_time():
-    """stepFingerprint must NOT include Date.now() or it defeats the guard."""
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function stepFingerprint")
-    assert "Date.now()" not in body, (
-        "stepFingerprint() must not bake clock time into the structural "
-        "signature; otherwise every poll tick triggers a full rebuild and "
-        "replays animations."
-    )
-
-
-def test_reproducibility_guard_lives_in_render_signatures():
-    """The reproducibility chart's structural guard must be unified into the
-    renderSignatures cache (not dropped onto element.dataset where evidenceEmpty
-    would wipe it). This is the structural piece of the fix."""
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function renderReproducibilityEvidence")
-    assert "renderSignatures.reproducibilityEvidence" in body
-    assert "renderSignatures.reproducibilityTaskId" in body
-    assert "renderSignatures.reproducibilityAnimatedTaskId" in body
-    # The OLD dataset-based guard must be gone — it was wipe-prone by design.
-    assert "element.dataset.reproducibilitySignature" not in body
-    assert "element.dataset.reproducibilityTaskId" not in body
-    # And the empty branch must not gate on notebookReproducibilityComplete,
-    # which was the original regression vector during running notebook steps.
-    empty_branch_start = body.index("Object.keys(summary).length === 0")
-    empty_branch_end = body.index("evidenceEmpty(", empty_branch_start)
-    empty_branch = body[empty_branch_start:empty_branch_end]
-    assert "notebookReproducibilityComplete" not in empty_branch
-
-
-def test_reproducibility_animation_replays_only_on_first_render_per_task():
-    """Animation policy: shouldAnimatePrecisionChart is true only when the
-    per-task animated marker doesn't match — never on every rebuild."""
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function renderReproducibilityEvidence")
-    assert (
-        "shouldAnimatePrecisionChart = renderSignatures.reproducibilityAnimatedTaskId !== taskId"
-        in body
-    )
-    # And the marker must be set after a render that actually animated, so the
-    # next rebuild for the same task uses data-animation="none".
-    assert "renderSignatures.reproducibilityAnimatedTaskId = taskId" in body
-
-
 def _run_node_capture_json(script: str) -> dict:
     # These harnesses inline the whole app.js source, which exceeds Linux's
     # 128KB per-argument limit (MAX_ARG_STRLEN) — feed the program via stdin
@@ -10610,7 +7922,7 @@ def _run_node_capture_json(script: str) -> dict:
     script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module"], input=script, capture_output=True, text=True
-    )
+    , check=False)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -10629,6 +7941,7 @@ _MOUNTED_PANEL_DOM_FIXTURE = r'''
 const fixturePanelIds = new Set([
   'sqlImportPanel', 'governedCapabilitiesPanel', 'workerIsolationPanel',
   'institutionPanel', 'instanceSynchronizationPanel', 'strategyHistoryMappingPanel',
+  'dataHistoryMappingPanel',
 ]);
 const fixturePanelDocument = { createElement: tag => fixturePanelNode(tag) };
 function fixturePanelNode(tag = 'div') {
@@ -10669,45 +7982,7 @@ def test_validation_evidence_sections_reveal_only_after_their_stage_completes():
     visibility_start = app_js.index("function notebookReproducibilityComplete")
     visibility_end = app_js.index("function workflowIndex", visibility_start)
     visibility_functions = app_js[visibility_start:visibility_end]
-    script = "\n".join(
-        [
-            "let selectedTaskId = 'task';",
-            "let selectedTask = null;",
-            "const notebookReproducibilityCompleteStatuses = new Set([",
-            "  'executed', 'computing_metrics', 'writing_artifacts', 'succeeded', 'review_required',",
-            "]);",
-            "const metricOverviewCompleteStatuses = new Set([",
-            "  'writing_artifacts', 'succeeded', 'review_required',",
-            "]);",
-            "function taskFailedDuringNotebook(task) {",
-            "  return task?.status === 'failed' && task?.failure_stage === 'notebook';",
-            "}",
-            "function taskFailedDuringMetrics(task) {",
-            "  return task?.status === 'failed' && task?.failure_stage === 'metrics';",
-            "}",
-            "function taskFailedDuringReport(task) {",
-            "  return task?.status === 'failed' && task?.failure_stage === 'report';",
-            "}",
-            "function taskFailureWasRestartReclaim() { return false; }",
-            "function workflowStageCompleteFromEvidence() { return false; }",
-            visibility_functions,
-            "function visible(task) {",
-            "  selectedTask = task;",
-            "  selectedTaskId = task.id;",
-            "  return {",
-            "    reproducibility: shouldShowReproducibilitySection(),",
-            "    metrics: shouldShowMetricSection(),",
-            "  };",
-            "}",
-            "process.stdout.write(JSON.stringify({",
-            "  failedNotebook: visible({ id: 'n', status: 'failed', failure_stage: 'notebook' }),",
-            "  failedMetrics: visible({ id: 'm', status: 'failed', failure_stage: 'metrics' }),",
-            "  failedReport: visible({ id: 'r', status: 'failed', failure_stage: 'report' }),",
-            "  notebookComplete: visible({ id: 'e', status: 'executed' }),",
-            "  metricsComplete: visible({ id: 'w', status: 'writing_artifacts' }),",
-            "}));",
-        ]
-    )
+    script = f"let selectedTaskId = 'task';\nlet selectedTask = null;\nconst notebookReproducibilityCompleteStatuses = new Set([\n  'executed', 'computing_metrics', 'writing_artifacts', 'succeeded', 'review_required',\n]);\nconst metricOverviewCompleteStatuses = new Set([\n  'writing_artifacts', 'succeeded', 'review_required',\n]);\nfunction taskFailedDuringNotebook(task) {{\n  return task?.status === 'failed' && task?.failure_stage === 'notebook';\n}}\nfunction taskFailedDuringMetrics(task) {{\n  return task?.status === 'failed' && task?.failure_stage === 'metrics';\n}}\nfunction taskFailedDuringReport(task) {{\n  return task?.status === 'failed' && task?.failure_stage === 'report';\n}}\nfunction taskFailureWasRestartReclaim() {{ return false; }}\nfunction workflowStageCompleteFromEvidence() {{ return false; }}\n{visibility_functions}\nfunction visible(task) {{\n  selectedTask = task;\n  selectedTaskId = task.id;\n  return {{\n    reproducibility: shouldShowReproducibilitySection(),\n    metrics: shouldShowMetricSection(),\n  }};\n}}\nprocess.stdout.write(JSON.stringify({{\n  failedNotebook: visible({{ id: 'n', status: 'failed', failure_stage: 'notebook' }}),\n  failedMetrics: visible({{ id: 'm', status: 'failed', failure_stage: 'metrics' }}),\n  failedReport: visible({{ id: 'r', status: 'failed', failure_stage: 'report' }}),\n  notebookComplete: visible({{ id: 'e', status: 'executed' }}),\n  metricsComplete: visible({{ id: 'w', status: 'writing_artifacts' }}),\n}}));"
 
     data = _run_node_capture_json(_with_workbench_context(script, app_js))
 
@@ -11042,53 +8317,7 @@ def test_reproducibility_render_handles_task_switch_animation_policy():
     assert data["signatureAfter_C"] == "", data
 
 
-def test_substep_elapsed_text_lives_in_its_own_span():
-    """Substep elapsed text needs a stable key so the refresher can target it."""
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function renderNotebookStepRail")
-    assert "data-step-elapsed-key" in body, (
-        "Notebook substeps must render elapsed text in a span with a stable "
-        "data-step-elapsed-key so refreshWorkflowStepperElapsedTimes() can "
-        "update it in place without rebuilding the substep DOM."
-    )
 
-
-def test_computing_metrics_has_one_status_phrase():
-    app_js = _read_static("app.js")
-    poll_body = _slice_function(app_js, "async function pollValidationProgress")
-    assert "验证进行中：" not in poll_body, (
-        "pollValidationProgress() must not write its own 验证进行中：... copy; "
-        "taskActionStatusSnapshot() owns the per-status phrase."
-    )
-    snapshot_body = _slice_function(app_js, "function taskActionStatusSnapshot")
-    assert "指标概览进行中" in snapshot_body
-
-
-def test_validation_status_snapshot_keeps_persistent_stage_detail():
-    app_js = _read_static("app.js")
-    snapshot_body = _slice_function(app_js, "function taskActionStatusSnapshot")
-    for phrase in [
-        "等待材料识别",
-        "已完成：材料识别",
-        "PMML解析与全量评分",
-        "模型效果、稳定性与压力测试",
-        "Word报告与Excel分析",
-        "已完成：材料识别、PMML打分、模型验证与报告输出",
-    ]:
-        assert phrase in snapshot_body
-    assert snapshot_body.count("detail:") >= 10
-
-    render_body = _slice_function(app_js, "function renderCurrentTask")
-    assert "setActionStatus: setWorkspaceActionStatus" in render_body
-    workspace_status_body = _slice_function(app_js, "function setWorkspaceActionStatus")
-    assert "taskActionStatusSnapshot(taskSession.task)" in workspace_status_body
-    assert "snapshot.detail" in workspace_status_body
-
-    failure_status_body = _slice_function(app_js, "function setTaskFailureActionStatus")
-    assert 'setActionErrorDetail("")' not in failure_status_body, (
-        "switching between two successful tasks can reuse the same status signature; "
-        "the failure helper must not clear the persistent detail before that render"
-    )
 
 
 def test_writing_artifacts_idle_shows_metrics_complete():
@@ -11103,22 +8332,7 @@ def test_writing_artifacts_idle_shows_metrics_complete():
     app_js = _read_static("app.js")
     stopped_body = _slice_function(app_js, "function taskStopped")
     snapshot_body = _slice_function(app_js, "function taskActionStatusSnapshot")
-    script = "\n".join(
-        [
-            "let selectedTask = null;",
-            "function taskPlanWorkflowStatusSnapshot() { return null; }",
-            "function usesPmmlScoringWorkflow() { return false; }",
-            stopped_body,
-            snapshot_body,
-            "const idle = taskActionStatusSnapshot({"
-            " status: 'writing_artifacts', active_job_kind: null });",
-            "const reportBusy = taskActionStatusSnapshot({"
-            " status: 'writing_artifacts', active_job_kind: 'report' });",
-            "const metricsRunning = taskActionStatusSnapshot({"
-            " status: 'computing_metrics', active_job_kind: 'metrics' });",
-            "process.stdout.write(JSON.stringify({ idle, reportBusy, metricsRunning }));",
-        ]
-    )
+    script = f"let selectedTask = null;\nfunction taskPlanWorkflowStatusSnapshot() {{ return null; }}\nfunction usesPmmlScoringWorkflow() {{ return false; }}\n{stopped_body}\n{snapshot_body}\nconst idle = taskActionStatusSnapshot({{ status: 'writing_artifacts', active_job_kind: null }});\nconst reportBusy = taskActionStatusSnapshot({{ status: 'writing_artifacts', active_job_kind: 'report' }});\nconst metricsRunning = taskActionStatusSnapshot({{ status: 'computing_metrics', active_job_kind: 'metrics' }});\nprocess.stdout.write(JSON.stringify({{ idle, reportBusy, metricsRunning }}));"
 
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -11146,16 +8360,7 @@ def test_writing_artifacts_idle_shows_metrics_complete():
 def test_task_stopped_uses_structured_stopped_field_only():
     app_js = _read_static("app.js")
     stopped_body = _slice_function(app_js, "function taskStopped")
-    script = "\n".join(
-        [
-            "let selectedTask = null;",
-            stopped_body,
-            "const structured = taskStopped({ stopped: true, status_message: '普通状态' });",
-            "const legacy = taskStopped({ status_message: '已停止当前动作' });",
-            "const active = taskStopped({ stopped: false, status_message: '普通状态' });",
-            "process.stdout.write(JSON.stringify({ structured, legacy, active }));",
-        ]
-    )
+    script = f"let selectedTask = null;\n{stopped_body}\nconst structured = taskStopped({{ stopped: true, status_message: '普通状态' }});\nconst legacy = taskStopped({{ status_message: '已停止当前动作' }});\nconst active = taskStopped({{ stopped: false, status_message: '普通状态' }});\nprocess.stdout.write(JSON.stringify({{ structured, legacy, active }}));"
 
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -11177,111 +8382,48 @@ def test_writing_artifacts_status_tone_idle_vs_report_busy():
     """
     app_js = _read_static("app.js")
     stopped_body = _slice_function(app_js, "function taskStopped")
-    tone_body = _slice_function(app_js, "function statusTone")
+    # Batch 4 (2026-10-14 redesign): taskStatusTone resolves through js/task-status.js.
+    context_body = _slice_function(app_js, "function taskStatusContext")
+    resolved_body = _slice_function(app_js, "function taskResolvedStatus")
     task_tone_body = _slice_function(app_js, "function taskStatusTone")
     script = "\n".join(
         [
+            'import { resolveTaskStatus } from "./marvis/static/js/task-status.js";',
             "let selectedTask = null;",
             "function taskPlanWorkflowStatusSnapshot() { return null; }",
             stopped_body,
-            tone_body,
+            context_body,
+            resolved_body,
             task_tone_body,
-            "const idle = taskStatusTone({"
-            " status: 'writing_artifacts', active_job_kind: null });",
-            "const reportBusy = taskStatusTone({"
-            " status: 'writing_artifacts', active_job_kind: 'report' });",
+            ("const idle = taskStatusTone({"
+            " status: 'writing_artifacts', active_job_kind: null });"),
+            ("const reportBusy = taskStatusTone({"
+            " status: 'writing_artifacts', active_job_kind: 'report' });"),
             "process.stdout.write(JSON.stringify({ idle, reportBusy }));",
         ]
     )
 
     script = session_projection_fixture(script)
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
+        cwd=Path(__file__).resolve().parents[1],
         check=True,
         capture_output=True,
         text=True,
     )
 
     tones = json.loads(result.stdout)
-    assert tones["idle"] == "success", (
-        "writing_artifacts with no active report job should color the pill "
-        "as a completion, not as a running task."
+    # Batch 4 (2026-10-14 redesign): metrics done and the report not started is 待继续 (review tone), as in the title.
+    assert tones["idle"] == "review", (
+        "writing_artifacts with no active report job means the user starts "
+        "the report next, not a running task."
     )
     assert tones["reportBusy"] == "run"
 
 
-def test_manual_stage_finish_scrolls_to_section_top():
-    """In manual mode each stage handler must jump to the top of the
-    newly-rendered section once execution succeeds, matching the behavior
-    of clicking the corresponding row in the right-side workflow stepper.
-    The helper is gated to manual mode so agent-mode runs do not fight the
-    agent auto-scroll-to-bottom behavior.
-    """
-    app_js = _read_static("app.js")
-
-    helper_body = _slice_function(app_js, "function scrollToManualWorkflowSection")
-    assert "selectedTaskIsAgentMode()" in helper_body, (
-        "scrollToManualWorkflowSection must short-circuit in agent mode."
-    )
-    assert "workflowSteps.find" in helper_body, (
-        "Helper must resolve the section id via workflowSteps so it stays "
-        "in sync with the stepper definition."
-    )
-    assert "scrollStepTarget" in helper_body, (
-        "Helper must reuse scrollStepTarget so manual-finish scroll uses the "
-        "same scrollIntoView call as the stepper click."
-    )
-
-    scan_body = _slice_function(app_js, "async function scanCurrentTask")
-    assert 'scrollToManualWorkflowSection("scan")' in scan_body
-
-    notebook_body = _slice_function(app_js, "async function validateCurrentTask")
-    assert 'scrollToManualWorkflowSection("notebook")' in notebook_body
-
-    metrics_body = _slice_function(app_js, "async function generateMetrics")
-    assert 'scrollToManualWorkflowSection("metrics")' in metrics_body
-
-    report_body = _slice_function(app_js, "async function generateReport")
-    assert 'scrollToManualWorkflowSection("report")' in report_body
 
 
-def test_agent_auto_scroll_drops_distance_threshold():
-    """The follow-mode rewrite must replace the old 120px sticky window with
-    a strict at-bottom check. The threshold made tiny upward scrolls feel
-    glued to the bottom because the typewriter kept yanking the viewport
-    back down.
-    """
-    app_js = _read_static("app.js")
-    assert "AGENT_AUTO_SCROLL_STICKY_PX" not in app_js, (
-        "The 120px sticky threshold must be removed so any upward scroll "
-        "disengages auto-follow."
-    )
-    body = _slice_function(app_js, "function requestAgentConversationScrollToLatest")
-    assert "distanceFromBottom" not in body
-    assert "agentAutoScrollFollows" in body, (
-        "requestAgentConversationScrollToLatest must consult the follow-mode "
-        "state instead of a distance threshold."
-    )
 
-
-def test_task_switch_resets_agent_follow_and_typing_state():
-    """Both agentAutoScrollFollows and agentTypingState are module-level
-    globals. Without an explicit reset on task switch, a stale `false` flag
-    from task A would stop task B's typewriter from auto-following, and a
-    lingering typing entry from A could re-reveal (or contaminate via a
-    shared messageId) on B's panel.
-    """
-    app_js = _read_static("app.js")
-    prep = _slice_function(app_js, "function prepareResultScrollRestoreForTask")
-    assert "agentAutoScrollFollows = true;" in prep, (
-        "Task switch must reset agentAutoScrollFollows so a stale `false` "
-        "from the previous task does not freeze the next task's follow-mode."
-    )
-    select = _slice_function(app_js, "function selectTask")
-    assert "resetAgentTypingState();" in select, (
-        "Task identity change must wipe typewriter state so a still-revealing "
-        "message from the previous task can't re-reveal on the new task."
-    )
 
 
 def test_agent_typewriter_resume_after_completion_seeds_visible():
@@ -11294,38 +8436,7 @@ def test_agent_typewriter_resume_after_completion_seeds_visible():
     visible_body = _slice_function(app_js, "function agentVisibleContent")
     sched_body = _slice_function(app_js, "function scheduleAgentTyping")
 
-    script = "\n".join(
-        [
-            "const window = { setTimeout: () => 1, clearTimeout: () => {} };",
-            "const agentTypingState = new Map();",
-            "const agentTypingCompleted = new Map();",
-            "let agentTypingTimer = null;",
-            "let lastAgentRenderSignature = null;",
-            "const AGENT_TYPEWRITER_INTERVAL_MS = 12;",
-            "function renderAgentConversation() {}",
-            "function tickAgentTyping() {}",
-            streaming_body,
-            sched_body,
-            visible_body,
-            # Phase 1: streaming completes naturally.
-            "agentTypingState.set('m1', { visible: 'hello world', target: 'hello world' });",
-            "const settled = { id: 'm1', role: 'assistant',"
-            " content: 'hello world', metadata: { streaming: false } };",
-            "agentVisibleContent(settled);",
-            "const completedAfterSettle = agentTypingCompleted.get('m1');",
-            # Phase 2: same id resumes streaming with more content.
-            "const resumed = { id: 'm1', role: 'assistant',"
-            " content: 'hello world and then some', metadata: { streaming: true } };",
-            "const visibleOnResume = agentVisibleContent(resumed);",
-            "const typingOnResume = agentTypingState.get('m1');",
-            "process.stdout.write(JSON.stringify({"
-            " completedAfterSettle,"
-            " visibleOnResume,"
-            " seededVisible: typingOnResume ? typingOnResume.visible : null,"
-            " targetOnResume: typingOnResume ? typingOnResume.target : null,"
-            "}));",
-        ]
-    )
+    script = f"const window = {{ setTimeout: () => 1, clearTimeout: () => {{}} }};\nconst agentTypingState = new Map();\nconst agentTypingCompleted = new Map();\nlet agentTypingTimer = null;\nlet lastAgentRenderSignature = null;\nconst AGENT_TYPEWRITER_INTERVAL_MS = 12;\nfunction renderAgentConversation() {{}}\nfunction tickAgentTyping() {{}}\n{streaming_body}\n{sched_body}\n{visible_body}\nagentTypingState.set('m1', {{ visible: 'hello world', target: 'hello world' }});\nconst settled = {{ id: 'm1', role: 'assistant', content: 'hello world', metadata: {{ streaming: false }} }};\nagentVisibleContent(settled);\nconst completedAfterSettle = agentTypingCompleted.get('m1');\nconst resumed = {{ id: 'm1', role: 'assistant', content: 'hello world and then some', metadata: {{ streaming: true }} }};\nconst visibleOnResume = agentVisibleContent(resumed);\nconst typingOnResume = agentTypingState.get('m1');\nprocess.stdout.write(JSON.stringify({{ completedAfterSettle, visibleOnResume, seededVisible: typingOnResume ? typingOnResume.visible : null, targetOnResume: typingOnResume ? typingOnResume.target : null,}}));"
 
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -11353,52 +8464,6 @@ def test_agent_typewriter_resume_after_completion_seeds_visible():
     )
 
 
-def test_user_scroll_input_required_to_flip_follow_mode():
-    """Without a recent wheel/touch input, recomputeAgentAutoScrollFollow must
-    be a no-op. This is what stops the typewriter's own scrollTo from flipping
-    follow-mode back on the frame after the user disengaged it.
-    """
-    app_js = _read_static("app.js")
-    recompute_body = _slice_function(app_js, "function recomputeAgentAutoScrollFollow")
-    note_body = _slice_function(app_js, "function noteAgentUserScrollInput")
-    assert "lastUserScrollInputAt" in recompute_body, (
-        "recomputeAgentAutoScrollFollow must consult the last user-input "
-        "timestamp so it ignores programmatic typewriter/restore scrolls."
-    )
-    assert "AGENT_USER_SCROLL_INPUT_WINDOW_MS" in recompute_body
-    assert "lastUserScrollInputAt = performance.now();" in note_body
-    assert 'document.addEventListener("wheel", noteAgentUserScrollInput' in app_js
-    assert 'document.addEventListener("touchstart", noteAgentUserScrollInput' in app_js
-    assert 'document.addEventListener("touchmove", noteAgentUserScrollInput' in app_js
-
-
-def test_recompute_agent_auto_scroll_follow_ignores_negative_distance():
-    """Overscroll bounce and mid-mount panels can produce a negative or zero
-    distance value. `distance <= 2` alone is trivially true in those cases
-    and would spuriously re-engage follow-mode.
-    """
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function recomputeAgentAutoScrollFollow")
-    assert "scrollHeight <= scrollContent.clientHeight" in body, (
-        "When the panel cannot scroll yet (content fits within viewport), "
-        "recompute must short-circuit instead of flipping follow-mode."
-    )
-    assert "if (distance < 0) return;" in body, (
-        "Negative distance (overscroll bounce, sub-pixel rounding past max) "
-        "must not flip follow-mode to true."
-    )
-
-
-def test_scroll_to_manual_workflow_section_captures_task_id():
-    """The rAF inside scrollToManualWorkflowSection runs one frame after
-    scheduling; the user may have switched tasks in between. Capturing
-    selectedTaskId at scheduling time and bailing on mismatch prevents the
-    panel from jumping to the wrong section.
-    """
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function scrollToManualWorkflowSection")
-    assert "const targetTaskId = taskSession.taskId;" in body
-    assert "if (taskSession.taskId !== targetTaskId) return;" in body
 
 
 def test_modeling_and_join_controller_contexts_expose_the_same_behavior():
@@ -11467,12 +8532,12 @@ def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally()
             "const planRailController = { resetFetchThrottle() {} };",
             _gate_controller_context_region(app_js),
             "const results = {};",
-            "for (const [name, factory] of Object.entries({"
+            ("for (const [name, factory] of Object.entries({"
             " modelingSetupControllerContext,"
             " joinGateControllerContext,"
             " screenGateControllerContext,"
             " driverConfirmControllerContext,"
-            "})) {",
+            "})) {"),
             "  selectedTaskId = 'task-A'; taskRequests.select('task-A');",
             "  agentMessages = ['seed'];",
             "  const ctx = factory();",
@@ -11592,40 +8657,7 @@ def test_recompute_agent_auto_scroll_follow_toggles_on_position():
     app_js = _read_static("app.js")
     recompute_body = _slice_function(app_js, "function recomputeAgentAutoScrollFollow")
 
-    script = "\n".join(
-        [
-            "let scrollContent = { scrollHeight: 1000, clientHeight: 400, scrollTop: 0 };",
-            "function $(id) { return id === 'resultScrollContent' ? scrollContent : null; }",
-            "let isAgent = true;",
-            "function selectedTaskIsAgentMode() { return isAgent; }",
-            "let agentAutoScrollFollows = true;",
-            "const AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX = 2;",
-            "const AGENT_USER_SCROLL_INPUT_WINDOW_MS = 250;",
-            "let lastUserScrollInputAt = 0;",
-            "const performance = { now: () => 100 };",
-            recompute_body,
-            "lastUserScrollInputAt = 100;",  # pretend wheel just fired
-            "scrollContent.scrollTop = 600;",
-            "recomputeAgentAutoScrollFollow();",
-            "const atBottom = agentAutoScrollFollows;",
-            "scrollContent.scrollTop = 590;",
-            "recomputeAgentAutoScrollFollow();",
-            "const slightlyAbove = agentAutoScrollFollows;",
-            "scrollContent.scrollTop = 200;",
-            "recomputeAgentAutoScrollFollow();",
-            "const farAbove = agentAutoScrollFollows;",
-            "scrollContent.scrollTop = 599.4;",
-            "recomputeAgentAutoScrollFollow();",
-            "const subpixelRounding = agentAutoScrollFollows;",
-            "isAgent = false;",
-            "scrollContent.scrollTop = 0;",
-            "recomputeAgentAutoScrollFollow();",
-            "const nonAgentLeft = agentAutoScrollFollows;",
-            "process.stdout.write(JSON.stringify({"
-            " atBottom, slightlyAbove, farAbove, subpixelRounding, nonAgentLeft"
-            " }));",
-        ]
-    )
+    script = f"let scrollContent = {{ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 }};\nfunction $(id) {{ return id === 'resultScrollContent' ? scrollContent : null; }}\nlet isAgent = true;\nfunction selectedTaskIsAgentMode() {{ return isAgent; }}\nlet agentAutoScrollFollows = true;\nconst AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX = 2;\nconst AGENT_USER_SCROLL_INPUT_WINDOW_MS = 250;\nlet lastUserScrollInputAt = 0;\nconst performance = {{ now: () => 100 }};\n{recompute_body}\nlastUserScrollInputAt = 100;\nscrollContent.scrollTop = 600;\nrecomputeAgentAutoScrollFollow();\nconst atBottom = agentAutoScrollFollows;\nscrollContent.scrollTop = 590;\nrecomputeAgentAutoScrollFollow();\nconst slightlyAbove = agentAutoScrollFollows;\nscrollContent.scrollTop = 200;\nrecomputeAgentAutoScrollFollow();\nconst farAbove = agentAutoScrollFollows;\nscrollContent.scrollTop = 599.4;\nrecomputeAgentAutoScrollFollow();\nconst subpixelRounding = agentAutoScrollFollows;\nisAgent = false;\nscrollContent.scrollTop = 0;\nrecomputeAgentAutoScrollFollow();\nconst nonAgentLeft = agentAutoScrollFollows;\nprocess.stdout.write(JSON.stringify({{ atBottom, slightlyAbove, farAbove, subpixelRounding, nonAgentLeft }}));"
 
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -11652,16 +8684,6 @@ def test_recompute_agent_auto_scroll_follow_toggles_on_position():
     )
 
 
-def test_handle_result_scroll_recomputes_follow_mode():
-    """The follow-mode toggle must hang off the existing scroll listener so
-    both user wheels and the typewriter's own scrollTo land in the same
-    recompute path.
-    """
-    app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function handleResultScroll")
-    assert "recomputeAgentAutoScrollFollow();" in body
-
-
 def test_agent_typewriter_continues_after_stream_ends():
     """The agent typewriter must not dump remaining content when the server
     flips metadata.streaming to false. Short messages caught up before the
@@ -11674,43 +8696,7 @@ def test_agent_typewriter_continues_after_stream_ends():
     sched_body = _slice_function(app_js, "function scheduleAgentTyping")
     tick_body = _slice_function(app_js, "function tickAgentTyping")
 
-    script = "\n".join(
-        [
-            "const window = { setTimeout: () => 1, clearTimeout: () => {} };",
-            "const agentTypingState = new Map();",
-            "const agentTypingCompleted = new Map();",
-            "let agentTypingTimer = null;",
-            "let lastAgentRenderSignature = null;",
-            "const AGENT_TYPEWRITER_INTERVAL_MS = 12;",
-            "const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;",
-            "const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;",
-            "function renderAgentConversation() {}",
-            streaming_body,
-            sched_body,
-            tick_body,
-            visible_body,
-            "const longContent = 'A'.repeat(200);",
-            "const streaming = { id: 'm1', role: 'assistant',"
-            " content: longContent.slice(0, 10),"
-            " metadata: { streaming: true } };",
-            "const first = agentVisibleContent(streaming);",
-            "agentTypingState.get('m1').visible = longContent.slice(0, 5);",
-            "const settled = { id: 'm1', role: 'assistant',"
-            " content: longContent,"
-            " metadata: { streaming: false } };",
-            "const afterStreamEnd = agentVisibleContent(settled);",
-            "const stateAfterStreamEnd = agentTypingState.has('m1');",
-            "tickAgentTyping();",
-            "const afterTick = agentTypingState.get('m1');",
-            "process.stdout.write(JSON.stringify({"
-            " first,"
-            " afterStreamEnd,"
-            " stateAfterStreamEnd,"
-            " visibleAfterTick: afterTick ? afterTick.visible : null,"
-            " targetAfterTick: afterTick ? afterTick.target : null,"
-            "}));",
-        ]
-    )
+    script = f"const window = {{ setTimeout: () => 1, clearTimeout: () => {{}} }};\nconst agentTypingState = new Map();\nconst agentTypingCompleted = new Map();\nlet agentTypingTimer = null;\nlet lastAgentRenderSignature = null;\nconst AGENT_TYPEWRITER_INTERVAL_MS = 12;\nconst AGENT_TYPEWRITER_CHARS_PER_TICK = 2;\nconst AGENT_TYPEWRITER_CATCHUP_TICKS = 15;\nfunction renderAgentConversation() {{}}\n{streaming_body}\n{sched_body}\n{tick_body}\n{visible_body}\nconst longContent = 'A'.repeat(200);\nconst streaming = {{ id: 'm1', role: 'assistant', content: longContent.slice(0, 10), metadata: {{ streaming: true }} }};\nconst first = agentVisibleContent(streaming);\nagentTypingState.get('m1').visible = longContent.slice(0, 5);\nconst settled = {{ id: 'm1', role: 'assistant', content: longContent, metadata: {{ streaming: false }} }};\nconst afterStreamEnd = agentVisibleContent(settled);\nconst stateAfterStreamEnd = agentTypingState.has('m1');\ntickAgentTyping();\nconst afterTick = agentTypingState.get('m1');\nprocess.stdout.write(JSON.stringify({{ first, afterStreamEnd, stateAfterStreamEnd, visibleAfterTick: afterTick ? afterTick.visible : null, targetAfterTick: afterTick ? afterTick.target : null,}}));"
 
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -11749,36 +8735,7 @@ def test_agent_typewriter_catches_up_long_backlog_quickly():
     sched_body = _slice_function(app_js, "function scheduleAgentTyping")
     tick_body = _slice_function(app_js, "function tickAgentTyping")
 
-    script = "\n".join(
-        [
-            "const window = { setTimeout: () => 1, clearTimeout: () => {} };",
-            "const agentTypingState = new Map();",
-            "const agentTypingCompleted = new Map();",
-            "let agentTypingTimer = null;",
-            "let lastAgentRenderSignature = null;",
-            "const AGENT_TYPEWRITER_INTERVAL_MS = 12;",
-            "const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;",
-            "const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;",
-            "function renderAgentConversation() {}",
-            streaming_body,
-            sched_body,
-            tick_body,
-            visible_body,
-            "const bigContent = 'B'.repeat(3000);",
-            "const message = { id: 'm1', role: 'assistant',"
-            " content: bigContent,"
-            " metadata: { streaming: true } };",
-            "agentVisibleContent(message);",
-            "let ticks = 0;",
-            "while (agentTypingState.get('m1').visible.length"
-            " < agentTypingState.get('m1').target.length) {",
-            "  tickAgentTyping();",
-            "  ticks += 1;",
-            "  if (ticks > 500) break;",
-            "}",
-            "process.stdout.write(JSON.stringify({ ticks }));",
-        ]
-    )
+    script = f"const window = {{ setTimeout: () => 1, clearTimeout: () => {{}} }};\nconst agentTypingState = new Map();\nconst agentTypingCompleted = new Map();\nlet agentTypingTimer = null;\nlet lastAgentRenderSignature = null;\nconst AGENT_TYPEWRITER_INTERVAL_MS = 12;\nconst AGENT_TYPEWRITER_CHARS_PER_TICK = 2;\nconst AGENT_TYPEWRITER_CATCHUP_TICKS = 15;\nfunction renderAgentConversation() {{}}\n{streaming_body}\n{sched_body}\n{tick_body}\n{visible_body}\nconst bigContent = 'B'.repeat(3000);\nconst message = {{ id: 'm1', role: 'assistant', content: bigContent, metadata: {{ streaming: true }} }};\nagentVisibleContent(message);\nlet ticks = 0;\nwhile (agentTypingState.get('m1').visible.length < agentTypingState.get('m1').target.length) {{\n  tickAgentTyping();\n  ticks += 1;\n  if (ticks > 500) break;\n}}\nprocess.stdout.write(JSON.stringify({{ ticks }}));"
 
     script = session_projection_fixture(script)
     result = subprocess.run(
@@ -11798,34 +8755,6 @@ def test_agent_typewriter_catches_up_long_backlog_quickly():
         "The catch-up must not collapse to a single-tick dump — that would "
         "reproduce the original bug."
     )
-
-
-def test_base_pet_mood_writing_artifacts_idle_is_complete():
-    """basePetMoodFromTask reads writing_artifacts as running even when the
-    report job has not started yet, leaving the pet in the running animation
-    after stage 3 finishes.
-    """
-    app_js = _read_static("app.js")
-    mood_body = _slice_function(app_js, "function basePetMoodFromTask")
-
-    # Drop the writing_artifacts entry from the running fallback so the test
-    # cleanly captures the regression we want to prevent.
-    assert (
-        '["running", "computing_metrics", "writing_artifacts"].includes(status)'
-        not in mood_body
-    ), (
-        "basePetMoodFromTask must not classify writing_artifacts as running "
-        "based on status alone; the busy check on active_job_kind already "
-        "covers the genuinely-running case."
-    )
-    assert (
-        '["scanned", "executed", "writing_artifacts"].includes(status)'
-        in mood_body
-    ), (
-        "writing_artifacts without an active job must fall into the same "
-        "complete bucket as scanned and executed."
-    )
-
 
 
 def test_driver_gate_tables_render_databar_psi_and_champion_row():
@@ -11853,9 +8782,10 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
         [
             f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
             f"import {{ renderWorkflowDataWidget }} from {json.dumps(workflow_widgets_url)};",
-            "import {"
+            f"import {{ platformLabelSource }} from {json.dumps((STATIC_DIR / 'js/platform-labels.js').as_uri())};",
+            ("import {"
             " columnFractions, parseNumeric, psiTier, psiTooltipText,"
-            f" }} from {json.dumps(render_metrics_url)};",
+            f" }} from {json.dumps(render_metrics_url)};"),
             kind_body,
             cell_body,
             align_body,
@@ -11911,7 +8841,7 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
     assert 'class="psi-cell"' in html
     assert 'data-tier=' in html
     # 样本量 (row count) is tabular-nums right-aligned, not left-aligned text.
-    assert '<td class="cell-number">12000</td>' in html
+    assert '<td class="cell-number" translate="no">12000</td>' in html
     # The backend's " ★"-flagged champion candidate renders as a highlighted
     # badge, not a literal star character glued onto plain text.
     assert 'class="champion-badge"' in html
@@ -11922,28 +8852,11 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
 
 def test_agent_gate_reply_is_not_wrapped_in_a_large_coloured_card():
     """Agent prose stays conversational; only nested functional widgets own cards."""
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
-    start = app_js.index("function agentMessageHtml(")
-    end = app_js.index("\n}\n\nfunction agentThinkingHtml", start)
-    message_renderer = app_js[start:end]
 
-    assert "driverGateCardHtml" not in message_renderer
-    assert "bodyHtml," in message_renderer
-    assert 'class="gate-card"' not in app_js
     assert ".gate-card {" not in styles_css
 
 
-def test_retry_controls_follow_the_conversation_in_chronological_order():
-    """Live recovery controls must not mount above the full message history."""
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentPersistentTimelineElementIds()")
-    end = app_js.index("\n}\n\nfunction restoreResultScrollDefaultOrder", start)
-    body = app_js[start:end]
-
-    assert '"planRetryPanel"' in body
-    assert '"planDriverActions"' in body
-    assert body.index('"agentConversationPanel"') < body.index('"planRetryPanel"')
 
 
 def test_agent_mode_latest_gate_keeps_typed_controls_interactive_with_chat():
@@ -12253,9 +9166,9 @@ def test_skeleton_templates_render_block_rows_and_table_shapes():
     module_url = (STATIC_DIR / "js" / "skeleton.js").as_uri()
     script = "\n".join(
         [
-            "import {"
+            ("import {"
             " skeletonBlockHtml, skeletonRowsHtml, skeletonTableHtml,"
-            f" }} from {json.dumps(module_url)};",
+            f" }} from {json.dumps(module_url)};"),
             "process.stdout.write(JSON.stringify({",
             "  block: skeletonBlockHtml(),",
             "  rows: skeletonRowsHtml({ rows: 3 }),",
@@ -12330,15 +9243,10 @@ def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
     assert "计划生成中" not in payload["firstHtml"]
 
     assert 'data-skeleton="plan-rail"' not in payload["secondHtml"]
-    assert "尚未开始" in payload["secondHtml"]
+    # Batch 4 (2026-10-14 redesign): the empty rail uses the canonical not-started word.
+    assert "待开始" in payload["secondHtml"]
 
 
-def test_right_rail_has_no_artifact_panel_loading_state():
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
-
-    assert "正在加载输出..." not in plan_js
-    assert "skeletonTableHtml" not in plan_js
-    assert 'data-skeleton="artifact"' not in plan_js
 
 
 
@@ -12403,14 +9311,6 @@ def test_plan_rail_omits_replan_events_and_subagent_rows():
     assert "子任务运行中" not in html
     assert "feature &lt;scan&gt;" not in html
     assert "done scope" not in html
-
-
-def test_plan_rail_has_no_event_chrome_implementation():
-    plan_js = _read_static("js/v2/plan_rail_controller.js")
-
-    assert "function loopEventStripHtml(plan)" not in plan_js
-    assert "function replanBadgeHtml(plan)" not in plan_js
-    assert "function subAgentRowsHtml(plan)" not in plan_js
 
 
 def test_plan_rail_shows_waiting_for_confirmation_not_generating():
@@ -12498,7 +9398,8 @@ def test_plan_rail_reports_not_started_without_job_or_gate():
     )
     html = result.stdout
 
-    assert "尚未开始" in html
+    # Batch 4 (2026-10-14 redesign): the empty rail uses the canonical not-started word.
+    assert "待开始" in html
     assert "等待确认" not in html
 
 
@@ -12514,7 +9415,7 @@ def test_gate_confirm_button_states_consequence_by_tool():
     assert 'execute_join: "确认并执行拼接"' in driver_gate_js
     assert 'screen_features: "确认所选特征"' in driver_gate_js
     assert 'train_model: "确认并开始训练"' in driver_gate_js
-    assert 'configure_tuning: "确认调参配置"' in driver_gate_js
+    assert 'configure_tuning: "确认调参配置并开始调参"' in driver_gate_js
     assert 'generate_model_reports: "确认并生成报告"' in driver_gate_js
     assert 'post_training_action: "确认模型交付"' in driver_gate_js
 
@@ -12546,36 +9447,16 @@ def test_gate_confirm_button_states_consequence_by_tool():
 
 
 def test_structured_confirmation_buttons_submit_ui_action_and_share_action_bar():
-    driver_gate_js = _read_static("js/v2/driver_gate_confirm.js")
-    join_gate_js = _read_static("js/v2/join_gate_controller.js")
-    screen_gate_js = _read_static("js/v2/screen_gate_controller.js")
-    modeling_setup_js = _read_static("js/v2/modeling_setup_panel.js")
-    adoption_gate_js = _read_static("js/v2/adoption_gate_controller.js")
     workbench_css = _read_browser_css()
 
-    for source in (driver_gate_js, join_gate_js, screen_gate_js, modeling_setup_js, adoption_gate_js):
-        assert "ui_action" in source
-    for source in (driver_gate_js, join_gate_js, screen_gate_js, modeling_setup_js, adoption_gate_js):
-        assert "gate-action-bar" in source
     assert ".gate-action-bar" in workbench_css
 
 
-def test_completed_dataset_download_is_rendered_in_center_message_stream():
-    app_js = _read_static("app.js")
-
-    assert "function agentMessageResultDatasetHtml" in app_js
-    assert "data-result-dataset-download" in app_js
-    assert 'result?.title || "结果数据集已生成"' in app_js
-    assert 'result?.download_label || "下载结果数据集"' in app_js
-    assert "const scopedHref" not in app_js
-    assert 'persistedHref.includes("expected_content_hash=")' in app_js
 
 
 def test_strategy_create_dialog_captures_governed_business_input():
     """Phase 0A: strategy development must not invent an operating objective."""
     index_html = _read_static("index.html")
-    task_types_js = _read_static("js/task-types.js")
-    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     assert 'id="createTaskStrategyField"' in index_html
     assert 'id="strategyEntryMode"' in index_html
@@ -12584,14 +9465,6 @@ def test_strategy_create_dialog_captures_governed_business_input():
     assert 'id="strategyMinApprovalRate"' in index_html
     assert 'id="strategyEadCol"' in index_html
     assert 'id="strategyPdCol"' in index_html
-    assert "strategyField: true" in task_types_js
-    assert "payload.strategy_input = strategyInput;" in create_dialog_js
-    assert 'const entryMode = $("strategyEntryMode").value;' in create_dialog_js
-    assert 'const objective = $("strategyObjective").value;' in create_dialog_js
-    assert "entry_mode: entryMode" in create_dialog_js
-    assert "objective," in create_dialog_js
-    assert "完整策略开发至少需要一个坏率上限或通过率下限" in create_dialog_js
-    assert "利润最大化需要填写 EAD/PD 列和完整收益参数" in create_dialog_js
 
 
 def test_manual_analysis_mounts_structured_adoption_gate_in_middle_workspace():
@@ -13395,17 +10268,12 @@ def test_plan_gate_stays_disabled_across_rerender_for_local_busy_and_pending_cla
 def test_acceptance_mode_chip_explains_auto_mode_scope():
     """AUTO is limited to low-risk nodes and never represents human approval."""
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
 
     assert 'id="agentAcceptanceModeSelect"' in index_html
     assert "自动模式仅处理低风险节点" in index_html
     assert "强制业务决策与副作用授权始终需要人工操作" in index_html
     assert "替你确认全部关键节点" not in index_html
     # fires the composer notice once on switching INTO auto mode.
-    assert 'agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept"' in app_js
-    assert "自动模式仅处理低风险节点" in app_js
-    assert "强制业务决策与副作用授权始终需要人工操作" in app_js
-    assert "替你确认全部关键节点" not in app_js
 
 
 def test_calibration_and_score_band_chart_functions_exist_in_metric_tables():
@@ -13419,7 +10287,7 @@ def test_calibration_and_score_band_chart_functions_exist_in_metric_tables():
         ["node", "--check", str(STATIC_DIR / "js" / "metric-tables.js")],
         capture_output=True,
         text=True,
-    )
+    check=False)
     assert node_check.returncode == 0, node_check.stderr
 
 
@@ -13440,7 +10308,7 @@ def test_app_js_wires_calibration_and_score_band_charts_into_driver_tables():
         ["node", "--check", str(STATIC_DIR / "app.js")],
         capture_output=True,
         text=True,
-    )
+    check=False)
     assert node_check.returncode == 0, node_check.stderr
 
 
@@ -13500,13 +10368,7 @@ def test_calibration_reliability_curve_renders_nothing_for_empty_points():
     driverTableChartHtml skips the chart entirely when points is empty."""
     metric_tables_js = _read_static("js/metric-tables.js")
     renderer_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
-    script = "\n".join(
-        [
-            renderer_body,
-            "const html = renderCalibrationCard({ kind: 'calibration_curve', points: [] });",
-            "process.stdout.write(JSON.stringify({ html }));",
-        ]
-    )
+    script = f"{renderer_body}\nconst html = renderCalibrationCard({{ kind: 'calibration_curve', points: [] }});\nprocess.stdout.write(JSON.stringify({{ html }}));"
     script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
@@ -13568,13 +10430,7 @@ def test_score_band_chart_renders_bars_and_bad_rate_line():
 def test_score_band_chart_renders_nothing_for_empty_bands():
     metric_tables_js = _read_static("js/metric-tables.js")
     renderer_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
-    script = "\n".join(
-        [
-            renderer_body,
-            "const html = renderScoreBandCard({ kind: 'score_band_bars', split: 'oot', bands: [] });",
-            "process.stdout.write(JSON.stringify({ html }));",
-        ]
-    )
+    script = f"{renderer_body}\nconst html = renderScoreBandCard({{ kind: 'score_band_bars', split: 'oot', bands: [] }});\nprocess.stdout.write(JSON.stringify({{ html }}));"
     script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
@@ -13633,9 +10489,10 @@ def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
         [
             f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
             f"import {{ renderWorkflowDataWidget }} from {json.dumps(workflow_widgets_url)};",
-            "import {"
+            f"import {{ platformLabelSource }} from {json.dumps((STATIC_DIR / 'js/platform-labels.js').as_uri())};",
+            ("import {"
             " columnFractions, parseNumeric, psiTier, psiTooltipText,"
-            f" }} from {json.dumps(render_metrics_url)};",
+            f" }} from {json.dumps(render_metrics_url)};"),
             kind_body,
             cell_body,
             align_body,
@@ -14056,7 +10913,6 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     """The top card starts folded and remains manually expandable/collapsible."""
     index_html = _read_static("index.html")
     styles_css = _read_browser_css()
-    app_js = _read_static("app.js")
 
     # DOM: failure text, subtitle and meta stay inside the collapsible wrapper.
     # The multi-model switcher sits between the title row and details so it
@@ -14111,31 +10967,12 @@ def test_task_hero_click_collapses_to_title_and_status_only():
 
     # JS: one hero-level click handler toggles .is-collapsed, guards interactive
     # descendants (the path copy button) and text selection, and syncs layout.
-    assert "function handleTaskHeroToggle" in app_js
-    assert "function setTaskHeroCollapsed" in app_js
-    assert 'hero.classList.toggle("is-collapsed", collapsed)' in app_js
-    assert "button:not(#taskHeroToggle)" in app_js
-    assert ".task-hero-batch-switcher" in app_js
-    assert "[data-copy]" in app_js
-    assert '$("taskHero")?.addEventListener("click", handleTaskHeroToggle)' in app_js
-    assert 'toggle.setAttribute("aria-expanded"' in app_js
-    assert 'details.setAttribute("aria-hidden", collapsed ? "true" : "false")' in app_js
-    assert 'details.toggleAttribute("inert", collapsed)' in app_js
 
 
 def test_plan_failure_status_keeps_raw_trace_in_timeline_not_task_hero():
-    controller = _read_static("js/v2/plan_rail_controller.js")
-    app_js = _read_static("app.js")
     styles_css = _read_browser_css()
 
-    failed_status = controller[
-        controller.index('if (status === "failed" || failedStep)'):
-    ]
-    failed_status = failed_status[:failed_status.index("if (status ===", 1)]
-    assert "step.error" not in failed_status
-    assert "请在中间信息流中查看诊断与恢复方案" in failed_status
-    assert "function compactActionStatusDetail" in app_js
-    assert "compactActionStatusDetail(detail)" in app_js
+    # Batch 4 (2026-10-14 redesign): plan status copy moved to js/task-status.js (re-exported by the controller).
     detail_rule = _css_rule(styles_css, ".action-error-detail")
     assert "-webkit-line-clamp: 2" in detail_rule
 
@@ -14146,17 +10983,17 @@ def test_agent_composer_bar_is_translucent_glass_like_the_task_hero():
     styles_css = _read_browser_css()
 
     bar_rule = _css_rule(styles_css, ".agent-composer-bar")
-    assert "backdrop-filter: blur(18px) saturate(1.55)" in bar_rule
-    assert "-webkit-backdrop-filter: blur(18px) saturate(1.55)" in bar_rule
-    assert "color-mix(in srgb, var(--surface) 76%, transparent)" in bar_rule
-    assert "color-mix(in srgb, var(--surface) 52%, transparent)" in bar_rule
+    assert "backdrop-filter: blur(var(--glass-blur)) saturate(180%)" in bar_rule
+    assert "-webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%)" in bar_rule
+    assert "background: var(--glass-bg)" in bar_rule
+    assert "border: 1px solid var(--glass-rim)" in bar_rule
     # No longer a flat opaque surface fill.
     assert "background: var(--surface);" not in bar_rule
 
-    # Dark theme carries its own translucent gradient and the shared glass edge.
+    # Dark theme uses the same glass tokens (values come from the dark token block).
     dark_bar_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-composer-bar')
-    assert "var(--glass-edge)" in dark_bar_rule
-    assert "color-mix(in srgb, var(--surface) 82%, transparent)" in dark_bar_rule
+    assert "background: var(--glass-bg)" in dark_bar_rule
+    assert "box-shadow: var(--glass-shadow)" in dark_bar_rule
 
 
 def test_settings_panels_use_macos_grouped_cards_with_monochrome_icons():
@@ -14169,7 +11006,7 @@ def test_settings_panels_use_macos_grouped_cards_with_monochrome_icons():
     group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
     assert "border: 1px solid var(--border)" in group_rule
     assert "border-radius: var(--radius-lg)" in group_rule
-    assert "background: var(--surface)" in group_rule
+    assert "background: var(--card)" in group_rule
     assert "overflow: hidden" in group_rule
     assert "box-shadow" in group_rule
     for panel in ("execution-environment", "llm", "memory-policy"):
@@ -14186,7 +11023,7 @@ def test_settings_panels_use_macos_grouped_cards_with_monochrome_icons():
 
     # Monochrome leading-icon tile: faint neutral fill, no colour.
     ico_rule = _css_rule(styles_css, ".settings-row-ico")
-    assert "border-radius: 8px" in ico_rule
+    assert "border-radius: var(--radius-control)" in ico_rule
     assert "color: var(--text-secondary)" in ico_rule
     assert "color-mix(in srgb, var(--text)" in ico_rule
     # Rows that opt into an icon get a 3-column grid (icon | text | control).
@@ -14196,16 +11033,9 @@ def test_settings_panels_use_macos_grouped_cards_with_monochrome_icons():
 def test_tool_detail_rows_render_as_grouped_list_with_right_aligned_values():
     """The plugin tool detail is a divided row-list (icon | label | value) inside
     the tool card, not a loose grid of boxed chips."""
-    plugin_js = _read_static("js/v2/plugin_manager.js")
     v2_css = _read_browser_css()
 
     # JS renders a leading monochrome icon per implementation field.
-    assert "const TOOL_IMPL_ICONS" in plugin_js
-    assert "function toolImplIconHtml" in plugin_js
-    assert 'class="settings-row-ico"' in plugin_js
-    for field in ("实现", "触发", "确定性", "失败策略", "超时", "内存上限", "副作用"):
-        assert f'"{field}":' in plugin_js
-    assert "${toolImplIconHtml(label)}<dt>" in plugin_js
 
     # CSS: a divided row-list with hairlines and right-aligned values, no longer
     # a per-chip boxed grid.
@@ -14220,28 +11050,13 @@ def test_tool_detail_rows_render_as_grouped_list_with_right_aligned_values():
 
 
 def test_v2_validation_ui_uses_pmml_scoring_copy_and_evidence():
-    app_js = _read_static("app.js")
     index_html = _read_static("index.html")
 
-    assert 'title: "PMML打分测试"' in app_js
-    assert 'hint: "PMML全量评分"' in app_js
-    assert 'function renderPmmlScoringEvidence' in app_js
-    assert 'renderPmmlScoringEvidence(evidence.pmml_scoring || {})' in app_js
     assert 'id="scoringSectionTitle">PMML打分测试</h3>' in index_html
     assert "PMML打分、效果稳定性验证，模型压力测试" in index_html
 
 
 def test_v2_pending_input_contract_has_an_interactive_confirmation_panel():
-    app_js = _read_static("app.js")
     index_html = _read_static("index.html")
 
     assert 'id="validationContractPanel"' in index_html
-    assert "function renderValidationInputContract" in app_js
-    assert "function loadValidationInputContract" in app_js
-    assert "function submitValidationInputContract" in app_js
-    assert "/validation-input-contract`" in app_js
-    assert 'data-validation-contract-submit' in app_js
-    assert "const taskId = form.dataset.validationContractTaskId || workbenchTaskId() || taskSession.taskId;" in app_js
-    assert 'await loadValidationInputContract(taskId);' in app_js
-    assert 'if (selectedTaskIsAgentMode()) {' in app_js
-    assert 'await startAgentValidation();' in app_js

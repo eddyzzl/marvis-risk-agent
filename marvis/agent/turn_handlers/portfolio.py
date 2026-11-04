@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
+
 from collections.abc import Mapping
 from marvis.llm_outbound_gate_context import authorization_gate
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
@@ -74,6 +76,16 @@ def _portfolio_success_criteria(task: TaskRecord) -> list[dict] | None:
     if el_max is None:
         return None
     return [{"metric": "total_el", "max": float(el_max)}]
+
+
+def _states_order_replies(states) -> tuple[dict[str, str], ...]:
+    """Eval S9: the inferred order could only be confirmed by typing. The chip
+    sends the full good-to-bad list, which parse_states_reply accepts
+    deterministically; a different order is still typed by the user."""
+    ordered = [str(state) for state in states or [] if str(state).strip()]
+    if not ordered:
+        return ()
+    return (quick_reply("顺序没问题", ", ".join(ordered)),)
 
 
 def _latest_portfolio_states(conversation: list[dict]) -> dict | None:
@@ -157,12 +169,15 @@ def _begin_portfolio_setup(
             "顺序；要改就按由好到坏顺序重列所有桶（逗号分隔）。"
             f"{shared_lane._ingest_notice_text(notices)}"
         ),
-        metadata={
-            "portfolio_states": build_states_gate_state(proposal),
-            "kind": "gate",
-            "intent": "portfolio",
-            "ingest_notices": notices,
-        },
+        metadata=with_quick_replies(
+            {
+                "portfolio_states": build_states_gate_state(proposal),
+                "kind": "gate",
+                "intent": "portfolio",
+                "ingest_notices": notices,
+            },
+            *_states_order_replies(proposal.proposed_states),
+        ),
     )
     return responses_lane.join_turn_response(repo, task.id)
 
@@ -212,7 +227,10 @@ def _run_portfolio_setup(
                 f"{states_text}。可以直接说明认可当前顺序，或按由好到坏重列所有桶"
                 "（逗号分隔）；疑问、条件句和拒绝不会放行。"
             ),
-            metadata={"portfolio_states": gate_state, "kind": "gate"},
+            metadata=with_quick_replies(
+                {"portfolio_states": gate_state, "kind": "gate"},
+                *_states_order_replies(proposed),
+            ),
         )
         return responses_lane.join_turn_response(repo, task.id)
 

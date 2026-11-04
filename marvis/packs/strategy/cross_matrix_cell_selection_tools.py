@@ -51,6 +51,7 @@ from marvis.packs.strategy.cross_matrix_cell_selection import (
     validate_cross_matrix_source_artifact_binding,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.input_validation import require_exact_fields as _require_exact_fields
 
 
 TOOL_SCHEMA_VERSION = "strategy.materialize-cross-matrix-cell-selection-tool.v1"
@@ -1452,21 +1453,6 @@ def _canonical_json_object(value: object, name: str) -> dict[str, Any]:
     return normalized
 
 
-def _require_exact_fields(
-    value: Mapping[str, Any],
-    expected: frozenset[str],
-    name: str,
-) -> None:
-    actual = set(value)
-    missing = sorted(expected - actual)
-    unexpected = sorted(str(field) for field in actual - expected)
-    if missing or unexpected:
-        details: list[str] = []
-        if missing:
-            details.append("missing " + ", ".join(missing))
-        if unexpected:
-            details.append("unsupported " + ", ".join(unexpected))
-        raise StrategyError(f"{name} has " + "; ".join(details))
 
 
 def _canonical_json(value: object) -> str:

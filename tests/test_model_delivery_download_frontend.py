@@ -53,10 +53,15 @@ def test_model_delivery_panel_offers_one_safe_download_per_primary_artifact():
           assert.equal(html.split(marker).length - 1, 1, `${kind} should have one download`);
           assert.equal(html.includes(`href="${href}"`), true, href);
         }
-        assert.equal(html.includes("下载原生模型"), true);
+        assert.equal(html.includes("下载模型文件"), true);
         assert.equal(html.includes("下载 PMML"), true);
         assert.equal(html.includes("下载模型卡"), true);
-        assert.equal(html.includes("下载审批包"), true);
+        assert.equal(html.includes("下载审批材料包"), true);
+        // Human labels in the card; no server path, file names only in tooltips.
+        assert.equal(html.includes(artifactRoot), false);
+        assert.equal(html.includes(">artifact-1.model_card.md<"), false);
+        assert.equal(html.includes('title="artifact-1.model_card.md"'), true);
+        assert.equal(html.includes("Markdown 文档"), true);
         assert.equal(html.includes('data-model-delivery-download="approval_package_json"'), false);
 
         const unsafeHtml = renderModelDeliveryPanel({

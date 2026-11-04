@@ -13,6 +13,8 @@ from marvis.db_schema import connect
 from marvis.modeling_holdout.contracts import Evaluate, Freeze, HoldoutError, Intake, Recover
 from marvis.modeling_holdout.guards import assert_development_frame, record_exposure
 from marvis.modeling_holdout.service import HoldoutService, SUPPORTED_ALGORITHMS, MAX_SEALED_BYTES, MAX_DECODED_BYTES, MAX_SEALED_ROWS, MAX_SEALED_COLUMNS
+from marvis.modeling_holdout.sealed_worker import ISOLATED_WORKER, available_boundary
+from marvis import time_facts
 from marvis.repositories.modeling import ModelingRepository
 from marvis.production_governance.router import _local_principal_id
 from marvis.repositories.datasets import DatasetRepository
@@ -39,6 +41,7 @@ def capabilities(task_id: str, request: Request):
     instance = service(request)
     with connect(instance.db_path) as conn:
         instance._actor(conn, _local_principal_id(request), {'maker', 'checker', 'admin'})
+    boundary = available_boundary()
     return {'mode': 'governed_blind_oot', 'intake_format': 'parquet',
             'model_source': 'native_producer_authenticated_dependency_closure',
             'algorithms': sorted(SUPPORTED_ALGORITHMS),
@@ -49,7 +52,13 @@ def capabilities(task_id: str, request: Request):
             'unverifiable_source_policy': 'deny_potential_sealed_overlap_and_future_blind_claim',
             'external_subject_identity': 'unknown',
             'host_user_filesystem_isolated': False,
+            'sealed_read_boundary': boundary,
+            # What the OS enforces for the sealed file at rest on this host.
+            'sealed_at_rest': {'loopback_notebook_denied': boundary == ISOLATED_WORKER,
+                               'os_sandbox_worker_denied': boundary == ISOLATED_WORKER,
+                               'trusted_local_processes_denied': False, 'same_user_processes_denied': False},
             'historical_availability': 'unknown', 'label_maturity': 'unknown',
+            'conclusion_dependencies': {name: list(spec['facts']) for name, spec in time_facts.CONCLUSIONS.items()},
             'resource_profile': {'max_upload_bytes': MAX_SEALED_BYTES, 'max_parquet_decoded_bytes': MAX_DECODED_BYTES,
                 'max_rows': MAX_SEALED_ROWS, 'max_columns': MAX_SEALED_COLUMNS, 'hard_worker_resource_isolation': False}}
 
@@ -71,10 +80,19 @@ def summary(task_id: str, request: Request):
 
 
 @router.post('/development', status_code=201)
-def development(task_id: str, request: Request, file: UploadFile = File(...)):
+def development(task_id: str, request: Request, file: UploadFile = File(...),
+                historical_parameters: str | None = Form(None), candidate_provenance: str | None = Form(None)):
     instance = service(request)
     settings = instance.settings
     actor = _local_principal_id(request)
+    declared = {time_facts.HISTORICAL_PARAMETERS: historical_parameters,
+                time_facts.CANDIDATE_PROVENANCE: candidate_provenance}
+    for fact, value in declared.items():
+        if value not in (None, ''):
+            try:
+                time_facts.normalize_value(fact, value)
+            except time_facts.TimeFactError as exc:
+                raise HoldoutError(exc.code, exc.status) from exc
     with connect(instance.db_path) as conn:
         row = instance._cohort(conn, task_id, actor, 'develop')
         if conn.execute('SELECT 1 FROM blind_oot_freezes WHERE cohort_id=?', (row['id'],)).fetchone():
@@ -105,8 +123,10 @@ def development(task_id: str, request: Request, file: UploadFile = File(...)):
             raise HoldoutError('blind_development_requires_train_and_test', 422)
         registry = DatasetRegistry(DatasetRepository(settings.db_path), backend, settings.datasets_dir)
         dataset = registry.register_from_upload(task_id, path, role='sample')
+        recorded = instance.record_development_facts(task_id, actor, declared)
         return {'dataset_id': dataset.id, 'mode': 'governed_blind_oot',
-                'split_col': contract['split_col'], 'split_values': {'train': 'train', 'test': 'test'}}
+                'split_col': contract['split_col'], 'split_values': {'train': 'train', 'test': 'test'},
+                'time_contract': recorded}
     finally:
         path.unlink(missing_ok=True)
 

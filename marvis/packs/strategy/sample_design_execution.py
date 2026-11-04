@@ -9,7 +9,7 @@ consumer frame.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hmac
 import json
@@ -39,6 +39,7 @@ from marvis.packs.strategy.sample_design_tools import (
     load_historical_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.sample_design_v2_native_tools import (
+    _predicate_columns,
     SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
     StrategySampleDesignV2NativeArtifactBinding,
     authenticate_native_strategy_sample_design_v2_bundle_record,
@@ -863,23 +864,6 @@ def _partition_columns(partitioning: Mapping[str, Any]) -> set[str]:
     columns: set[str] = set()
     for predicate in partitioning["selectors"].values():
         columns.update(_predicate_columns(predicate))
-    return columns
-
-
-def _predicate_columns(value: object) -> set[str]:
-    columns: set[str] = set()
-    if isinstance(value, Mapping):
-        column = value.get("column")
-        if isinstance(column, str):
-            columns.add(column)
-        for child in value.values():
-            columns.update(_predicate_columns(child))
-    elif isinstance(value, Sequence) and not isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        for child in value:
-            columns.update(_predicate_columns(child))
     return columns
 
 

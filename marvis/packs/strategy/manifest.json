@@ -7,6 +7,303 @@
   "python_requires": ">=3.10,<3.14",
   "tools": [
     {
+      "name": "diagnose_time_leakage",
+      "summary": "Evidence-only time-leakage diagnostics: compare each feature's observation time with the label performance window and report overlap counts and red flags; never blocks or renders a verdict.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "feature_time_cols": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "observation_time_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label_window_start_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label_window_end_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label_window_start": {
+            "type": [
+              "string",
+              "integer",
+              "null"
+            ]
+          },
+          "label_window_end": {
+            "type": [
+              "string",
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "dataset_id",
+          "feature_cols"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "evidence_only": {
+            "const": true
+          },
+          "window": {
+            "type": "object"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "evidence_only",
+          "window",
+          "features",
+          "red_flags"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_diagnose_time_leakage",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "diagnose_selection_bias",
+      "summary": "Evidence-only selection-bias diagnostics: compare an approved population with a through-the-door risk population by counts, bad rates and numeric column summaries; draws no bias verdict.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "approval_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_bad_value": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "approval_dataset_id",
+          "risk_dataset_id",
+          "columns",
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "evidence_only": {
+            "const": true
+          },
+          "target": {
+            "type": "string"
+          },
+          "target_bad_value": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "approval": {
+            "type": "object"
+          },
+          "risk": {
+            "type": "object"
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "evidence_only",
+          "target",
+          "target_bad_value",
+          "approval",
+          "risk",
+          "flags"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_diagnose_selection_bias",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "segment_disparity_evidence",
+      "summary": "Evidence-only per-segment volume, approval rate, bad rate and reject-reason distribution over an applied Strategy Pool result; returns neutral draft phrasing pending human compliance review and never a fairness verdict.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "segment_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason_code_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "segment_col",
+          "action_col",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "evidence_only": {
+            "const": true
+          },
+          "segment_column": {
+            "type": "string"
+          },
+          "action_column": {
+            "type": "string"
+          },
+          "reason_code_column": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_column": {
+            "type": "string"
+          },
+          "overall": {
+            "type": "object"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "phrasing_draft_notice": {
+            "type": "string"
+          },
+          "phrasing_templates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "evidence_only",
+          "segment_column",
+          "action_column",
+          "reason_code_column",
+          "target_column",
+          "overall",
+          "segments",
+          "phrasing_draft_notice",
+          "phrasing_templates"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_segment_disparity_evidence",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
       "name": "bind_business_context",
       "summary": "Bind an explicit human business declaration to authenticated native sample membership; never infer objectives, dates, maturity or observed labels from a declaration.",
       "input_schema": {

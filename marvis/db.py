@@ -1,8 +1,11 @@
-from datetime import UTC, datetime
+"""Compatibility facade over ``marvis.db_schema`` and ``marvis.repositories``.
 
+Every name here is a re-export that tests or callers still import from
+``marvis.db``; ownership, users and removal conditions are registered in
+``docs/compat-symbols.md``. New code imports from the defining module.
+"""
 from marvis.db_schema import (
     SCHEMA_VERSION as SCHEMA_VERSION,
-    SchemaDowngradeError as SchemaDowngradeError,
     _ensure_column as _ensure_column,
     connect as connect,
     init_db as init_db,
@@ -10,16 +13,10 @@ from marvis.db_schema import (
 )
 from marvis.repositories.audit import (
     _list_audit_rows as _list_audit_rows,
-    _write_audit_row as _write_audit_row,
 )
 from marvis.repositories.datasets import DatasetRepository as DatasetRepository  # noqa: F401
 from marvis.repositories.data_workspace import (  # noqa: F401
-    DataWorkspaceDataError as DataWorkspaceDataError,
-    DataWorkspaceDatasetMismatch as DataWorkspaceDatasetMismatch,
-    DataWorkspaceDatasetNotFound as DataWorkspaceDatasetNotFound,
     DataWorkspaceRepository as DataWorkspaceRepository,
-    DataWorkspaceResetRequired as DataWorkspaceResetRequired,
-    DataWorkspaceRevisionConflict as DataWorkspaceRevisionConflict,
 )
 from marvis.repositories.llm_calls import (
     llm_usage_summary as llm_usage_summary,
@@ -34,14 +31,9 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactRepository as TaskArtifactRepository,  # noqa: F401
 )
 from marvis.repositories.tasks import (
-    AGENT_REPORT_CONCLUSION_KEYS as AGENT_REPORT_CONCLUSION_KEYS,
     TaskRepository as TaskRepository,  # noqa: F401
     _normalize_task_type as _normalize_task_type,  # noqa: F401
 )
 from marvis.repositories.validation_contracts import (
     ValidationContractRepository as ValidationContractRepository,  # noqa: F401
 )
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()

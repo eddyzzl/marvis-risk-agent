@@ -66,3 +66,41 @@ assert.equal(elements.get("agentMemorySourceTaskFilterRow").classList.contains("
 '''],
         cwd=Path(__file__).resolve().parents[1], check=True, capture_output=True, text=True,
     )
+
+
+def test_memory_delete_keeps_the_audit_detail_and_drops_only_that_row():
+    """Replaces a source-substring check (F13): delete shows the server's audit
+    detail instead of reloading the list, which would blank the detail pane."""
+    subprocess.run(
+        ["node", "--input-type=module", "-e", r'''
+import assert from "node:assert/strict";
+import { createAgentMemoryPanelController } from "./marvis/static/js/agent-memory-panel.js";
+const element = () => ({ value: "", innerHTML: "", textContent: "", dataset: {},
+  classList: { toggle() {} }, setAttribute() {} });
+const elements = new Map();
+const $ = (id) => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); };
+globalThis.document = { querySelectorAll: () => [] };
+const calls = [];
+const panel = createAgentMemoryPanelController({
+  $,
+  api: async (url, options = {}) => {
+    calls.push([url, options.method || "GET"]);
+    if (options.method === "DELETE") {
+      return { memory: { id: "m1", title: "被删除的口径", status: "deleted" },
+               events: [{ event_type: "deleted", actor: "qa" }] };
+    }
+    return { items: [{ id: "m1", title: "被删除的口径", status: "active" },
+                     { id: "m2", title: "保留的口径", status: "active" }] };
+  },
+  runAction: (action) => action(),
+  showPlatformConfirm: async () => true,
+});
+await panel.loadItems();
+await panel.remove("m1");
+assert.deepEqual(calls.map(([, method]) => method), ["GET", "DELETE"], "no list reload after delete");
+assert.ok(!$("agentMemoryList").innerHTML.includes("被删除的口径"));
+assert.ok($("agentMemoryList").innerHTML.includes("保留的口径"));
+assert.ok($("agentMemoryDetail").innerHTML.includes("被删除的口径"), "the audit detail stays visible");
+'''],
+        cwd=Path(__file__).resolve().parents[1], check=True, capture_output=True, text=True,
+    )

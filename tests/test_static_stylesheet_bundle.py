@@ -40,6 +40,14 @@ def test_browser_stylesheet_bundle_is_ordered_unique_and_complete() -> None:
         "static/css/blind-oot.css",
         "static/css/historical-replay.css",
         "static/css/collection-workspace.css",
+        "static/css/workbench-chrome.css",
+        "static/css/conversation-components.css",
+        # Batch 6a (2026-10-14 redesign): D12 result cards.
+        "static/css/result-cards.css",
+        # Batch 4 (2026-10-14 redesign): D6 mascot avatar styles load last.
+        "static/css/agent-face.css",
+        "static/css/workbench-shell.css",
+        "static/css/ui-language.css",
     )
     assert len(hrefs) == len(set(hrefs))
     assert all("?v=__MARVIS_STATIC_VERSION__" in href for href in hrefs)

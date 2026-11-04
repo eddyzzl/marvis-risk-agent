@@ -43,6 +43,7 @@ from marvis.plugins.schema_validation import validate_against_schema
 from marvis.plugins.native_isolation import NativeIsolationError, configured_mode, OS_SANDBOX, prepare_launch
 from marvis.plugins.errors import SchemaValidationError
 from marvis.redaction import redact_text
+from marvis.process_timing import timed
 from marvis.safe_paths import assert_within
 from marvis.resource_monitor import (
     ProcessTreeResourceMonitor,
@@ -179,10 +180,16 @@ class ToolRunner:
         rss_memory_limit_mb: int | None = DEFAULT_RSS_MEMORY_LIMIT_MB,
         governance=None,
         binding_resolver=None,
+        task_python_resolver=None,
     ):
         self._tools = tool_registry
         self._repo = repo
         self._python_executable = python_executable
+        # B-line extension: a task-scoped interpreter for builtin packs
+        # (``resolver(task_id, plugin_name) -> path | None``). The global
+        # interpreter above stays the default for every other task and tool.
+        self._task_python_resolver = task_python_resolver
+        self._override_python_versions: dict[str, tuple[int, int, int] | str] = {}
         self._datasets_root = datasets_root
         self._workspace = workspace
         self._plugin_paths = tuple(Path(path) for path in (plugin_paths or ()))
@@ -194,17 +201,47 @@ class ToolRunner:
         self._worker_python_version_lock = threading.Lock()
         _sweep_stale_progress_files(self._workspace)
 
+    def _worker_python_for(self, task_id: str, manifest: PluginManifest) -> str:
+        """The interpreter for this task's builtin tool (task override or global)."""
+
+        resolver = self._task_python_resolver
+        if resolver is None or not bool(manifest.builtin):
+            return self._python_executable
+        try:
+            chosen = resolver(task_id, manifest.name)
+        except Exception:  # noqa: BLE001 - a broken override never blocks the global default
+            logger.exception("task python resolver failed task_id=%s", task_id)
+            chosen = None
+        return str(chosen) if chosen else self._python_executable
+
+    def _override_python_version(self, executable: str) -> tuple[tuple[int, int, int] | None, str]:
+        cached = self._override_python_versions.get(executable)
+        if cached is None:
+            try:
+                cached = _python_version_for_executable(executable)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                cached = f"{type(exc).__name__}: {exc}"
+            self._override_python_versions[executable] = cached
+        if isinstance(cached, str):
+            return None, cached
+        return cached, ""
+
     def _worker_environment_error(
         self,
         manifest: PluginManifest,
         target_ref: str,
+        python_executable: str | None = None,
     ) -> str | None:
         requirement = str(manifest.python_requires or "").strip()
         if not requirement:
             return None
-        version = self._configured_worker_python_version()
-        if version is None:
+        executable = python_executable or self._python_executable
+        if executable == self._python_executable:
+            version = self._configured_worker_python_version()
             detail = self._worker_python_version_error or "unknown error"
+        else:
+            version, detail = self._override_python_version(executable)
+        if version is None:
             return (
                 f"无法检查工具 {target_ref} 的运行环境 Python：{detail}。"
                 "请在“设置 → 执行环境”选择可用环境，并重启 MARVIS。"
@@ -215,7 +252,7 @@ class ToolRunner:
         return (
             f"工具 {target_ref} 要求 Python {requirement}，"
             f"但当前工具运行环境是 Python {version_text}"
-            f"（{self._python_executable}）。"
+            f"（{executable}）。"
             "请在“设置 → 执行环境”选择兼容环境，并重启 MARVIS。"
         )
 
@@ -356,19 +393,29 @@ class ToolRunner:
                 f"{execution_profile!r}",
             )
             return self._finalize_audited_result(started, target_ref, inputs, result)
-        environment_error = self._worker_environment_error(manifest, target_ref)
+        worker_python = self._worker_python_for(task_id, manifest)
+        environment_error = self._worker_environment_error(
+            manifest, target_ref, worker_python
+        )
         if environment_error is not None:
+            task_override = worker_python != self._python_executable
+            reported_version = (
+                self._override_python_version(worker_python)[0]
+                if task_override
+                else self._worker_python_version
+            )
             result = _failed_result(
                 started,
                 "environment",
                 environment_error,
                 error_detail={
                     "kind": "worker_python_incompatible",
-                    "python_executable": str(self._python_executable),
+                    "python_executable": str(worker_python),
+                    "task_override": task_override,
                     "python_requires": str(manifest.python_requires or ""),
                     "worker_python_version": (
-                        ".".join(str(part) for part in self._worker_python_version)
-                        if self._worker_python_version is not None
+                        ".".join(str(part) for part in reported_version)
+                        if reported_version is not None
                         else ""
                     ),
                 },
@@ -595,7 +642,7 @@ class ToolRunner:
                 job["progress_path"] = str(progress_path)
         try:
             completed = _run_worker(
-                self._python_executable,
+                worker_python,
                 job,
                 timeout=tool.timeout_seconds,
                 rss_limit_mb=self._rss_memory_limit_mb,
@@ -1670,6 +1717,7 @@ def _attach_worker_isolation(protocol, completed):
             limits["worker_isolation"] = evidence
 
 
+@timed("subprocess", "worker_process")
 def _run_worker_process(
     python_executable: str,
     job: dict,

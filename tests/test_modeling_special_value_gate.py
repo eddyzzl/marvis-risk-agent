@@ -269,7 +269,9 @@ def test_detected_special_value_gate_exposes_only_selected_evidence_and_halts_au
     }
     assert controls["decisions"]["required"] is True
     assert message.metadata["gate_envelope"]["human_decision_gate"] == "required"
-    assert "仅回复「确认」不会越过" in message.content
+    # Batch 3b: a bare confirmation still cannot pass; the agent-only how-to is a structured hint.
+    assert "只确认不会越过这个人工决策节点" in message.content
+    assert "x1 转为空值" in message.metadata["reply_hint"]
 
     with pytest.raises(DriverError, match="AUTO.*强制人工"):
         driver.resume(

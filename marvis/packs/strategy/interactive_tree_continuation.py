@@ -26,6 +26,7 @@ from marvis.packs.strategy.interactive_tree_revision import (
     interactive_tree_topology_evidence,
 )
 from marvis.packs.strategy.interactive_tree_split_search import (
+    _population,
     MAX_ROW_EVALUATIONS,
     MAX_SEARCH_FEATURES,
     MAX_THRESHOLDS_PER_FEATURE,
@@ -652,33 +653,6 @@ def _require_seed_populations(
             raise StrategyError(
                 f"interactive-tree continuation seed {label} population changed"
             )
-
-
-def _population(
-    mask: np.ndarray,
-    target: np.ndarray,
-    weights: np.ndarray | None,
-) -> dict[str, Any]:
-    count = int(mask.sum())
-    bad = int(target[mask].sum())
-    result: dict[str, Any] = {
-        "count": count,
-        "good": count - bad,
-        "bad": bad,
-        "bad_rate": 0.0 if count == 0 else bad / count,
-    }
-    if weights is None:
-        result["weighted"] = {"status": "not_applicable"}
-    else:
-        total = float(weights[mask].sum())
-        weighted_bad = float(weights[mask & (target == 1)].sum())
-        result["weighted"] = {
-            "status": "available",
-            "total": total,
-            "bad": weighted_bad,
-            "bad_rate": 0.0 if total == 0 else weighted_bad / total,
-        }
-    return result
 
 
 def _split_masks(

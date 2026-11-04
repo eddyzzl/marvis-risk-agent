@@ -28,7 +28,7 @@ def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
         if len(target_candidates) > 1:
             candidate_text = "、".join(f"`{item}`" for item in target_candidates)
             target_text = (
-                f"，检测到多个合法目标列：{candidate_text}；请直接回复要使用的目标列名"
+                f"，检测到多个合法目标列：{candidate_text}；点要用的目标列，或直接说列名"
             )
         elif proposal.target_col:
             target_text = f"，目标列 = `{proposal.target_col}`"
@@ -50,7 +50,7 @@ def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
             )
             + "\n- 提议**特征表** = "
             + (", ".join(f"`{name}`" for name in feature_names) or "（无）")
-            + "\n确认无误回复「确认」；要改就用下方控件选好角色/目标列后点「确认角色」。"
+            + "\n无误就点「确认角色」；要改就在下方选好角色和目标列再确认。"
         )
     notices = list(getattr(proposal, "ingest_notices", None) or [])
     text += shared_lane._ingest_notice_text(notices)

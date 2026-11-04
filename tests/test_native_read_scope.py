@@ -28,7 +28,10 @@ def _completed(tmp_path, monkeypatch, kind):
     )
     message = composer.done_message(plan, run_seq=1)
     assert message.metadata["plan_id"] == plan.id
-    assert "artifact_id=" in message.content
+    # The generic presenter no longer echoes raw keys (eval round 1); the
+    # message still carries the native plan's summary, which the guard protects.
+    assert str(message.metadata.get("summary_ref") or "").startswith("artifact:")
+    assert "artifact_id=" not in message.content
     _append_driver_messages_core(
         TaskRepository(case.rt.settings.db_path),
         case.task_id,
@@ -94,7 +97,7 @@ def test_agent_message_read_blocks_incremental_pages_and_derived_replies(
     case = _completed(tmp_path, monkeypatch, "event")
     base = f"/api/tasks/{case.task_id}/agent"
     message = case.rt.maker.get(base + "/messages").json()["messages"][-1]
-    assert case.observed["output"]["artifact_id"] in message["content"]
+    assert message["metadata"]["plan_id"] == case.plan["id"]
     for client in (case.rt.other, TestClient(case.rt.app)):
         for query in ("?limit=1", f"?after_id={message['id']}&limit=1"):
             response = client.get(base + "/messages" + query)

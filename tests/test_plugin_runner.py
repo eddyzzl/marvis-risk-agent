@@ -1393,6 +1393,24 @@ def test_tool_runner_rejects_incompatible_configured_worker_python_before_import
     assert audits[0]["target_ref"] == "modern.run"
     assert audits[0]["outcome"] == "failed"
 
+    # A task override reports its own interpreter's version, not the global one.
+    override = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable="/opt/example/python3.13",
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        task_python_resolver=lambda _task, _plugin: "/opt/example/python3.8",
+    )
+    override._worker_python_version = (3, 13, 5)
+    override._override_python_versions["/opt/example/python3.8"] = (3, 8, 1)
+
+    result = override.invoke(ToolRef("modern", "run"), {}, task_id="task-1")
+
+    assert result.error_kind == "environment"
+    assert result.error_detail["task_override"] is True
+    assert result.error_detail["worker_python_version"] == "3.8.1"
+
 
 def test_tool_runner_blocks_tool_when_side_effect_exceeds_permissions(tmp_path, monkeypatch):
     db_path = tmp_path / "app.sqlite"

@@ -48,6 +48,7 @@ from marvis.packs.modeling.evidence import (
 )
 from marvis.packs.modeling.evidence_tools import (
     ModelingTrainingEvidenceArtifactBinding,
+    _artifact_output,
     build_training_evidence_ref,
     load_historical_modeling_training_evidence_artifacts,
     load_modeling_training_evidence_artifacts,
@@ -1534,26 +1535,6 @@ def _tool_output(
         "content_hash": hashlib.sha256(
             _canonical_json(body).encode("utf-8")
         ).hexdigest(),
-    }
-
-
-def _artifact_output(
-    *,
-    task_id: str,
-    record: Mapping[str, Any],
-) -> dict[str, str]:
-    artifact_id = str(record["id"])
-    content_hash = str(record["content_hash"])
-    return {
-        "artifact_id": artifact_id,
-        "kind": str(record["kind"]),
-        "filename": Path(str(record["path"])).name,
-        "content_hash": content_hash,
-        "download_url": (
-            f"/api/tasks/{quote(task_id, safe='')}"
-            f"/task-artifacts/{quote(artifact_id, safe='')}/download"
-            f"?expected_content_hash={content_hash}"
-        ),
     }
 
 

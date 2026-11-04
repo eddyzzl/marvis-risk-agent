@@ -1,4 +1,5 @@
 import { escapeHtml } from "../ui-utils.js";
+import { localizeText, t } from "../i18n.js";
 import { schemaTableHtml } from "./schema_table.js";
 import {
   listPluginTools as listPluginToolsApi,
@@ -268,14 +269,14 @@ export async function renderPluginManager(container, deps = {}) {
 
 function defaultConfirmRemove(name) {
   if (typeof confirm === "function") {
-    return confirm(`确定移除插件 ${name}？`);
+    return confirm(t("确定移除插件 {0}？", { 0: name }));
   }
   return true;
 }
 
 function defaultShowError(message) {
   if (typeof alert === "function") {
-    alert(message);
+    alert(localizeText(message));
     return;
   }
   console.error(message);

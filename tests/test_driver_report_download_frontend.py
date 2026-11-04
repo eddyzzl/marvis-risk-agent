@@ -105,6 +105,7 @@ def test_agent_message_report_download_renders_every_report_link():
               download_url: "/api/tasks/task-1/driver-reports/id-lgb/download",
               recipe: "lgb",
               experiment_id: "exp-lgb",
+              detail_label: "实验 1 · LightGBM",
             }},
             {{
               label: "下载 xgb 模型报告",
@@ -120,6 +121,10 @@ def test_agent_message_report_download_renders_every_report_link():
       assert.equal(html.includes("/driver-reports/id-xgb/download"), true);
       assert.equal(html.includes("legacy primary"), false);
       assert.equal(html.includes("已生成 2 份分析报告"), true);
+      // Readable detail; the experiment id is only a tooltip.
+      assert.equal(html.includes(">实验 1 · LightGBM<"), true);
+      assert.equal(html.includes("lgb · exp-lgb"), false);
+      assert.equal(html.includes('title="exp-lgb"'), true);
 
       taskSession.task = {{ task_type: "portfolio" }};
       const historical = agentMessageReportDownloadHtml({{
@@ -140,3 +145,48 @@ def test_agent_message_report_download_renders_every_report_link():
         capture_output=True,
         text=True,
     )
+
+
+def test_delivery_created_tasks_are_named_without_artifact_ids():
+    app_js = _read("app.js")
+    script = f"""
+      import assert from "node:assert/strict";
+      const isValidationBatchTask = () => false;
+      {_slice_function(app_js, "function taskDisplayName")}
+      {_slice_function(app_js, "function displayModelVersion")}
+      const artifact = "artifact_5995" + "a".repeat(28);
+      assert.equal(taskDisplayName({{ model_name: "贷前A卡 建模", model_version: artifact }}), "贷前A卡 建模 · 交付验证");
+      assert.equal(
+        taskDisplayName({{ model_name: "贷前A卡 建模", model_version: `${{artifact}}-challenger-backtest` }}),
+        "贷前A卡 建模 · 挑战者回测",
+      );
+      assert.equal(taskDisplayName({{ model_name: "A卡", model_version: "v2" }}), "A卡 · v2");
+    """
+    subprocess.run(
+        ["node", "--input-type=module", "-e", textwrap.dedent(script)],
+        cwd=_STATIC.parent.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_multi_report_download_labels_name_experiments_readably():
+    from marvis.api_report_helpers import driver_report_download_metadata
+
+    items = driver_report_download_metadata(
+        plan_id="plan-1",
+        task_id="task-1",
+        step_id="reports",
+        output={"reports": [
+            {"experiment_id": "experiment_" + "a" * 32, "recipe": "lr", "report_path": "/tmp/a.xlsx"},
+            {"experiment_id": "experiment_" + "b" * 32, "recipe": "lr", "report_path": "/tmp/b.xlsx"},
+        ]},
+        default_label="下载模型开发报告",
+    )
+    assert [item["label"] for item in items] == [
+        "下载实验 1 · 逻辑回归模型报告",
+        "下载实验 2 · 逻辑回归模型报告",
+    ]
+    assert [item["detail_label"] for item in items] == ["实验 1 · 逻辑回归", "实验 2 · 逻辑回归"]
+    assert all(item["experiment_id"].startswith("experiment_") for item in items)

@@ -389,6 +389,12 @@ class TaskRepository:
             summary = self.purge_preview_on_connection(conn, task_id)
         return summary
 
+    def purge_preview_names(self, task_id: str) -> dict:
+        """Raw names behind the purge counts, so the delete dialog can say what
+        goes (V3 UI-4). Read-only; the purge itself still uses the counts."""
+        with connect(self.db_path) as conn:
+            return _task_purge_names(conn, task_id)
+
     def purge_preview_on_connection(
         self,
         conn: sqlite3.Connection,
@@ -765,8 +771,10 @@ class TaskRepository:
             values = _load_json_dict(row["report_values_json"])
             revision_increment = 0
             if clear_agent_report_conclusions:
+                # Absent, not "": an empty saved conclusion means the user
+                # deliberately cleared it, which a measured redraft keeps blank.
                 for key in AGENT_REPORT_CONCLUSION_KEYS:
-                    values[key] = ""
+                    values.pop(key, None)
                 revision_increment = 1
             conn.execute(
                 """
@@ -1533,10 +1541,12 @@ class TaskRepository:
                 }:
                     raise ConflictError(f"cannot generate report in status {task.status.value}")
                 if task.task_type == TASK_TYPE_VALIDATION and task.validation_workflow_version == 2:
+                    from marvis.repositories.validation_contracts import _row_to_contract_record
+
                     contract = conn.execute(
-                        "SELECT status FROM validation_input_contracts WHERE task_id = ?", (task_id,),
+                        "SELECT * FROM validation_input_contracts WHERE task_id = ?", (task_id,),
                     ).fetchone()
-                    if contract is None or contract["status"] != "ready":
+                    if contract is None or _row_to_contract_record(contract).status != "ready":
                         raise ValueError("validation input contract requires confirmation")
                 job_id = uuid.uuid4().hex
                 try:
@@ -1545,7 +1555,7 @@ class TaskRepository:
                         (job_id, task_id, _now()),
                     )
                 except sqlite3.IntegrityError as exc:
-                    raise ConflictError(f"task {task_id} already has an active job") from exc
+                    raise ConflictError("task already has an active stage") from exc
                 revision = self._merge_report_values_on_connection(
                     conn, task_id, values, expected_revision,
                     audit={
@@ -1558,7 +1568,8 @@ class TaskRepository:
                 self.add_agent_message_on_connection(
                     conn, task_id, role="assistant", stage="word_conclusion_confirmed",
                     content="三段报告结论已确认，将开始生成最终 Word 报告。",
-                    metadata={"revision": revision, "confirmed_keys": sorted(values)},
+                    metadata={**confirmation.get("model_metadata", {}),
+                              "revision": revision, "confirmed_keys": sorted(values)},
                 )
                 confirmed.append({"task_id": task_id, "job_id": job_id, "revision": revision})
         for item in confirmed:
@@ -1614,6 +1625,19 @@ class TaskRepository:
             "created_at": now,
             "metadata": metadata or {},
         }
+
+    def latest_agent_report_stage(self, task_id: str) -> str | None:
+        """Latest report interaction without loading the full conversation."""
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT stage FROM agent_messages WHERE task_id = ? "
+                "AND role = 'assistant' AND stage IN ("
+                "'word_conclusion_draft', 'word_conclusion_confirmed', "
+                "'word_conclusion_generated', 'word_report_ready') "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return row["stage"] if row else None
 
     def list_agent_messages(
         self,
@@ -2009,6 +2033,60 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         updated_at=row["updated_at"],
         status_reason_code=row["status_reason_code"],
     )
+
+
+def _upload_stem(source_path: str) -> str:
+    """``applications_1a2b3c4d.parquet`` -> ``applications`` (registry naming)."""
+    stem = Path(str(source_path)).stem
+    head, sep, tail = stem.rpartition("_")
+    if sep and len(tail) == 8 and all(ch in "0123456789abcdef" for ch in tail):
+        return head
+    return stem
+
+
+def _task_purge_names(conn: sqlite3.Connection, task_id: str) -> dict:
+    uploaded: list[str] = []
+    derived = 0
+    for row in conn.execute(
+        "SELECT role, source_path FROM datasets WHERE task_id = ? ORDER BY created_at, id",
+        (task_id,),
+    ).fetchall():
+        if str(row["role"]) == "derived":
+            derived += 1
+            continue
+        name = _upload_stem(row["source_path"])
+        # a content-addressed stem is a hash, not a name; the count covers it
+        if len(name) >= 32 and all(ch in "0123456789abcdef" for ch in name):
+            continue
+        if name and name not in uploaded:
+            uploaded.append(name)
+    plans = [
+        str(row["goal"] or "")
+        for row in conn.execute(
+            "SELECT goal FROM plans WHERE task_id = ? ORDER BY created_at, id", (task_id,)
+        ).fetchall()
+    ]
+    recipes = [
+        str(row["recipe_id"] or "")
+        for row in conn.execute(
+            "SELECT recipe_id FROM experiments WHERE task_id = ? ORDER BY created_at, id",
+            (task_id,),
+        ).fetchall()
+    ]
+    strategies = [
+        str(row["description"] or "")
+        for row in conn.execute(
+            "SELECT description FROM strategies WHERE task_id = ? ORDER BY created_at, id",
+            (task_id,),
+        ).fetchall()
+    ]
+    return {
+        "datasets": uploaded,
+        "derived_datasets": derived,
+        "plan_goals": plans,
+        "experiment_recipes": recipes,
+        "strategy_descriptions": strategies,
+    }
 
 
 def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:

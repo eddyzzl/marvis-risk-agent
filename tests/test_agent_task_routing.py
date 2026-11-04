@@ -18,6 +18,7 @@ from marvis.agent.turn_handlers import _strategy_success_criteria
 from marvis.app import create_app
 from marvis.domain import TASK_TYPE_STRATEGY, TaskRecord, TaskStatus
 from tests.strategy_sample_design_support import (
+    confirm_strategy_score_direction,
     materialize_mature_strategy_sample_design,
 )
 
@@ -136,14 +137,37 @@ def test_strategy_agent_start_defaults_to_full_development_plan(
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
 
+    # D-3: nothing states the score direction yet, so the Agent stops and asks
+    # instead of assuming higher_is_better.
     assert started.status_code == 202, started.text
-    assert started.json()["status"] == "ok"
+    asked = started.json()
+    assert asked["status"] == "clarification_required"
+    assert asked["code"] == "strategy_score_direction_required"
+    question = asked["messages"][-1]
+    assert "score 越高风险越高" in question["content"]
+    assert [reply["command"] for reply in question["metadata"]["quick_replies"]] == [
+        "开始策略开发，score 越高风险越高",
+        "开始策略开发，score 越低风险越高",
+    ]
+    assert "strategy_development" not in [
+        plan["template_id"]
+        for plan in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    ]
+
+    started = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始策略开发，score 越高风险越高"},
+    )
+    assert started.status_code == 202, started.text
     assert any(
         message.get("metadata", {}).get("intent") == "full_development"
+        and "来源：你在本次请求里说明" in message["content"]
         for message in started.json()["messages"]
     )
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert plans[-1]["template_id"] == "strategy_development"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert plan.steps[0].inputs["score_direction"] == "higher_is_riskier"
     assert plans[-1]["success_criteria"] == [
         {"metric": "approved_bad_rate", "max": 0.20}
     ]
@@ -513,6 +537,7 @@ def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    confirm_strategy_score_direction(client, task_id, direction="lower_is_riskier")
     materialize_mature_strategy_sample_design(
         client,
         task_id,
@@ -560,6 +585,7 @@ def test_quick_strategy_analysis_phrase_overrides_development_default(
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    confirm_strategy_score_direction(client, task_id, direction="lower_is_riskier")
     materialize_mature_strategy_sample_design(
         client,
         task_id,
@@ -608,12 +634,14 @@ def test_start_strategy_development_message_uses_full_product_route(
 
     started = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "开始策略开发"},
+        json={"content": "开始策略开发，score 越低风险越高"},
     )
 
     assert started.status_code == 202, started.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert plans[-1]["template_id"] == "strategy_development"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert plan.steps[0].inputs["score_direction"] == "higher_is_better"
     assert plans[-1]["success_criteria"] == [
         {"metric": "approval_rate", "min": 0.60}
     ]
@@ -702,11 +730,15 @@ def test_vintage_agent_start_builds_plan_and_returns_curve(client, tmp_path):
         json={"content": "标准 Vintage"},
     )
     assert selected.status_code == 202, selected.text
-    assert "必需列：cohort" in selected.json()["messages"][-1]["content"]
+    # The attached panel passes the field check, so the intake asks only how
+    # to read the bad column (A1: the platform never guesses the cumulation
+    # basis) instead of asking for an upload.
+    asked = selected.json()["messages"][-1]["content"]
+    assert "当期新增" in asked and "累计状态" in asked
 
     continued = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "材料已上传"},
+        json={"content": "bad 是当期新增"},
     )
     assert continued.status_code == 202, continued.text
     assert "执行计划" in continued.json()["messages"][-1]["content"]
@@ -717,14 +749,7 @@ def test_vintage_agent_start_builds_plan_and_returns_curve(client, tmp_path):
     )
     assert executed.status_code == 202, executed.text
     done = executed.json()["messages"][-1]
-    # A1: the vintage kernel always accumulates the bad column across MOBs; on a
-    # snapshot/ever-bad flag that silently double-counts. The strategy vintage tool now
-    # refuses to guess the cumulation basis, so an undeclared label_semantics halts at a
-    # gate (mirrors the NaN-label gate) offering both concrete semantics to the user.
-    assert "label_semantics" in done["content"]
-    assert "incremental" in done["content"] and "snapshot" in done["content"]
-    envelope = done["metadata"].get("failure_envelope") or {}
-    assert envelope.get("error_kind") == "label_semantics_not_declared"
+    assert "Vintage 曲线完成" in done["content"]
 
 
 def _bare_strategy_task(**overrides) -> TaskRecord:

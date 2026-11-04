@@ -185,3 +185,70 @@ def test_task_payload_treats_missing_optional_plan_schema_as_no_workflow(
     payload = task_payload(task_repo, task, settings.tasks_dir)
 
     assert payload["workflow_status"] is None
+
+
+def test_task_apis_expose_latest_plan_current_step_for_home_progress(tmp_path):
+    client, settings = _client(tmp_path)
+    task_repo = TaskRepository(settings.db_path)
+    plan_repo = PlanRepository(settings.db_path)
+    running_task = _task(task_repo, "running workflow")
+    done_task = _task(task_repo, "done workflow")
+    no_plan_task = _task(task_repo, "no plan")
+
+    def step(plan_id, index, title, status):
+        return PlanStep(
+            id=f"{plan_id}-{index}",
+            plan_id=plan_id,
+            index=index,
+            title=title,
+            tool_ref=ToolRef("modeling", "train_model"),
+            inputs={},
+            depends_on=[],
+            post_checks=[],
+            status=status,
+        )
+
+    older = _plan(
+        plan_id="older",
+        task_id=running_task.id,
+        created_at="2026-07-20T00:00:00+00:00",
+        plan_status=PlanStatus.RUNNING,
+        step_status=StepStatus.PENDING,
+    )
+    plan_repo.create_plan(older)
+    latest = _plan(
+        plan_id="latest",
+        task_id=running_task.id,
+        created_at="2026-07-21T00:00:00+00:00",
+        plan_status=PlanStatus.RUNNING,
+        step_status=StepStatus.DONE,
+    )
+    latest.steps = [
+        step("latest", 0, "数据准备", StepStatus.DONE),
+        step("latest", 1, "特征筛选", StepStatus.SKIPPED),
+        step("latest", 2, "训练模型", StepStatus.AWAITING_CONFIRM),
+        step("latest", 3, "报告输出", StepStatus.PENDING),
+    ]
+    plan_repo.create_plan(latest)
+    plan_repo.create_plan(
+        _plan(
+            plan_id="done",
+            task_id=done_task.id,
+            created_at="2026-07-22T00:00:00+00:00",
+            plan_status=PlanStatus.DONE,
+            step_status=StepStatus.DONE,
+        )
+    )
+
+    listed = {row["id"]: row for row in client.get("/api/tasks").json()}
+
+    assert listed[running_task.id]["current_step"] == {
+        "number": 3,
+        "total": 4,
+        "title": "训练模型",
+        "status": "awaiting_confirm",
+    }
+    assert listed[done_task.id]["current_step"] is None
+    assert listed[no_plan_task.id]["current_step"] is None
+    detail = client.get(f"/api/tasks/{running_task.id}").json()
+    assert detail["current_step"] == listed[running_task.id]["current_step"]

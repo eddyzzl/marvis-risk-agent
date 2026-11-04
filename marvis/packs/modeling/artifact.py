@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import UTC, datetime
+import importlib.metadata
+import io
 import json
 import math
 from pathlib import Path
+import re
 
 import joblib
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.packs.modeling.contracts import ModelArtifact
-from marvis.packs.modeling.errors import ModelingError
+from marvis.packs.modeling.errors import ModelingError, PmmlConverterError
 
 
 _MODEL_SUFFIX = {
@@ -318,9 +322,68 @@ def export_pmml(
     return write_artifact_file(
         out_path.parent,
         out_path.name,
-        lambda path: sklearn2pmml(pipeline, path.as_posix(), with_repr=True),
+        lambda path: _run_sklearn2pmml(sklearn2pmml, pipeline, path),
         validator=lambda path: Model.load(path.as_posix()),
     )
+
+
+_JAVA_EXCEPTION_LINE = re.compile(
+    r"^\s*((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*(?:Exception|Error)):\s*(.+?)\s*$",
+    re.MULTILINE,
+)
+_JPMML_SOLUTION = re.compile(r"^Solution:\s*\n\s*(.+?)\s*$", re.MULTILINE)
+_JPMML_UNSUPPORTED_VERSION = re.compile(r"^(.+?) version '([^']+)' is not supported")
+
+
+def _run_sklearn2pmml(convert, pipeline, path: Path) -> None:
+    # sklearn2pmml prints the Java converter's stdout/stderr to Python stdout and
+    # raises a generic RuntimeError, so the actionable cause (e.g. JPMML rejecting
+    # the installed scikit-learn) was lost in server/worker stdout. Capture it and
+    # raise a typed error that carries the converter's own diagnosis.
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            convert(pipeline, path.as_posix(), with_repr=True)
+    except RuntimeError as exc:
+        raise _pmml_converter_error(str(exc), captured.getvalue()) from exc
+
+
+def _pmml_converter_error(error: str, output: str) -> PmmlConverterError:
+    common = {
+        "converter_version": _distribution_version("sklearn2pmml"),
+        "output_tail": output[-2000:],
+    }
+    if "Java is not installed" in error:
+        return PmmlConverterError(cause="java_unavailable", java_message=error, **common)
+    exception = _JAVA_EXCEPTION_LINE.search(output)
+    if exception is None:
+        return PmmlConverterError(cause="conversion_failed", java_message=error, **common)
+    java_exception, java_message = exception.groups()
+    solution = _JPMML_SOLUTION.search(output)
+    details = {
+        "java_exception": java_exception,
+        "java_message": java_message,
+        "solution": solution.group(1) if solution else "",
+        **common,
+    }
+    if java_exception.endswith("UnsupportedClassVersionError"):
+        return PmmlConverterError(cause="java_unsupported", **details)
+    unsupported = _JPMML_UNSUPPORTED_VERSION.match(java_message)
+    if unsupported:
+        return PmmlConverterError(
+            cause="unsupported_library_version",
+            library=unsupported.group(1),
+            installed_version=unsupported.group(2),
+            **details,
+        )
+    return PmmlConverterError(cause="conversion_failed", **details)
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return ""
 
 
 def _scorecard_pmml_pipeline(

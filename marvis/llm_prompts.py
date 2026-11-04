@@ -387,7 +387,7 @@ TEXT:model_training_description 介绍实际算法及提供的关键超参，不
 
 WORD_CONCLUSION_V2_SYSTEM_PROMPT = PromptSpec(
     name="WORD_CONCLUSION_V2_SYSTEM_PROMPT",
-    version=3,
+    version=4,
     text=f"""你是信贷风控模型验证专家。本任务采用 V2 PMML 打分工作流：
 平台不执行 Notebook 模型、不比较代码模型分与 PMML 分，也不做模型可复现性或分数一致性验证。
 只能根据平台提供的 PMML 全量打分、效果稳定性和模型压力测试证据撰写结论。
@@ -401,7 +401,8 @@ stage=metrics 时生成当前主题的阶段分析，不宣称最终报告通过
 直接输出完整 JSON 文本，不输出推导过程；每段集中解释对应证据，不复述其他段落。
 未指定字段不得返回，不编造缺失字段；必需段落即使证据不足也须明确说明限制。
 
-模型名称含 T卡 时，概述用「支用环节 / 支用申请阶段」，禁止写成授信；含 A卡 时用「授信环节 / 授信申请阶段」。
+业务环节只依据 business_context.stage：支用环节（T卡）、授信环节（A卡）、贷中环节（B卡/行为评分卡）不得互相改写；
+未提供 business_context 时不得断言授信、支用、贷中等业务环节或申请阶段。
 坏/好样本定义、MOB、逾期天数和适用客群只能引用明确提供的业务口径；模型名称不是这些事实的证据。
 缺少口径时，可选叙事字段保持空白或省略，必需结论说明未知；不得默认 30 天、从模型名推断 MOB，或把假设写成已确认定义。
 不得使用「本模型模型」。不得编造或改写 KS、AUC、PSI 等平台数字。
@@ -409,7 +410,7 @@ stage=metrics 时生成当前主题的阶段分析，不宣称最终报告通过
 performance 负责 Train/Test/OOT KS、AUC 及过拟合；stability 负责 PSI 和逐期稳定性；ranking 负责分箱排序性；overall 负责压力测试主要风险、综合判断及历史对比。各主题只解释自己收到的证据，不得对多个模型使用同一套套话。
 分箱与 lift 须按 lift_ranking_assessment 评价单调性、头尾幅度和区分度，不得只因 lift 跨过 1 就判好。
 仅 overall 主题负责历史对比：如提供跨任务记忆，必须对比历史同类模型效果；没有可比记忆时写「本次未见可比历史模型」。引用须克制，且不得改写平台确定性指标。
-未通过或明显不好的判断用 !!关键短语!! 包住。
+未通过或明显不好的判断用 !!关键短语!! 包住；overall 主题必须点名证据中的不合格或高风险项（如压力测试高风险数据源、过拟合未通过）。
 
 压力测试总结必须按证据归纳高、中、低风险数据源或特征类别，写清基线 KS、各类别剔除后 KS/PSI 及风险分层；不得只复述「置 -9999」的机械清单。证据不足时明确说明。
 TEXT:model_training_description 必须介绍本模型实际采用的算法，并引用 evidence.validation_results.basic_info.hyperparameters 中的关键参数（如 max_depth、learning_rate、num_boost_round/best_iteration、feature_fraction）；不得只粘贴该算法的通用教科书介绍，也不得在有超参证据时写成「待确认算法」。
@@ -1004,6 +1005,13 @@ SQL_SELECT_COMPILER_SYS = PromptSpec(
 )
 
 
+MONITORING_SCHEDULE_FORM_SYS = PromptSpec(
+    name="MONITORING_SCHEDULE_FORM_SYS",
+    version=1,
+    text="你是 MARVIS 监控调度表单助手。只按用户原话从给定可选项里填写监控对象、数据、时间列、频率、首次日期和通知渠道；没说的字段返回 null。不得创建调度、执行监控、计算指标或编造可选项以外的值。",
+)
+
+
 ALL_PROMPTS: tuple[PromptSpec, ...] = (
     PLAN_SYS,
     REPLAN_SYS,
@@ -1030,6 +1038,7 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
     STRATEGY_REQUEST_COMPILER_SYS,
     SAMPLE_DESIGN_V2_CORRECTION_SYS,
     SQL_SELECT_COMPILER_SYS,
+    MONITORING_SCHEDULE_FORM_SYS,
 )
 
 
@@ -1045,6 +1054,7 @@ def prompt_version_snapshot() -> dict[str, int]:
 
 __all__ = [
     "SQL_SELECT_COMPILER_SYS",
+    "MONITORING_SCHEDULE_FORM_SYS",
     "PromptSpec",
     "ALL_PROMPTS",
     "prompt_version_snapshot",

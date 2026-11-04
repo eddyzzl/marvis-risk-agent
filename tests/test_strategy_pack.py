@@ -555,6 +555,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
 
     assert tool_names == {
         "bind_business_context",
+        "diagnose_time_leakage",
+        "diagnose_selection_bias",
+        "segment_disparity_evidence",
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",
@@ -2004,6 +2007,8 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
         {
             "dataset_id": dataset.id,
             "score_col": "score",
+            # D-3: the direction is stated, never defaulted by the tool.
+            "score_direction": "higher_is_better",
             "target_col": "bad",
             "sample_design_ref": sample_design_ref,
             "cutoffs": [600, 700],
@@ -2153,6 +2158,7 @@ def test_tradeoff_view_gates_nan_label(tmp_path):
         "sample_design_ref": dropping_sample_ref,
         "cutoffs": [600, 700],
         "drop_nan_labels": True,
+        "score_direction": "higher_is_better",
     }
     confirmed = runner.invoke(
         ToolRef("strategy", "tradeoff_view"),

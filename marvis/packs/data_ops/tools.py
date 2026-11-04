@@ -16,7 +16,7 @@ import pandas as pd
 
 from marvis.data.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.data.align import ColumnAligner
+from marvis.data.align import ColumnAligner, is_customer_id_column
 from marvis.data.backend import (
     connect_duckdb,
     sql_identifier,
@@ -35,7 +35,7 @@ from marvis.data.excel_ingest import (
     new_excel_artifact_name,
 )
 from marvis.data.dataset_export import export_dataset
-from marvis.data.join_engine import JoinEngine, _key_fps
+from marvis.data.join_engine import JoinEngine, KeySelectionError, _key_fps, resolve_key_selection
 from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.data.transform_semantics import (
     effective_transform_semantic_mapping,
@@ -556,40 +556,34 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
             if requested is None:
                 continue
             selected = [str(column) for column in requested]
-            selected_set = set(selected)
-            if not selected or len(selected_set) != len(selected):
-                raise ValueError(f"feature {spec.feature_dataset_id} must select one or more unique join keys")
-            known = {pair.anchor_col for pair in spec.key_pairs}
-            unknown = sorted(selected_set - known)
-            if unknown:
-                raise ValueError(
-                    f"feature {spec.feature_dataset_id} has unknown anchor join keys: {', '.join(unknown)}"
+            feature_name = _friendly_name(runtime.registry, spec.feature_dataset_id)
+            if not selected or len(set(selected)) != len(selected):
+                raise ValueError(f"特征表 {feature_name} 需要选择一个或多个不重复的拼接键。")
+            # The C2 picker may switch to any data-resolved candidate (e.g. mobile instead
+            # of the preferred cust_id, or a second feature column of the same anchor
+            # column), never to a pair the aligner did not resolve.
+            try:
+                resolve_key_selection(
+                    spec.diagnostics.key_candidates or spec.key_pairs, spec.key_pairs, selected,
                 )
-            pairs = [pair for pair in spec.key_pairs if pair.anchor_col in selected_set]
+            except KeySelectionError as exc:
+                raise ValueError(f"特征表 {feature_name}：{exc}") from exc
             feature = runtime.registry.get(spec.feature_dataset_id)
-            feature_path = runtime.registry.resolve_path(feature.id)
-            spec.key_pairs = runtime.join_engine.recompute_key_pairs(
+            runtime.join_engine.select_key_pairs(
                 anchor,
                 anchor_path,
                 feature,
-                feature_path,
-                pairs,
+                runtime.registry.resolve_path(feature.id),
+                spec,
+                selected,
                 seed=seed,
-            )
-            spec.diagnostics = runtime.join_engine.diagnose_join(
-                anchor,
-                anchor_path,
-                feature,
-                feature_path,
-                spec.key_pairs,
-                seed=seed,
-                recompute_match=True,
             )
             runtime.repo.update_join_spec(plan.id, spec)
         plan = runtime.repo.load_join_plan(plan.id)
     payload = _join_plan_payload(plan)
     for join in payload.get("joins", []):
         join["feature_name"] = _friendly_name(runtime.registry, join.get("feature_id"))
+        join["key_choice_reason"] = _key_choice_reason(join)
     # GAP-4: {column: business_name} map for every key column in this proposal, so
     # the C1/dedup gate can show a meaning tooltip next to raw column-name codes.
     # Best-effort — {} when the task has no registered data dictionary.
@@ -1794,6 +1788,11 @@ def tool_confirm_join(inputs: dict, ctx) -> dict:
     }
 
 
+def _key_attr(pair, name: str) -> str:
+    # KeyPair in memory, an asdict-flattened dict after a DB round-trip.
+    return str(pair.get(name, "") if isinstance(pair, dict) else getattr(pair, name, ""))
+
+
 def tool_execute_join(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     plan = runtime.repo.load_join_plan(str(inputs["join_plan_id"]))
@@ -1807,8 +1806,14 @@ def tool_execute_join(inputs: dict, ctx) -> dict:
     warnings = []
     for spec in plan.joins:
         diag = spec.diagnostics
+        feature_name = _friendly_name(runtime.registry, spec.feature_dataset_id)
         per_table.append({
             "feature_id": spec.feature_dataset_id,
+            "feature_name": feature_name,
+            # The key that actually ran (review M1: the result never named it).
+            "key": " + ".join(
+                f"{_key_attr(pair, 'anchor_col')} = {_key_attr(pair, 'feature_col')}" for pair in spec.key_pairs
+            ),
             "match_rate": round(float(diag.match_rate), 4),
             "new_columns": int(diag.new_columns),
             "new_columns_null_rate": round(float(diag.new_columns_null_rate), 4),
@@ -1816,7 +1821,7 @@ def tool_execute_join(inputs: dict, ctx) -> dict:
         })
         if diag.shrink_detected:
             warnings.append(
-                f"{spec.feature_dataset_id}:命中率偏低({diag.match_rate:.2f}),新列缺失较多"
+                f"{feature_name}:命中率偏低({diag.match_rate:.2f}),新列缺失较多"
             )
         # conflict_report is a ConflictReport in-memory but an asdict-flattened dict after a
         # DB round-trip (load_join_plan) — handle both so the warning never crashes here.
@@ -1829,7 +1834,7 @@ def tool_execute_join(inputs: dict, ctx) -> dict:
             conflict_keys = 0
         if conflict_keys and spec.dedup_strategy:
             warnings.append(
-                f"{spec.feature_dataset_id}:{conflict_keys} 个同键冲突已按 "
+                f"{feature_name}:{conflict_keys} 个同键冲突已按 "
                 f"'{spec.dedup_strategy}' 解决"
             )
     return {
@@ -2386,14 +2391,139 @@ def _diagnostics_payload(diagnostics) -> dict:
 
 
 def _friendly_name(registry, dataset_id) -> str:
-    """A human-readable file name for a dataset id (e.g. ``features.parquet``) so the
-    diagnostics / dedup gate show the source file rather than a raw ``ds_<hash>``."""
+    """A human-readable file name for a dataset id so the diagnostics / dedup gate
+    show the uploaded file (``bureau_features.csv``) rather than the registered
+    parquet's content-hash name or a raw ``ds_<hash>``."""
+    try:
+        identity = registry.source_identity(str(dataset_id))
+    except Exception:
+        identity = None
+    original = str((identity or {}).get("original_name") or "").strip()
+    if original:
+        return original
     try:
         dataset = registry.get(str(dataset_id))
         source = getattr(dataset, "source_path", None)
         return Path(source).name if source else str(dataset_id)
     except Exception:
         return str(dataset_id)
+
+
+def _key_choice_reason(join: dict) -> str:
+    """Business-Chinese explanation of why one feature table's proposed join key was chosen,
+    built only from the diagnosed facts (choice rule, match rate, uniqueness, alternatives)
+    so the C2 gate states the evidence instead of an unexplained column pair."""
+    diagnostics = join.get("diagnostics") if isinstance(join.get("diagnostics"), dict) else {}
+    choice = str(diagnostics.get("key_choice") or "")
+    pairs = [pair for pair in join.get("key_pairs") or [] if isinstance(pair, dict)]
+    if not choice or not pairs:
+        return ""
+
+    def pct(value) -> str:
+        try:
+            return f"{float(value) * 100:.2f}%"
+        except (TypeError, ValueError):
+            return "n/a"
+
+    def label(cols) -> str:
+        return " + ".join(f"{anchor_col} = {feature_col}" for anchor_col, feature_col in cols)
+
+    name = str(join.get("feature_name") or join.get("feature_id") or "特征表")
+    key = label((pair.get("anchor_col"), pair.get("feature_col")) for pair in pairs)
+    unique = bool(diagnostics.get("feature_key_unique"))
+    facts = (
+        f"抽样命中率 {pct(diagnostics.get('match_rate'))}，特征表上该键"
+        + ("唯一，左连接后主表行数 1:1 不变" if unique else "不唯一，确认前需选去重策略")
+    )
+    candidates = [c for c in diagnostics.get("key_candidates") or [] if isinstance(c, dict)]
+    key_cols = {(pair.get("anchor_col"), pair.get("feature_col")) for pair in pairs}
+
+    def _rate(candidate) -> float:
+        try:
+            return float(candidate.get("match_rate") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # One customer column can have several feature-column candidates: describe the one
+    # in the key, else the best-matching one.
+    customer = next(
+        (
+            c for c in sorted(candidates, key=lambda c: (
+                (c.get("anchor_col"), c.get("feature_col")) not in key_cols, -_rate(c),
+            ))
+            if is_customer_id_column(str(c.get("anchor_col") or ""))
+            and is_customer_id_column(str(c.get("feature_col") or ""))
+        ),
+        None,
+    )
+    cust = label([(customer.get("anchor_col"), customer.get("feature_col"))]) if customer else "客户号"
+    switches = [
+        alt for alt in diagnostics.get("key_alternatives") or []
+        if isinstance(alt, dict) and alt.get("kind") == "switch"
+    ]
+    if choice == "customer_id":
+        same = "原值完全一致" if pairs[0].get("match_method") == "exact" else "原值忽略大小写后一致"
+        text = f"{name}：选用客户号 {key} 关联——两表都有客户号，{same}，无需哈希转换；{facts}。"
+    elif choice == "customer_id_composite":
+        text = (
+            f"{name}：选用 {key} 关联——客户号 {cust} 不能单独作键（在特征表上不唯一或两表格式不一致），"
+            f"且两表没有手机号/身份证等其他身份键，因此与日期/姓名组合成复合键；{facts}。"
+        )
+    elif choice == "customer_id_not_unique":
+        if len(pairs) == 1 and customer and pairs[0].get("anchor_col") == customer.get("anchor_col"):
+            text = f"{name}：选用客户号 {key} 关联——两表只有客户号可作身份键，但它在特征表上不唯一（同一客户多行）；{facts}。"
+        else:
+            text = (
+                f"{name}：选用 {key} 关联——两表虽都有客户号 {cust}，但它在特征表上不唯一（同一客户多行），"
+                f"单独作键会让主表行数膨胀，因此沿用身份字段组合；{facts}。"
+            )
+    elif choice == "customer_id_lower_match":
+        # The customer id lost to the key that runs, compared at key level (review N1).
+        compared = f"低于当前键的 {pct(diagnostics.get('match_rate'))}"
+        text = (
+            f"{name}：选用 {key} 关联——客户号 {cust} 抽样命中率 {pct((customer or {}).get('match_rate'))}，"
+            f"{compared}，因此不作首选；{facts}。如确认客户号口径一致，可在下方卡片切换。"
+        )
+    elif choice == "customer_id_hashed":
+        chosen_customer = customer is not None and any(
+            pair.get("anchor_col") == customer.get("anchor_col") for pair in pairs
+        )
+        text = (
+            f"{name}：选用 {key} 关联——客户号 {cust} 两表格式不一致（需哈希转换），"
+            + ("没有其他身份键可用，因此仍用它关联" if chosen_customer else "不作为原值一致的首选键")
+            + f"；{facts}。"
+        )
+    elif choice == "dictionary":
+        text = f"{name}：两表没有可直接对上的客户号，按身份字段（手机号/身份证/日期/姓名）匹配到 {key}；{facts}。"
+    elif choice == "fuzzy":
+        text = f"{name}：两表没有可直接对上的客户号或身份字段，按列名相似度并经数据核验匹配到 {key}；{facts}。"
+    elif choice == "user":
+        text = f"{name}：已按你的选择改用 {key} 关联；{facts}。"
+    else:
+        return ""
+    for pair in pairs:
+        method = str(pair.get("match_method") or "")
+        if not method.startswith("hash:"):
+            continue
+        algo = method.split(":", 1)[1].upper()
+        anchor_col, feature_col = pair.get("anchor_col"), pair.get("feature_col")
+        raw, hashed = (
+            (f"特征表 {feature_col}", f"主表 {anchor_col}")
+            if pair.get("transform_side") == "feature"
+            else (f"主表 {anchor_col}", f"特征表 {feature_col}")
+        )
+        text += (
+            f"其中 {anchor_col} = {feature_col} 是原文对 {algo} 哈希：{raw} 为原文，"
+            f"平台先按 {algo} 计算后再与{hashed} 比对（不是原值直接相等），请确认两列是同一标识。"
+        )
+    if switches:
+        options = "；".join(
+            f"{label(alt.get('key_pairs') or [])}（命中 {pct(alt.get('match_rate'))}，"
+            f"{'键唯一' if alt.get('feature_key_unique') else '键不唯一'}）"
+            for alt in switches[:3]
+        )
+        text += f"其他候选键：{options}，可在下方「逐表确认拼接键」中切换。"
+    return text
 
 
 def _join_plan_payload(plan) -> dict:

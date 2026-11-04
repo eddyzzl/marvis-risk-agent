@@ -49,6 +49,7 @@ def _base_slots() -> tuple[SlotSpec, ...]:
 def _flow_step() -> StepTemplate:
     return StepTemplate(
         title="流量分析",
+        phase="组合分析",
         tool_ref=ToolRef("analysis", "flow_rate"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
@@ -67,6 +68,7 @@ def _flow_step() -> StepTemplate:
 def _migration_step() -> StepTemplate:
     return StepTemplate(
         title="迁徙热力",
+        phase="组合分析",
         tool_ref=ToolRef("analysis", "bucket_migration"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
@@ -85,6 +87,7 @@ def _migration_step() -> StepTemplate:
 def _segment_step() -> StepTemplate:
     return StepTemplate(
         title="细分画像",
+        phase="组合分析",
         tool_ref=ToolRef("analysis", "segment_profile"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
@@ -100,6 +103,7 @@ def _segment_step() -> StepTemplate:
 def _trend_step() -> StepTemplate:
     return StepTemplate(
         title="稳定性趋势",
+        phase="组合分析",
         tool_ref=ToolRef("analysis", "score_stability_trend"),
         inputs_template={
             "experiment_id": "{slot:experiment_id}",
@@ -116,6 +120,7 @@ def _trend_step() -> StepTemplate:
 def _el_step() -> StepTemplate:
     return StepTemplate(
         title="损失估计",
+        phase="组合分析",
         tool_ref=ToolRef("analysis", "expected_loss_estimate"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
@@ -147,6 +152,7 @@ def _gate_step(*, with_trend: bool) -> StepTemplate:
         depends.insert(3, "稳定性趋势")
     return StepTemplate(
         title="组合分析汇总",
+        phase="组合分析",
         tool_ref=ToolRef("analysis", "portfolio_gate_summary"),
         inputs_template=inputs,
         depends_on_titles=tuple(depends),
@@ -173,6 +179,7 @@ def _report_step(*, with_trend: bool) -> StepTemplate:
         depends.insert(3, "稳定性趋势")
     return StepTemplate(
         title="生成组合报告",
+        phase="报告",
         tool_ref=ToolRef("analysis", "portfolio_report"),
         inputs_template=inputs,
         depends_on_titles=tuple(depends),

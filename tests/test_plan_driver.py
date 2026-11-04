@@ -2112,6 +2112,52 @@ def test_driver_failed_message_carries_retry_contract(tmp_path):
     assert "Agent" in msg.content
 
 
+def test_driver_pmml_environment_failure_asks_for_environment_fix_before_retry(tmp_path):
+    class PmmlEnvironmentRunner(FailingRunner):
+        def invoke(self, ref, inputs, *, task_id, execution_context=None, expected_invocation=None, on_dispatch=None):
+            if on_dispatch is not None:
+                on_dispatch()
+            self.calls.append((ref.tool, inputs))
+            return ToolResult(
+                ok=False,
+                output=None,
+                error="PMML 导出环境不兼容：sklearn2pmml 0.131.0 内置的 JPMML 转换器不支持已安装的 Scikit-Learn 1.9.1。",
+                error_kind="pmml_export_environment",
+                duration_ms=1,
+            )
+
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[_step("deliver", index=0, tool="post_training_action", phase="交付")],
+    )
+    repo.create_plan(plan)
+    executor = PlanExecutor(repo, PmmlEnvironmentRunner(), Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan("plan-1")
+
+    turn = driver._run_and_handle("plan-1", run_seq=1)
+
+    msg = turn.messages[0]
+    assert msg.metadata["failure_envelope"]["error_kind"] == "pmml_export_environment"
+    diagnostic = msg.metadata["error_diagnostic"]
+    # Recovery chat only accepts known diagnostic codes, so the code stays generic.
+    assert diagnostic["code"] == "workflow_step_failed"
+    assert diagnostic["title"] == "PMML 导出环境不兼容"
+    assert "Scikit-Learn 1.9.1" in diagnostic["cause"]
+    assert "uv.lock" in diagnostic["actions"][0]
+    assert diagnostic["retryable"] is True
+    assert diagnostic["auto_recoverable"] is False
+
+
 def test_driver_retry_failed_step_resumes_same_plan_from_failure(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -2712,6 +2758,9 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
         "warnings": ["样本权重列已从入模特征中移除。"],
         "reason": "目标类型 `binary`,候选算法 lgb,主调参算法 `lgb`,选择指标 oot_ks。",
         "split_summary": None,
+        # No OOT success criterion on this plan, so the form may keep "no OOT".
+        "oot_requested": False,
+        "oot_requirement": "",
         "sample_weight_col": "",
         "sample_weight_candidates": ["weight", "sample_weight"],
         "sample_weight_diagnostics": [
@@ -2983,7 +3032,7 @@ def test_select_experiment_gate_uses_completed_budget_and_trained_feature_count(
     assert ["精选后特征数", "187"] in spec_table["rows"]
     assert [
         "按算法调参预算",
-        "lgb=1、xgb=1、catboost=1（总计 3 轮）",
+        "LightGBM 1 轮、XGBoost 1 轮、CatBoost 1 轮（总计 3 轮）",
     ] in spec_table["rows"]
 
 
@@ -3385,9 +3434,10 @@ def test_post_training_gate_merges_plural_report_and_renders_every_report():
     assert rendered.model_delivery["report"]["status"] == "ready"
     assert any("共 2 份" in part for part in rendered.parts)
     report_table = next(table for table in rendered.tables if table["title"] == "候选模型报告")
+    # Readable experiment names and file kinds; ids and paths stay in metadata.
     assert report_table["rows"] == [
-        ["exp-lgb", "lgb", "已生成", "/tmp/model_report_lgb.xlsx"],
-        ["exp-xgb", "xgb", "已生成", "/tmp/model_report_xgb.xlsx"],
+        ["实验 1", "LightGBM", "已生成", "Excel 报告"],
+        ["实验 2", "XGBoost", "已生成", "Excel 报告"],
     ]
     message = PlanMessageComposer(load_output=outputs.__getitem__).gate_message(
         plan,
@@ -3875,7 +3925,9 @@ def test_driver_modeling_setup_adjust_normalizes_common_recipe_aliases(tmp_path)
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     assert runner.calls[2][1]["recipes"] == ["lgb", "xgb", "catboost"]
     assert runner.calls[2][1]["n_trials"] == 40
-    assert "'catboost'" in turn.messages[0].content
+    # Batch 2026-10-20: the echo is business Chinese, never a Python repr.
+    assert "算法改为 lgb、xgb、catboost" in turn.messages[0].content
+    assert "'catboost'" not in turn.messages[0].content
 
 
 def test_driver_modeling_setup_adjust_rejects_unknown_recipe_before_reset(tmp_path):
@@ -4849,7 +4901,7 @@ def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
     assert len(runner.calls) == 2
     assert runner.calls[1][1].get("leakage_ks") == 0.3  # the declared override reached the tool
     assert "保留 **3** 个" in turn.messages[-1].content  # the recomputed screen output is shown
-    assert any("调整参数" in m.content for m in turn.messages)
+    assert any("已按你的要求调整" in m.content for m in turn.messages)
 
 
 def test_invalid_adjust_clarifies_text_but_rejects_trusted_ui_without_reset(tmp_path):
@@ -5149,7 +5201,7 @@ def test_driver_select_adjust_reruns_refine_step_and_downstream_screen_untouched
     assert adjust_turn.status == PlanStatus.AWAITING_CONFIRM.value
     assert len(runner.calls) == 2
     assert repo.load_plan("plan-1").steps[1].status == StepStatus.AWAITING_CONFIRM
-    assert any("已按指令调整参数" in m.content for m in adjust_turn.messages)
+    assert any("已按你的要求调整" in m.content for m in adjust_turn.messages)
 
     rerun_turn = driver.resume(plan_id="plan-1", user_text="确认", run_seq=3)
 
@@ -5323,7 +5375,7 @@ def test_driver_adjust_with_unmatched_params_does_not_rerun_or_claim_success(tmp
     assert len(runner.calls) == 1
     assert repo.load_step_output("screen")["selected"] == ["sig1"]
     assert "没有识别到可调整的参数" in turn.messages[-1].content
-    assert "已按指令调整参数" not in turn.messages[-1].content
+    assert "已按你的要求调整" not in turn.messages[-1].content
 
 
 def test_driver_replan_instruction_routes_to_structural_replan(tmp_path):
@@ -5350,7 +5402,8 @@ def test_driver_replan_instruction_routes_to_structural_replan(tmp_path):
     turn = driver.resume(plan_id="plan-1", user_text="把调参那步去掉", run_seq=1)
 
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value  # holds at the gate
-    assert "重规划未成功" in turn.messages[-1].content
+    assert "没能把这条要求改写成" in turn.messages[-1].content
+    assert "调参重算" not in turn.messages[-1].content
     assert "仍在接入" not in turn.messages[-1].content  # not the retired stub
 
 
@@ -5788,8 +5841,8 @@ def test_render_tune_leaderboard_includes_full_per_trial_matrix():
         ],
     })
     board = next(table for table in tables if table["title"].startswith("trials 排行"))
-    for col in ("test_auc", "oot_auc", "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
-                "过拟合gap（tt）", "过拟合gap（to）"):
+    for col in ("测试集 AUC", "OOT AUC", "头部 5% Lift", "头部 10% Lift", "尾部 5% Lift", "尾部 10% Lift",
+                "过拟合差（训练-测试）", "过拟合差（训练-OOT）"):
         assert col in board["columns"], col
     assert any("0.72" in str(cell) for cell in board["rows"][0])  # AUC reached the top row
     assert any("0.07" in str(cell) for cell in board["rows"][0])  # train-oot gap surfaced

@@ -2,6 +2,7 @@
 from datetime import date
 import re
 
+from marvis.business_acceptance import OBJECTIVE_NOT_CONFIGURED_REASON
 from marvis.llm_outbound import OutboundContextError, _METRIC, _mint_prompt, structural_summary
 from marvis.llm_outbound_reports import _labels, _numeric
 from marvis.orchestrator.evidence import payload_hash
@@ -12,6 +13,8 @@ _UNITS = {"ratio", "percent", "count", "currency", "days"}
 _DENOMINATORS = {"mature_loans", "all_applicants", "all_rows", "approved_loans", "disbursed_loans"}
 _METRICS = {"expected_profit", "net_profit", "approval_rate", "bad_rate", "loss_rate", "population"}
 _REASONS = {
+    OBJECTIVE_NOT_CONFIGURED_REASON: "objective_not_configured",
+    # Historical wording kept so results stored before 2026-10-20 still map.
     "未配置业务验收标准；流程完成不代表业务达标。": "objective_not_configured",
     "缺少实际采用对象的认证证据。": "adopted_evidence_missing",
     "采用对象或版本未绑定。": "target_binding_missing",
@@ -117,8 +120,15 @@ def business_acceptance_context(result):
 
 
 def business_review_prompt(*, goal, plan_id, step_count, outputs, result):
-    clean = structural_summary({"goal": goal, "plan_id": plan_id,
-                                "step_count": step_count, "outputs": outputs})
+    from marvis.llm_outbound_instructions import review_goal_or_omitted
+
+    source = {"plan_id": plan_id, "step_count": step_count, "outputs": outputs}
+    # The goal is kept verbatim (negations, conditions, thresholds) or refused
+    # before any request; it is never reduced to topic words.
+    approved_goal = review_goal_or_omitted(goal)
+    if approved_goal is not None:
+        source["goal"] = approved_goal
+    clean = structural_summary(source)
     clean["business_acceptance"] = business_acceptance_context(result)
     clean["acceptance_authority"] = (
         "业务验收由平台确定性判定。解释必须遵守此status、objective_hash和采用对象绑定，"

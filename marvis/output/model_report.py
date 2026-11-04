@@ -43,12 +43,17 @@ class ModelReportPayload:
     stress_low_pricing: dict | None = None
     narratives: dict = field(default_factory=dict)
     section_status: list[ReportSectionStatus] = field(default_factory=list)
+    # Optional display layer from the producer: {"keys": {code_key: label},
+    # "values": {code_key: {code: label}}}. The payload keeps its codes; the
+    # workbook shows the labels (a development-refit report's split codes).
+    display_labels: dict = field(default_factory=dict)
 
 
 def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
     out_path = Path(out_path)
     workbook = Workbook()
     workbook.remove(workbook.active)
+    labels = payload.display_labels
     _write_summary(workbook, payload)
     _write_section_sheet(
         workbook,
@@ -64,12 +69,12 @@ def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
     )
     _write_section_sheet(workbook, "特征重要性", payload.feature_importance, None)
     _write_section_sheet(workbook, "评分卡", payload.scorecard_table, None)
-    _write_score_band_sheet(workbook, payload.score_bands)
+    _write_score_band_sheet(workbook, payload.score_bands, labels)
     _write_section_sheet(workbook, "概率校准", payload.calibration, None)
     _write_section_sheet(
         workbook,
         "oot分箱评估_十分箱",
-        payload.oot_bin_table,
+        _display_rows(payload.oot_bin_table, labels),
         _unavailable_reason(payload, "amount_bin"),
     )
     _write_section_sheet(workbook, "单变量分析", payload.univariate, None)
@@ -87,14 +92,16 @@ def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
 
 def _write_summary(workbook: Workbook, payload: ModelReportPayload) -> None:
     sheet = workbook.create_sheet("汇总")
+    labels = payload.display_labels
+    [project_meta] = _display_rows([payload.project_meta], labels)
     rows = [
         ("一、建模背景", ""),
         ("项目元数据", ""),
-        *[(str(key), _cell(value)) for key, value in payload.project_meta.items()],
+        *[(str(key), _cell(value)) for key, value in project_meta.items()],
         ("数据集划分", ""),
-        *_dict_rows(payload.dataset_split),
+        *_dict_rows(_display_rows(payload.dataset_split, labels)),
         ("稳定性指标", ""),
-        *_dict_rows(payload.stability),
+        *_dict_rows(_display_rows(payload.stability, labels)),
         ("二、样本分析结论", str(payload.narratives.get("sample", ""))),
         ("三、Vintage分析结论", str(payload.narratives.get("vintage", ""))),
         ("四、模型结论", str(payload.narratives.get("model", ""))),
@@ -119,7 +126,7 @@ def _write_section_sheet(
     _write_dict_table(sheet, rows or [])
 
 
-def _write_score_band_sheet(workbook: Workbook, rows: list[dict]) -> None:
+def _write_score_band_sheet(workbook: Workbook, rows: list[dict], labels: dict | None = None) -> None:
     """DOM-5: score-band sheet with a caption documenting the shared bin-edge basis
     and cumulation direction, followed by the table itself. Bin edges are computed
     once on train (see tools.py::_score_band_rows) so the caption states that
@@ -153,7 +160,7 @@ def _write_score_band_sheet(workbook: Workbook, rows: list[dict]) -> None:
     if example:
         sheet["A2"] = example
         sheet["A2"].font = Font(italic=True)
-    _write_dict_table(sheet, rows, start_row=4)
+    _write_dict_table(sheet, _display_rows(rows, labels), start_row=4)
 
 
 def _score_band_worked_example(rows: list[dict]) -> str:
@@ -225,6 +232,25 @@ def _write_dict_table(sheet, rows: list[dict], *, start_row: int = 1) -> None:
         for col_index, header in enumerate(headers, start=1):
             sheet.cell(row=row_index, column=col_index, value=_cell(row.get(header)))
     _style_header(sheet, row=start_row)
+
+
+def _display_rows(rows: list[dict] | None, labels: dict | None) -> list[dict] | None:
+    """Rows as the workbook shows them: producer-declared code keys and code values
+    replaced by their business labels. Without labels the rows are returned as is."""
+    if not labels or rows is None:
+        return rows
+    key_labels = labels.get("keys") or {}
+    value_labels = labels.get("values") or {}
+    shown = []
+    for row in rows:
+        out = {}
+        for key, value in row.items():
+            mapping = value_labels.get(key)
+            if isinstance(mapping, dict) and isinstance(value, str):
+                value = mapping.get(value, value)
+            out[key_labels.get(key, key)] = value
+        shown.append(out)
+    return shown
 
 
 def _dict_rows(rows: list[dict]) -> list[tuple]:

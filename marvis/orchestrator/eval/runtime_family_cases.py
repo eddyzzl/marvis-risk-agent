@@ -162,14 +162,17 @@ def workflow_cases(materials: dict) -> tuple[list[dict], dict]:
         "normal",
         task={"target_col": "bad", "time_col": "cohort"},
         source="Public synthetic two-cohort panel, all rows in scope; bad explicitly means incremental new bads at each MOB, never a cumulative snapshot",
+        # The table is attached before the first turn, so the intake goes
+        # straight to its label question (当期新增 / 截至当期状态); the second
+        # turn answers it and the analysis runs once.
         actions=[
             {
                 "kind": "message",
-                "content": "做标准 Vintage，bad 是 incremental，不是 snapshot。",
+                "content": "做标准 Vintage，覆盖全部 cohort 和 MOB。",
             },
             {
                 "kind": "message",
-                "content": "材料已上传，覆盖全部 cohort 和 MOB；bad 是 incremental 当期新增，不是 snapshot。",
+                "content": "bad 是 incremental 当期新增，不是 snapshot。",
             },
         ],
         result="done",
@@ -306,14 +309,10 @@ def normal_modeling_cases(materials: dict) -> tuple[list[dict], dict]:
                 "content": "采用平台展示的训练集特征筛选设置并保留筛选记录，继续精选特征。",
             },
             {
+                # D-4: confirming 「配置调参」 starts tuning; 「调参」 has no second gate.
                 "kind": "approve_step",
                 "tool": "modeling.configure_tuning",
-                "content": "确认仅逻辑回归 lr、1 轮调参，不扩大搜索或改变训练口径。",
-            },
-            {
-                "kind": "approve_step",
-                "tool": "modeling.tune_hyperparameters",
-                "content": "确认当前已展示的特征和单轮调参配置，执行真实训练。",
+                "content": "确认调参配置并开始调参：仅逻辑回归 lr、1 轮，使用当前已展示的特征，不扩大搜索或改变训练口径。",
             },
             {
                 "kind": "select_recommended_experiment",

@@ -136,9 +136,11 @@ def normalize_algorithm(value: str | None, *, allow_empty: bool = False) -> str:
     )
 
 
-PENDING_MODEL_TRAINING_DESCRIPTION = (
-    "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
-)
+PENDING_MODEL_TRAINING_DESCRIPTION = "待确认模型算法后自动生成模型训练说明。"
+# Earlier placeholder still stored in existing tasks' report fields.
+_LEGACY_PENDING_MODEL_TRAINING_DESCRIPTIONS = frozenset({
+    "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。",
+})
 
 MODEL_TRAINING_OVERVIEWS: dict[str, str] = {
     "xgb": (
@@ -217,8 +219,9 @@ def model_training_report_text(
 
 
 def is_pending_model_training_description(value: str | None) -> bool:
-    return not str(value or "").strip() or (
-        str(value).strip() == PENDING_MODEL_TRAINING_DESCRIPTION
+    text = str(value or "").strip()
+    return not text or text == PENDING_MODEL_TRAINING_DESCRIPTION or (
+        text in _LEGACY_PENDING_MODEL_TRAINING_DESCRIPTIONS
     )
 
 

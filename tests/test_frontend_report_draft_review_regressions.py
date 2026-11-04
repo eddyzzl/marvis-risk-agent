@@ -71,7 +71,7 @@ import fs from 'node:fs';
 import { createTaskActivityOwner } from './marvis/static/js/task-activity.js';
 import { createTaskSession } from './marvis/static/js/task-session.js';
 import { createReportDraftState } from './marvis/static/js/report-draft-state.js';
-import { latestPendingReportDraftMessageId, hasReportDraftValues, reportDraftTableHtml } from './marvis/static/js/report-draft-table.js';
+import { latestPendingReportDraftMessageId, hasReportDraftValues, reportDraftCardHtml, reportDraftPreviewHtml } from './marvis/static/js/report-draft-table.js';
 const app = fs.readFileSync('./marvis/static/app.js', 'utf8');
 const values = (text) => ({ 'TEXT:final_validation_conclusion': text });
 const message = (task, revision=0) => ({ task_id:task, id:`draft-${task}`,role:'assistant',stage:'word_conclusion_draft',metadata:{report_revision:0,draft_edit_revision:revision,draft_values:values('server')}});
@@ -94,15 +94,17 @@ function setup(api) {
   }, querySelectorAll(selector) {return selector === '[data-report-draft-key]' ? fields : [];}};
   const activity=createTaskActivityOwner();
   const taskSession=createTaskSession(); taskSession.selectTask({id:'a'});
+  // Batch 6a: the card already shows task a and the layer is closed.
+  taskSession.panels.reportDraft.cardTaskId='a';
   const taskRequests=taskSession.requests;
   const context = {taskSession,taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTask:()=>({task_type:'validation',model_name:'A'}),selectedTaskIsAgentMode:()=>true,$:()=>panel,
     workbenchTaskId:()=> 'a',latestPendingReportDraftMessageId,hasReportDraftValues,
-    renderedReportDraftSignature:'',escapeHtml:(x)=>x,reportDraftTableHtml,reportDraftFeedbackHtml:()=>'',
-    activeValidationViewTaskId:'a',activeValidationView:'report',validationViewState:new Map(),selectValidationView:()=>{},
-    pendingTaskContentLoadTaskId:null,setBusy:()=>{},api,renderAgentConversation:()=>{},pollAgentMessagesUntilSettled:async()=>{},
+    escapeHtml:(x)=>x,reportDraftCardHtml,reportDraftPreviewHtml,reportDraftFeedbackHtml:()=>'',
+    setReportDraftExpanded:()=>{},refreshReportCardPreviews:()=>{},
+    setBusy:()=>{},api,renderAgentConversation:()=>{},pollAgentMessagesUntilSettled:async()=>{},
     refreshTasks:async()=>{},setActionStatus:()=>{},loadAgentMessages:async()=>{}};
   taskSession.replaceMessages(taskRequests.capture(), [message('a')]);
-  context.updateReportDraftSaveStatus = extract(context, 'updateReportDraftSaveStatus', 'rememberValidationView');
+  context.updateReportDraftSaveStatus = extract(context, 'updateReportDraftSaveStatus', 'setReportDraftExpanded');
   const state = createReportDraftState({delay:100000,api,onChange:context.updateReportDraftSaveStatus});
   context.reportDraftState = state;
   return {context,state,fields,status,confirm,panel};
@@ -183,7 +185,7 @@ const pendingBatch=confirmBatch({parentTaskId:'parent'});
 while (!acceptBatch) await Promise.resolve();
 batch.state.receive('b',message('b'));
 assert.equal(batch.state.get('b').confirming,true);
-assert.match(reportDraftTableHtml(values('B'),{editable:true,state:batch.state.get('b')}),/readonly/);
+assert.match(reportDraftCardHtml(values('B'),{editable:true,state:batch.state.get('b')}),/readonly/);
 batch.state.edit('b',values('late B'));
 assert.equal(batch.state.payload('b').text_values['TEXT:final_validation_conclusion'],'server');
 assert.equal(sent.overrides.a.text_values['TEXT:final_validation_conclusion'],'batch A');

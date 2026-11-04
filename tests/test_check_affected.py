@@ -530,7 +530,7 @@ def test_ci_keeps_manual_full_runs_independent_and_aggregates_every_gate():
     assert (
         "needs:\n"
         "      [quality, fast_tests, full_checks, strategy_smoke, "
-        "browser_smoke, pmml_runtime, security]"
+        "browser_smoke, pmml_runtime, security, macos_native_isolation]"
         in checks_job
     )
     for result in (
@@ -541,6 +541,7 @@ def test_ci_keeps_manual_full_runs_independent_and_aggregates_every_gate():
         "BROWSER_SMOKE_RESULT",
         "PMML_RUNTIME_RESULT",
         "SECURITY_RESULT",
+        "MACOS_NATIVE_ISOLATION_RESULT",
     ):
         assert result in checks_job
 
@@ -580,6 +581,8 @@ def _ci_checks_script() -> str:
         ("push", {"BROWSER_SMOKE_RESULT": "failure"}, 1),
         ("push", {"PMML_RUNTIME_RESULT": "failure"}, 1),
         ("push", {"SECURITY_RESULT": "failure"}, 1),
+        ("push", {"MACOS_NATIVE_ISOLATION_RESULT": "failure"}, 1),
+        ("push", {"MACOS_NATIVE_ISOLATION_RESULT": "skipped"}, 1),
         ("push", {"FULL_CHECKS_RESULT": "success"}, 1),
         (
             "workflow_dispatch",
@@ -610,6 +613,7 @@ def test_ci_checks_script_enforces_event_specific_results(
         "BROWSER_SMOKE_RESULT": "success",
         "PMML_RUNTIME_RESULT": "success",
         "SECURITY_RESULT": "success",
+        "MACOS_NATIVE_ISOLATION_RESULT": "success",
         **overrides,
     }
 

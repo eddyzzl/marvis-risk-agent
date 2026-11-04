@@ -7,7 +7,7 @@ import re
 import socket
 from urllib.parse import urljoin, urlsplit
 
-from marvis.drafts.errors import FetchError, OfflineError
+from marvis.drafts.errors import FetchError, OfflineError, OutboundQueryError
 
 
 DEFAULT_PROBE_URL = "https://example.com"
@@ -32,7 +32,30 @@ def network_available() -> bool:
     return int(getattr(response, "status_code", 599)) < 500
 
 
+def outbound_search_query(query) -> str:
+    """Apply the shared outbound content rules to a query before any request.
+
+    The query leaves this machine, so it passes the same boundary as other
+    outbound user text (credentials, local paths, URLs, personal identifiers,
+    records, source bodies). A refusal happens before the connectivity probe:
+    nothing at all is sent, and the matched value is never echoed.
+    """
+    from marvis.llm_outbound import OutboundContextError
+    from marvis.llm_outbound_instructions import user_instruction
+
+    try:
+        return str(user_instruction(query))
+    except OutboundContextError as exc:
+        reason = re.search(r"（([a-z_]+)）", str(exc))
+        detail = f"（{reason.group(1)}）" if reason else ""
+        raise OutboundQueryError(
+            f"搜索词含禁止外发内容{detail}，未发送任何网络请求；"
+            "请移除凭据、本地路径、链接、客户明细或文件正文后重新搜索。"
+        ) from None
+
+
 def web_search(query: str, *, max_results: int = 5) -> list[dict]:
+    approved_query = outbound_search_query(query)
     if not network_available():
         raise OfflineError(OFFLINE_GUIDANCE)
     client = _httpx()
@@ -40,7 +63,7 @@ def web_search(query: str, *, max_results: int = 5) -> list[dict]:
         raise OfflineError("httpx 未安装；请改用外部产出工具后通过插件上传导入。")
     response = client.get(
         _search_endpoint(),
-        params={"q": query, "n": int(max_results)},
+        params={"q": approved_query, "n": int(max_results)},
         timeout=15,
     )
     if int(getattr(response, "status_code", 200)) >= 400:
@@ -305,4 +328,4 @@ def _httpx():
     return httpx
 
 
-__all__ = ["fetch_url", "network_available", "web_search"]
+__all__ = ["fetch_url", "network_available", "outbound_search_query", "web_search"]

@@ -4,16 +4,59 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import asdict
 from marvis.llm_outbound_gate_context import authorization_gate
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO
 from marvis.agent.plan_driver import DriverError
 from marvis.agent.plan_driver import is_confirm
+from marvis.agent.quick_replies import quick_reply
+from marvis.agent.quick_replies import with_quick_replies
 from marvis.agent.semantic_intent import INTENT_STRATEGY_SAMPLE_BINDING
 from marvis.agent.strategy_request_compiler import CompiledStrategyRequestDraft
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.strategy_request_compiler import StrategyRequestDraft
 from marvis.agent.strategy_request_compiler import compile_strategy_request
+from marvis.agent.strategy_request_compiler.development import (
+    development_slot_summary,
+)
+from marvis.agent.strategy_request_compiler.development import (
+    is_strategy_development_request,
+)
+from marvis.agent.strategy_request_compiler.development import (
+    merge_development_slots,
+)
+from marvis.agent.strategy_request_compiler.development import (
+    missing_development_slots,
+)
+from marvis.agent.strategy_request_compiler.development import (
+    parse_development_slots,
+)
+from marvis.agent.strategy_request_compiler.development import utterance_cancels
+from marvis.agent.strategy_request_compiler.development import (
+    utterance_is_conditional,
+)
+from marvis.agent.strategy_request_compiler.development import (
+    utterance_is_question,
+)
+from marvis.agent.strategy_request_compiler.development import utterance_starts
+from marvis.agent.strategy_request_compiler.development import (
+    utterance_targets_other_strategy_operation,
+)
+from marvis.agent.strategy_request_compiler.development import (
+    utterance_withholds,
+)
+from marvis.agent.strategy_request_compiler.core import ground_sample_design_command
+from marvis.agent.strategy_request_compiler.development import (
+    missing_sample_design_answer,
+    parse_sample_design_answer,
+    propose_sample_design,
+    sample_design_blockers,
+    sample_design_command,
+    sample_design_maturity_gap,
+    sample_design_profile_columns,
+    sample_design_proposal_lines,
+)
 from marvis.agent.strategy_request_compiler import (
     utterance_targets_candidate_monthly_stability,
 )
@@ -938,6 +981,24 @@ def _maybe_handle_strategy_request_turn(
         llm=runtime.llm_client,
     )
     if compilation.draft is None:
+        if is_strategy_development_request(text):
+            # A development request needs only business slots; read them from
+            # the user's own words and the task contract instead of looping on
+            # a compiler clarification the user cannot answer precisely.
+            return _continue_strategy_development(
+                runtime,
+                repo,
+                task,
+                request_text=text,
+                slots=merge_development_slots(
+                    _task_contract_development_slots(task),
+                    parse_development_slots(text),
+                ),
+                compiled=None,
+                source_message=source_message,
+                preview=preview,
+                preview_error=preview_error,
+            )
         return responses_lane._strategy_request_clarification_response(
             repo,
             task,
@@ -976,6 +1037,52 @@ def _maybe_handle_strategy_request_turn(
                 fields=("field_bindings.time_field",),
             )
     preflight = _strategy_request_preflight(runtime, task, draft)
+    if (
+        preflight is not None
+        and preflight[0] in _STRATEGY_DEVELOPMENT_GAP_CODES
+        and _is_approval_development_draft(draft)
+    ):
+        return _continue_strategy_development(
+            runtime,
+            repo,
+            task,
+            request_text=text,
+            slots=merge_development_slots(
+                _task_contract_development_slots(task),
+                _draft_development_slots(draft),
+                parse_development_slots(text),
+            ),
+            compiled=draft,
+            source_message=source_message,
+            preview=preview,
+            preview_error=preview_error,
+        )
+    return _run_preflighted_strategy_draft(
+        runtime,
+        repo,
+        task,
+        draft,
+        preflight=preflight,
+        preview=preview,
+        preview_error=preview_error,
+        source_message=source_message,
+        request_text=text,
+    )
+
+
+def _run_preflighted_strategy_draft(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    draft: CompiledStrategyRequestDraft,
+    *,
+    preflight: tuple[str, str] | None,
+    preview,
+    preview_error: str | None,
+    source_message: Mapping | None,
+    request_text: str = "",
+    drop_nan_labels: bool = False,
+) -> dict:
     if preflight is not None:
         code, message = preflight
         return responses_lane._strategy_request_clarification_response(
@@ -1001,6 +1108,12 @@ def _maybe_handle_strategy_request_turn(
             code="strategy_target_context_required",
             message="当前策略操作需要明确的二元目标列，请先在任务中指定 target_col。",
         )
+    if _is_approval_development_draft(draft) and _development_sample_design_missing(
+        runtime, task
+    ):
+        return _propose_development_sample_design(
+            runtime, repo, task, draft=draft, request_text=request_text
+        )
 
     return _prepare_and_run_validated_strategy_request(
         runtime,
@@ -1009,7 +1122,783 @@ def _maybe_handle_strategy_request_turn(
         draft,
         preview=preview,
         auto_start=True,
+        drop_nan_labels=drop_nan_labels,
         source_message=source_message,
+        request_text=request_text,
+    )
+
+
+# Approval/reject development needs four business facts.  When the compiler
+# cannot settle them, the Agent asks for the missing ones in business Chinese,
+# keeps the answers in this metadata key, and resumes the same authorized
+# request when the user answers (dispatch routes the answer back here).
+_STRATEGY_DEVELOPMENT_CLARIFICATION_KEY = "strategy_development_clarification"
+_STRATEGY_DEVELOPMENT_GAP_CODES = frozenset(
+    {
+        "strategy_objective_required",
+        "strategy_constraint_required",
+        "strategy_profit_contract_required",
+    }
+)
+_DEVELOPMENT_SLOT_QUESTIONS = {
+    "strategy_type": (
+        "这套策略是审批（准入）策略，还是拒绝策略？审批策略决定哪些申请可以通过；"
+        "拒绝策略是在现有流程上增加拒绝规则，把高风险客户挡在外面。",
+        (quick_reply("审批（准入）策略", "审批策略"), quick_reply("拒绝策略")),
+    ),
+    "objective": (
+        "在约束范围内，你希望优先尽量提高通过率，还是尽量提高收益？",
+        (quick_reply("尽量提高通过率"), quick_reply("尽量提高收益")),
+    ),
+    "constraint": (
+        "还需要一条经营约束：通过客群的坏账率上限，或通过率下限（至少一个），"
+        "例如“坏账不超过 5%”或“通过率不低于 60%”。这个数平台不会替你填。",
+        (),
+    ),
+    "baseline": (
+        "要和哪一套现有策略对比？当前任务里如果还没有已保存的策略，就从零开发。",
+        (quick_reply("没有基线，从零开发"),),
+    ),
+    "profit": (
+        "以收益为目标还需要收益口径：EAD 和 PD 所在的列，以及年利率、资金成本、"
+        "损失率（LGD）、单笔运营成本和期限。可以在创建任务的策略口径里补齐，"
+        "或改为在约束内尽量提高通过率。",
+        (quick_reply("改为尽量提高通过率", "尽量提高通过率"),),
+    ),
+    "start": (
+        "准备好了就点「开始策略开发」。",
+        (quick_reply("开始策略开发"),),
+    ),
+}
+_DEVELOPMENT_SLOT_EXPLANATION = (
+    "审批（准入）策略：在通过率、坏账率约束下决定哪些申请通过；拒绝策略：在现有流程上"
+    "增加拒绝规则，把高风险客户挡掉。目标上，“尽量提高通过率”是在坏账上限内让更多人"
+    "通过；“尽量提高收益”还需要 EAD、PD、利率和成本等收益口径。"
+)
+
+
+def _is_approval_development_draft(draft: CompiledStrategyRequestDraft) -> bool:
+    return (
+        isinstance(draft, StrategyRequestDraft)
+        and draft.operation == "develop"
+        and draft.strategy_type in {"approval", "reject"}
+        and draft.strategy_spec is None
+        and draft.candidate_design is None
+    )
+
+
+def _draft_development_slots(draft: StrategyRequestDraft) -> dict[str, object]:
+    slots: dict[str, object] = {"strategy_type": draft.strategy_type}
+    for name in ("objective", "max_bad_rate", "min_approval_rate"):
+        value = getattr(draft, name)
+        if value is not None:
+            slots[name] = value
+    if draft.baseline_strategy_id:
+        slots["baseline_strategy_id"] = draft.baseline_strategy_id
+    return slots
+
+
+def _task_contract_development_slots(task: TaskRecord) -> dict[str, object]:
+    """Slots the user already fixed in the task's governed strategy contract.
+
+    ``strategy_type`` defaults to approval in the stored dataclass, so it is
+    only trusted together with an explicitly chosen objective (the create
+    dialog's full-development form).
+    """
+
+    contract = getattr(task, "strategy_input", None)
+    if contract is None:
+        return {}
+    slots: dict[str, object] = {}
+    objective = str(getattr(contract, "objective", "") or "")
+    if objective in {"max_approval", "max_profit"}:
+        slots["objective"] = objective
+        strategy_type = str(getattr(contract, "strategy_type", "") or "")
+        if strategy_type in {"approval", "reject"}:
+            slots["strategy_type"] = strategy_type
+    for name in ("max_bad_rate", "min_approval_rate"):
+        value = getattr(contract, name, None)
+        if value is not None:
+            slots[name] = float(value)
+    return slots
+
+
+def _latest_strategy_development_clarification(
+    conversation: Sequence[Mapping],
+) -> dict | None:
+    """The pending question, only while it is the Agent's latest message."""
+
+    for message in reversed(conversation):
+        if message.get("role") != "assistant":
+            continue
+        state = (message.get("metadata") or {}).get(
+            _STRATEGY_DEVELOPMENT_CLARIFICATION_KEY
+        )
+        return dict(state) if isinstance(state, dict) else None
+    return None
+
+
+def _continue_strategy_development(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    request_text: str,
+    slots: Mapping[str, object],
+    compiled: StrategyRequestDraft | None,
+    source_message: Mapping | None,
+    preview=None,
+    preview_error: str | None = None,
+    preview_loaded: bool = True,
+    drop_nan_labels: bool = False,
+) -> dict:
+    """Start development when every business slot is known, else ask for the rest."""
+
+    slots = dict(slots)
+    profit = None
+    if compiled is not None and compiled.profit is not None:
+        profit = dict(compiled.profit)
+    elif getattr(getattr(task, "strategy_input", None), "profit", None) is not None:
+        profit = asdict(task.strategy_input.profit)
+    missing = missing_development_slots(slots)
+    if slots.get("objective") == "max_profit" and profit is None:
+        missing.append("profit")
+    if missing:
+        return _ask_strategy_development_slots(
+            repo, task, request_text=request_text, slots=slots, missing=missing
+        )
+    draft = StrategyRequestDraft(
+        operation="develop",
+        strategy_type=str(slots["strategy_type"]),
+        objective=str(slots["objective"]),
+        max_bad_rate=slots.get("max_bad_rate"),
+        min_approval_rate=slots.get("min_approval_rate"),
+        baseline_strategy_id=(
+            None
+            if slots.get("baseline") == "none"
+            else (str(slots.get("baseline_strategy_id") or "") or None)
+        ),
+        profit=profit if slots["objective"] == "max_profit" else None,
+    )
+    if not preview_loaded:
+        try:
+            preview = strategy_evidence_lane._strategy_dataset_preview(runtime, task)
+        except StrategySetupError as exc:
+            preview_error = str(exc)
+    return _run_preflighted_strategy_draft(
+        runtime,
+        repo,
+        task,
+        draft,
+        preflight=_strategy_request_preflight(runtime, task, draft),
+        preview=preview,
+        preview_error=preview_error,
+        source_message=source_message,
+        request_text=request_text,
+        drop_nan_labels=drop_nan_labels,
+    )
+
+
+def _ask_strategy_development_slots(
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    request_text: str,
+    slots: Mapping[str, object],
+    missing: Sequence[str],
+    preface: str | None = None,
+) -> dict:
+    known = development_slot_summary(slots)
+    question, replies = _DEVELOPMENT_SLOT_QUESTIONS[missing[0]]
+    later = [
+        {
+            "strategy_type": "策略类型",
+            "objective": "优化目标",
+            "constraint": "坏账率上限或通过率下限",
+            "baseline": "是否有基线策略",
+            "profit": "收益口径",
+            "start": "是否开始",
+        }[item]
+        for item in missing[1:]
+    ]
+    parts = [preface] if preface else []
+    if known:
+        parts.append("已记下：" + "；".join(known) + "。")
+    parts.append(question)
+    if later:
+        parts.append("之后还需要确认：" + "、".join(later) + "。")
+    parts.append("还没有创建计划或执行工具。")
+    state = {
+        "slots": {key: value for key, value in slots.items() if value is not None},
+        "missing": list(missing),
+        "request_text": str(request_text or "")[:2000],
+    }
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content="".join(parts),
+        metadata=with_quick_replies(
+            {
+                "intent": "strategy_request",
+                "kind": "clarification",
+                "code": "strategy_development_inputs_required",
+                "fields": list(missing),
+                _STRATEGY_DEVELOPMENT_CLARIFICATION_KEY: state,
+            },
+            *replies,
+        ),
+    )
+    return {
+        "task_id": task.id,
+        "status": "clarification_required",
+        "code": "strategy_development_inputs_required",
+        "fields": list(missing),
+        "messages": repo.list_agent_messages(task.id),
+    }
+
+
+def _maybe_handle_strategy_development_answer(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    text: str,
+    conversation: Sequence[Mapping],
+) -> dict | None:
+    """Route a reply to the Agent's own development question back to it.
+
+    The original request was already authorized to reach the strategy
+    compiler; an answer only supplies its business slots.  Questions,
+    conditions and hold-backs never start the plan, and a reply that carries
+    no slot at all falls through to normal routing.
+    """
+
+    if task.task_type != TASK_TYPE_STRATEGY:
+        return None
+    state = _latest_strategy_development_clarification(conversation)
+    if state is None:
+        return None
+    if (
+        shared_lane._active_plan(runtime.plan_repo, task.id) is not None
+        or shared_lane.latest_open_gate(list(conversation)) is not None
+    ):
+        return None
+    raw = str(text or "").strip()
+    if raw and "sample_design" in (state.get("missing") or []):
+        return _answer_development_sample_design(
+            runtime, repo, task, raw=raw, state=state
+        )
+    if not raw or utterance_targets_other_strategy_operation(raw):
+        # A different strategy operation is a new request for normal routing.
+        return None
+    prior = merge_development_slots(state.get("slots") or {})
+    missing = [str(item) for item in state.get("missing") or []] or (
+        missing_development_slots(prior) or ["strategy_type"]
+    )
+    request_text = str(state.get("request_text") or "")
+    if utterance_cancels(raw):
+        return _cancel_strategy_development(repo, task, raw)
+    answer = parse_development_slots(raw)
+    starts = utterance_starts(raw)
+    if not answer and not starts and not utterance_is_question(raw):
+        return None
+    source_message = repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=raw,
+        metadata={"intent": "strategy_request", "request_source": "agent_nl"},
+    )
+    if utterance_is_question(raw):
+        return _ask_strategy_development_slots(
+            repo,
+            task,
+            request_text=request_text,
+            slots=prior,
+            missing=missing,
+            preface=_DEVELOPMENT_SLOT_EXPLANATION,
+        )
+    slots = merge_development_slots(prior, answer)
+    if utterance_is_conditional(raw) or utterance_withholds(raw):
+        return _ask_strategy_development_slots(
+            repo,
+            task,
+            request_text=request_text,
+            slots=slots,
+            missing=missing_development_slots(slots) or ["start"],
+            preface="好的，先不开始。",
+        )
+    return _continue_strategy_development(
+        runtime,
+        repo,
+        task,
+        request_text=request_text,
+        slots=slots,
+        compiled=None,
+        source_message=source_message,
+        preview_loaded=False,
+    )
+
+
+def _cancel_strategy_development(repo: TaskRepository, task: TaskRecord, raw: str) -> dict:
+    repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=raw,
+        metadata={"intent": "strategy_request_cancel"},
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content="好的，先不开始策略开发，没有创建计划或执行工具。需要时直接告诉我。",
+        metadata={"intent": "strategy_request_cancelled"},
+    )
+    return responses_lane.join_turn_response(repo, task.id)
+
+
+# Development binds a governed, mature sample design.  When the active sample
+# has none, the Agent proposes one read from the sample itself (eval S8
+# follow-up) instead of surfacing the raw prerequisite error, keeps the already
+# authorized development request in the same metadata key, and asks only for
+# the facts data cannot show.  A complete answer fixes the design through the
+# normal sample-design path and then resumes the development.
+_SAMPLE_DESIGN_PROPOSAL_CODE = "strategy_development_sample_design_required"
+_SAMPLE_DESIGN_EXPLANATION = (
+    "表现期：从申请开始观察多久来判定好坏，例如申请后 90 天内出现逾期 30 天以上算坏。"
+    "标签统计到哪一天：这份数据里的好坏标签是截至哪一天统计的。"
+    "标签已成熟：每笔样本从申请到这一天都已经满一个表现期；没满的样本标签还会变，"
+    "只能做探索分析。"
+)
+_SAMPLE_DESIGN_REPLY_HINT = (
+    "直接回复，例如：标签已成熟，表现期 90 天，标签统计到 2026-06-30"
+    "（换成你们的实际口径）。"
+)
+
+
+def _development_sample_design_missing(
+    runtime: contracts_lane.DriverTurnRuntime, task: TaskRecord
+) -> bool:
+    """True only when no sample design exists for either missing-label policy.
+
+    Any other sample-design problem (an unusable newer design, a policy
+    mismatch, an unreadable registry) keeps its own existing error path.
+    """
+
+    try:
+        context = strategy_evidence_lane._strategy_dataset_context(
+            runtime, task, require_target=True
+        )
+    except StrategySetupError:
+        return False
+    for drop_nan_labels in (False, True):
+        try:
+            strategy_sample_lane._latest_matching_strategy_sample_design_ref(
+                runtime,
+                task,
+                context=context,
+                drop_nan_labels=drop_nan_labels,
+                allow_native_risk_development=True,
+            )
+        except strategy_contracts_lane._StrategySampleDesignRequiredError:
+            continue
+        except StrategySetupError:
+            return False
+        return False
+    return True
+
+
+def _read_development_sample_design(
+    runtime: contracts_lane.DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    request_text: str,
+) -> dict:
+    """Profile the confirmed active sample into a sample-design proposal."""
+
+    strategy_sample_lane._strategy_sample_design_dataset_preview(runtime, task)
+    context = strategy_sample_lane._strategy_sample_design_dataset_context(
+        runtime, task
+    )
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
+    try:
+        dataset = registry.get(context.dataset_id)
+        roles = dict(
+            DataWorkspaceRepository(runtime.settings.db_path)
+            .get_or_default(task.id)
+            .semantic_mapping.field_roles
+        )
+        columns = sample_design_profile_columns(
+            {column.name: column.dtype for column in dataset.columns},
+            target_col=context.target_col,
+            field_roles=roles,
+        )
+        frame = backend.read_frame(
+            registry.resolve_path(context.dataset_id), columns=columns
+        )
+    except (DataWorkspaceDataError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "无法读取当前活动样本来整理样本口径，请先确认数据工作区里的样本后重试。"
+        ) from exc
+    proposal = propose_sample_design(
+        frame,
+        target_col=context.target_col,
+        columns=context.columns,
+        field_roles=roles,
+        request_text=request_text,
+    )
+    proposal["dataset_id"] = context.dataset_id
+    proposal["dataset_content_hash"] = context.dataset_content_hash
+    return proposal
+
+
+def _propose_development_sample_design(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    draft: StrategyRequestDraft,
+    request_text: str,
+) -> dict:
+    # Same contract persistence the development path performs before it binds
+    # the sample, so a later "开始策略开发" never re-asks a stated constraint.
+    task = repo.update_strategy_input(
+        task.id, strategy_evidence_lane._strategy_contract_from_draft(draft)
+    )
+    try:
+        proposal = _read_development_sample_design(
+            runtime, task, request_text=request_text
+        )
+    except StrategySetupError as exc:
+        return responses_lane._strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_workspace_required",
+            message=str(exc),
+        )
+    state = {
+        "slots": {
+            key: value
+            for key, value in _draft_development_slots(draft).items()
+            if value is not None
+        },
+        "missing": ["sample_design"],
+        "request_text": str(request_text or "")[:2000],
+        "sample_design": proposal,
+        "answer": {},
+    }
+    return _ask_development_sample_design(repo, task, state=state)
+
+
+def _ask_development_sample_design(
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    state: Mapping[str, object],
+    preface: str | None = None,
+) -> dict:
+    proposal = state["sample_design"]
+    answer = dict(state.get("answer") or {})
+    assert isinstance(proposal, Mapping)
+    blockers = sample_design_blockers(proposal)
+    lines = sample_design_proposal_lines(proposal)
+    parts = [preface] if preface else []
+    parts.append(
+        "开始策略开发前要先把样本口径定下来：平台用它划分开发、验证和时间外样本，"
+        "并核对标签能不能用于正式开发。我从当前样本读到：\n"
+        + "\n".join(f"{index}. {line}" for index, line in enumerate(lines, 1))
+    )
+    replies: tuple[dict[str, str], ...] = ()
+    hint = None
+    if blockers:
+        parts.append(
+            "\n这份样本现在还不能固化为正式开发样本：" + "；".join(blockers) + "。"
+            "换一份补齐这些信息的样本后点「开始策略开发」，我会重新读取。"
+        )
+        replies = (quick_reply("开始策略开发"),)
+    else:
+        missing = missing_sample_design_answer(proposal, answer)
+        if missing:
+            parts.append(
+                "\n数据里看不出来、需要你告诉我的：" + "；".join(missing) + "。"
+                "你回复这几项，就视为确认以上口径；哪一项读得不对，请直接按完整口径描述"
+                "样本设计。标签没成熟时只能做探索分析，不能用于正式策略开发。"
+            )
+            hint = _SAMPLE_DESIGN_REPLY_HINT
+        else:
+            parts.append(
+                "\n样本口径已经齐了，点「开始策略开发」就按以上口径固化样本并开始开发。"
+            )
+            replies = (quick_reply("开始策略开发"),)
+    noted = list(development_slot_summary(state.get("slots") or {}))
+    if answer.get("performance_window_days") is not None:
+        noted.append(f"表现期 {answer['performance_window_days']} 天")
+    if answer.get("cutoff_date") is not None:
+        noted.append(f"标签统计到 {answer['cutoff_date']}")
+    if answer.get("maturity") == "confirmed_matured":
+        noted.append("标签已成熟")
+    if answer.get("drop_nan_labels") is not None:
+        noted.append(
+            "空标签只从风险分母排除" if answer["drop_nan_labels"] else "保留空标签"
+        )
+    if noted:
+        parts.append(
+            "\n已记下：" + "；".join(noted) + "。样本口径确认后直接按这些条件开始策略开发，"
+            "不用再说一遍。"
+        )
+    parts.append("还没有创建计划或执行工具。")
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content="".join(parts),
+        metadata=with_quick_replies(
+            {
+                "intent": "strategy_request",
+                "kind": "clarification",
+                "code": _SAMPLE_DESIGN_PROPOSAL_CODE,
+                "fields": ["sample_design"],
+                _STRATEGY_DEVELOPMENT_CLARIFICATION_KEY: dict(state),
+            },
+            *replies,
+            hint=hint,
+        ),
+    )
+    return {
+        "task_id": task.id,
+        "status": "clarification_required",
+        "code": _SAMPLE_DESIGN_PROPOSAL_CODE,
+        "fields": ["sample_design"],
+        "messages": repo.list_agent_messages(task.id),
+    }
+
+
+def _answer_development_sample_design(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    raw: str,
+    state: Mapping[str, object],
+) -> dict | None:
+    """Fix the proposed sample design from a reply, then resume development.
+
+    Questions, conditions, hold-backs and unmatured labels never start a plan.
+    A reply that states no sample-design fact falls through to normal routing,
+    so a fully typed sample design or another request keeps its own path.
+    """
+
+    if utterance_cancels(raw):
+        return _cancel_strategy_development(repo, task, raw)
+    proposal = state.get("sample_design")
+    if not isinstance(proposal, Mapping):
+        return None
+    answer = parse_sample_design_answer(raw)
+    starts = utterance_starts(raw) or is_confirm(raw)
+    question = utterance_is_question(raw)
+    if not answer and not starts and not question:
+        return None
+    source_message = repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=raw,
+        metadata={"intent": "strategy_request", "request_source": "agent_nl"},
+    )
+    slots = merge_development_slots(state.get("slots") or {})
+    request_text = str(state.get("request_text") or "")
+    merged = {**dict(state.get("answer") or {}), **answer}
+    next_state = {**state, "answer": merged}
+    if question:
+        return _ask_development_sample_design(
+            repo, task, state=next_state, preface=_SAMPLE_DESIGN_EXPLANATION + "\n"
+        )
+    if starts and not _development_sample_design_missing(runtime, task):
+        # The sample design was fixed some other way meanwhile.
+        return _continue_strategy_development(
+            runtime,
+            repo,
+            task,
+            request_text=request_text,
+            slots=slots,
+            compiled=None,
+            source_message=source_message,
+            preview_loaded=False,
+        )
+    if sample_design_blockers(proposal):
+        try:
+            fresh = _read_development_sample_design(
+                runtime, task, request_text=request_text
+            )
+        except StrategySetupError as exc:
+            return responses_lane._strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_sample_design_workspace_required",
+                message=str(exc),
+            )
+        return _ask_development_sample_design(
+            repo,
+            task,
+            state={**next_state, "sample_design": fresh},
+            preface="我重新读取了当前样本。\n",
+        )
+    if merged.get("maturity") in {"not_matured", "unknown"}:
+        return _ask_development_sample_design(
+            repo,
+            task,
+            state=next_state,
+            preface=(
+                "标签还没成熟（或还不确定）时，这批样本只能做探索分析，不能用于正式"
+                "策略开发，所以先不开始。\n"
+            ),
+        )
+    if utterance_is_conditional(raw) or utterance_withholds(raw):
+        return _ask_development_sample_design(
+            repo, task, state=next_state, preface="好的，先不开始。\n"
+        )
+    if missing_sample_design_answer(proposal, merged):
+        return _ask_development_sample_design(repo, task, state=next_state)
+    gap = sample_design_maturity_gap(proposal, merged)
+    if gap is not None:
+        return _ask_development_sample_design(
+            repo, task, state=next_state, preface=gap + "\n"
+        )
+    return _run_development_sample_design(
+        runtime,
+        repo,
+        task,
+        state=next_state,
+        answer=merged,
+        source_message=source_message,
+    )
+
+
+def _run_development_sample_design(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    state: Mapping[str, object],
+    answer: Mapping[str, object],
+    source_message: Mapping | None,
+) -> dict:
+    proposal = state["sample_design"]
+    assert isinstance(proposal, Mapping)
+    try:
+        preview = strategy_sample_lane._strategy_sample_design_dataset_preview(
+            runtime, task
+        )
+        context = strategy_sample_lane._strategy_sample_design_dataset_context(
+            runtime, task
+        )
+    except StrategySetupError as exc:
+        return responses_lane._strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_workspace_required",
+            message=str(exc),
+        )
+    if (
+        context.dataset_id != proposal.get("dataset_id")
+        or context.dataset_content_hash != proposal.get("dataset_content_hash")
+    ):
+        try:
+            fresh = _read_development_sample_design(
+                runtime, task, request_text=str(state.get("request_text") or "")
+            )
+        except StrategySetupError as exc:
+            return responses_lane._strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_sample_design_workspace_required",
+                message=str(exc),
+            )
+        return _ask_development_sample_design(
+            repo,
+            task,
+            state={**state, "sample_design": fresh},
+            preface="当前样本已经换过，我按新样本重新整理了口径，请再确认一次。\n",
+        )
+    command, inputs = sample_design_command(proposal, answer)
+    compilation = ground_sample_design_command(
+        command,
+        inputs,
+        allowed_columns=strategy_evidence_lane._strategy_request_allowed_columns(
+            preview
+        ),
+        target_col=preview.target_col,
+    )
+    if compilation.draft is None:
+        return responses_lane._strategy_request_clarification_response(
+            repo,
+            task,
+            code=(
+                compilation.clarification_code
+                or "strategy_sample_design_v2_controls_not_grounded"
+            ),
+            message=compilation.clarification or "样本口径没有通过平台校验，本次没有创建计划。",
+            fields=compilation.clarification_fields,
+        )
+    draft = compilation.draft
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"好的，按以上口径固化样本设计（表现期 {answer['performance_window_days']} 天，"
+            f"标签统计到 {answer['cutoff_date']}，标签已成熟），完成后直接开始策略开发。"
+        ),
+        metadata={
+            "intent": "strategy_sample_design_confirmed",
+            "sample_design_command": command,
+        },
+    )
+    try:
+        strategy_sample_lane._confirm_manual_sample_design_time_semantics(
+            runtime, task, draft=draft, preview=preview
+        )
+        preview = strategy_sample_lane._strategy_sample_design_dataset_preview(
+            runtime, task
+        )
+    except StrategySetupError as exc:
+        return responses_lane._strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_time_semantics_invalid",
+            message=str(exc),
+            fields=("field_bindings.time_field",),
+        )
+    before = {plan.id for plan in runtime.plan_repo.list_plans_for_task(task.id)}
+    response = _run_preflighted_strategy_draft(
+        runtime,
+        repo,
+        task,
+        draft,
+        preflight=_strategy_request_preflight(runtime, task, draft),
+        preview=preview,
+        preview_error=None,
+        source_message=source_message,
+    )
+    created = [
+        plan
+        for plan in runtime.plan_repo.list_plans_for_task(task.id)
+        if plan.id not in before
+    ]
+    if not created or getattr(created[-1].status, "value", created[-1].status) != "done":
+        return response
+    return _continue_strategy_development(
+        runtime,
+        repo,
+        repo.get_task(task.id),
+        request_text=str(state.get("request_text") or ""),
+        slots=merge_development_slots(state.get("slots") or {}),
+        compiled=None,
+        source_message=source_message,
+        preview_loaded=False,
+        drop_nan_labels=bool(inputs["drop_nan_labels"]),
     )
 
 
@@ -1129,6 +2018,7 @@ def _prepare_and_run_validated_strategy_request(
     drop_nan_labels: bool = False,
     expected_pool_binding: Mapping | None = None,
     source_message: Mapping | None = None,
+    request_text: str = "",
 ) -> dict:
     """Bind current evidence, resolve the NaN policy, then instantiate once."""
 
@@ -1327,6 +2217,7 @@ def _prepare_and_run_validated_strategy_request(
             expected_pool_binding=expected_pool_binding,
             expected_impact_cube_sample_binding=(expected_impact_cube_sample_binding),
             source_message=source_message,
+            request_text=request_text,
         )
     except strategy_contracts_lane._StrategyV2EvidenceSetupError as exc:
         return responses_lane._strategy_request_clarification_response(
@@ -1371,6 +2262,7 @@ def _run_validated_strategy_request(
     expected_pool_binding: Mapping | None = None,
     expected_impact_cube_sample_binding: Mapping | None = None,
     source_message: Mapping | None = None,
+    request_text: str = "",
 ) -> dict:
     """Route one already-validated draft without another execution confirmation."""
 
@@ -1962,7 +2854,8 @@ def _run_validated_strategy_request(
             runtime,
             repo,
             task,
-            None,
+            # D-3: the request's own words may state the score direction.
+            request_text or None,
             forced_intent=STRATEGY_INTENT_FULL_DEVELOPMENT,
         )
     elif draft.operation == "mine_rules":
@@ -2009,7 +2902,8 @@ def _run_validated_strategy_request(
         slots=strategy_evidence_lane._strategy_slots_with_drop_nan(
             slots, drop_nan_labels
         ),
-        auto_start=auto_start,
+        # A direction the data contradicts waits at the plan's start gate.
+        auto_start=auto_start and "confirm_direction_conflict" not in slots,
         **start_kwargs,
     )
 
@@ -3065,17 +3959,19 @@ def _strategy_request_preflight(
         if draft.objective not in {"max_approval", "max_profit"}:
             return (
                 "strategy_objective_required",
-                "审批/拒绝策略开发需要明确 objective=max_approval 或 max_profit。",
+                "审批/拒绝策略开发还需要明确目标：在约束内尽量提高通过率，"
+                "还是尽量提高收益。",
             )
         if draft.max_bad_rate is None and draft.min_approval_rate is None:
             return (
                 "strategy_constraint_required",
-                "请至少说明最大坏账率或最低通过率，平台不会代填经营约束。",
+                "请至少说明通过客群坏账率上限或通过率下限，平台不会代填经营约束。",
             )
         if draft.objective == "max_profit" and draft.profit is None:
             return (
                 "strategy_profit_contract_required",
-                "利润目标需要完整 EAD/PD 列和利率、资金成本、LGD、单笔成本、期限口径。",
+                "以收益为目标还需要完整的收益口径：EAD 列、PD 列，以及年利率、"
+                "资金成本、损失率（LGD）、单笔运营成本和期限。",
             )
         return None
     if draft.operation == "mine_rules":

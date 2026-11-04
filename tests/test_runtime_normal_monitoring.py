@@ -43,7 +43,8 @@ def test_normal_monitoring_real_training_intake_gate_scoring_and_psi(tmp_path, m
     assert evidence["score_psi"] > 0.25 and evidence["runtime_entry"] == entry
     assert evidence["label_maturity_assurance"] == "unknown"
     assert evidence["business_acceptance"] == "not_established"
-    assert record["human_interventions"] == 10
+    # D-4: six modeling confirmations (one tuning gate), then upload/propose/confirm monitoring.
+    assert record["human_interventions"] == 9
     assert report["a_evidence_case_count"] == 0 and report["acceptance_claim"] == "not_established"
     assert calls and len(calls) == record["score"]["usage"]["transport_attempts"]
     assert record["execution"]["plans"][-1]["template_id"] == "monitoring_run"

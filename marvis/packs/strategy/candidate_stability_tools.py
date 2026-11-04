@@ -80,6 +80,8 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactNotFoundError,
     stable_task_artifact_id,
 )
+from marvis.data.file_identity import stable_file_stat as _stable_file_stat
+from marvis.packs.strategy.input_validation import expression_fields as _expression_fields
 
 
 TOOL_SCHEMA_VERSION = "strategy.measure-candidate-monthly-stability-tool.v1"
@@ -1669,16 +1671,6 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
     )
 
 
-def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-        int(value.st_nlink),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
 
 
 def _require_dataset_path(path: Path, *, root: Path) -> None:
@@ -1711,18 +1703,6 @@ def _require_dataset_path(path: Path, *, root: Path) -> None:
         ) from exc
 
 
-def _expression_fields(value: object) -> set[str]:
-    fields: set[str] = set()
-    if isinstance(value, Mapping):
-        field = value.get("field")
-        if isinstance(field, str):
-            fields.add(field)
-        for item in value.values():
-            fields.update(_expression_fields(item))
-    elif isinstance(value, list | tuple):
-        for item in value:
-            fields.update(_expression_fields(item))
-    return fields
 
 
 def _require_exact_fields(

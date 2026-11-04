@@ -1,0 +1,31 @@
+{
+  "schema": "marvis.performance-gate-profile.v1",
+  "status": "pending_user_freeze",
+  "approved_by": "pending",
+  "approved_on": "pending",
+  "note": "硬件、负载和 SLO 由用户冻结（V3 计划 §5 EXT04/设备行）。pending 期间只能跑本机基线，不判定性能达标；不要替用户填写数值。",
+  "hardware": {
+    "description": "pending",
+    "fingerprint_sha256": "pending"
+  },
+  "load": {
+    "data_rows": "pending",
+    "concurrent_users": "pending",
+    "sustained_seconds": "pending"
+  },
+  "slo": {
+    "cold_start": {"p95_seconds": "pending", "minimum_observations": "pending", "max_error_rate": "pending"},
+    "steady": {"p95_seconds": "pending", "minimum_observations": "pending", "max_error_rate": "pending"},
+    "concurrent": {"p95_seconds": "pending", "minimum_observations": "pending", "max_error_rate": "pending"},
+    "recovery": {"p95_seconds": "pending", "minimum_observations": "pending", "max_error_rate": "pending"}
+  },
+  "local_baseline": {
+    "cold_start_runs": 3,
+    "sustained_seconds": 20,
+    "concurrency": 8,
+    "requests_per_worker": 20,
+    "recovery_runs": 2,
+    "request_timeout_seconds": 10,
+    "startup_timeout_seconds": 120
+  }
+}

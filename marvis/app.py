@@ -32,6 +32,7 @@ from marvis.institution.sync_router import router as instance_sync_router
 from marvis.institution.http import prepare_request, request_context, identity_error_response
 from marvis.institution.store import IdentityError
 from marvis.modeling_holdout.router import router as blind_oot_router
+from marvis.time_facts_router import router as time_facts_router
 from marvis.modeling_holdout.contracts import HoldoutError
 from marvis.artifacts.recovery import reconcile_workspace_artifacts
 from marvis.branding import (
@@ -80,6 +81,7 @@ from marvis.orchestrator.validator import PlanValidator
 from marvis.operations.integration import build_operations_runtime
 from marvis.operations.router import router as operations_router
 from marvis.operations.scheduler import MonitoringExecutor
+from marvis.packs.modeling.split_preflight import builtin_preflight_checks
 from marvis.plugins.hooks import HookDispatcher
 from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -139,7 +141,9 @@ from marvis.routers.validation_contracts import router as validation_contracts_r
 from marvis.routers.validation_stages import router as validation_stages_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
+from marvis.task_environment import task_python_resolver
 from marvis.validation_batch_ingress import ValidationBatchIngressLimitMiddleware
+from marvis.ui_locale import UiLocaleMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -231,6 +235,29 @@ def _is_forwarded_request_from_trusted_proxy(request) -> bool:
         return False
     forwarded = request.headers.get("x-forwarded-for", "")
     return bool(forwarded.split(",")[0].strip())
+
+
+async def _is_notebook_sandbox_request(request) -> bool:
+    """True when the TCP peer is a MARVIS-sandboxed Notebook process (macOS).
+
+    Only real socket peers are inspected; in-process ASGI clients have no
+    socket. The process scan runs off the event loop.
+    """
+    if sys.platform != "darwin":
+        return False
+    client = request.scope.get("client")
+    server = request.scope.get("server")
+    if not client or not server or not isinstance(client[1], int) or not isinstance(server[1], int):
+        return False
+    try:
+        ipaddress.ip_address(str(client[0]))
+    except ValueError:
+        return False
+    import asyncio
+
+    from marvis.local_peer import notebook_sandbox_peer
+
+    return await asyncio.to_thread(notebook_sandbox_peer, client[1], server[1])
 
 
 def _remote_read_enabled() -> bool:
@@ -539,6 +566,14 @@ def create_app(
         pending_session_token = None
         local_token_authenticated = False
         request.state.local_principal = None
+        if is_local and not path.startswith("/static/") and await _is_notebook_sandbox_request(request):
+            # A loopback_only Notebook tree may open loopback sockets, but it
+            # must not borrow the local workbench's trust (LLM, web search,
+            # plugins would be an egress path around the network boundary).
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "仅本机网络模式的 Notebook 进程不能访问 MARVIS 本机 API。"},
+            )
         # GAP-5: on a shared host, "local" alone does not mean "the owning
         # user" -- any other logged-in user's process is also a loopback peer.
         # Keep both the credential-bearing bootstrap and every private read
@@ -673,12 +708,17 @@ def create_app(
                 response.headers["Cache-Control"] = "no-cache"
         return response
 
+    # D-10: outermost, so the request-scoped UI locale and reply language reach
+    # every endpoint, threadpool and BackgroundTasks job (marvis/ui_locale.py).
+    app.add_middleware(UiLocaleMiddleware)
+
     @app.exception_handler(HoldoutError)
     async def holdout_error_handler(request, exc):
         return JSONResponse(status_code=exc.status, content={'detail': {'code': exc.code}})
 
     app.include_router(api_router)
     app.include_router(blind_oot_router)
+    app.include_router(time_facts_router)
     app.include_router(agent_memory_router)
     app.include_router(llm_router)
     app.include_router(artifacts_router)
@@ -850,6 +890,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
         rss_memory_limit_mb=environment.rss_memory_limit_mb,
         governance=app.state.governance_repo,
         binding_resolver=governance_service,
+        task_python_resolver=task_python_resolver(settings.tasks_dir),
     )
     hook_dispatcher = HookDispatcher(plugin_registry, tool_runner, plugin_repo)
     hook_dispatcher.rebuild_index()
@@ -912,6 +953,11 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
                       business_criteria_loader=business_criteria_loader)
     reviewer = Reviewer(reviewer_llm_factory, plan_repository=plan_repo)
     harness_state = HarnessState(plan_repo)
+    # B-line extension: read-only admission checks run before a write-effect
+    # tool is dispatched (marvis/packs/modeling/split_preflight.py).
+    preflight_checks = builtin_preflight_checks(
+        db_path=settings.db_path, datasets_root=settings.datasets_dir
+    )
 
     def executor_factory(restricted_registry):
         restricted_runner = ToolRunner(
@@ -924,6 +970,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
             rss_memory_limit_mb=app.state.plugin_rss_memory_limit_mb,
             governance=app.state.governance_repo,
             binding_resolver=app.state.governance_service,
+            task_python_resolver=task_python_resolver(settings.tasks_dir),
         )
         return PlanExecutor(
             plan_repo,
@@ -933,6 +980,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
             app.state.hook_dispatcher,
             harness_state,
             authorizer=app.state.governance_service,
+            preflight_checks=preflight_checks,
         )
 
     def subagent_planner_factory(restricted_registry):
@@ -959,6 +1007,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
         harness_state,
         planner=planner,
         authorizer=app.state.governance_service,
+        preflight_checks=preflight_checks,
     )
     app.state.plan_repo = plan_repo
     app.state.plan_validator = plan_validator

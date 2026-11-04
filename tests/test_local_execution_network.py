@@ -460,3 +460,225 @@ session.close()
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     assert "Exception ignored in atexit callback" not in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS AF_UNIX enforcement")
+def test_loopback_mode_denies_af_unix_connect(tmp_path):
+    import tempfile
+
+    # AF_UNIX paths are limited to ~104 bytes; pytest tmp paths can exceed it.
+    directory = Path(tempfile.mkdtemp(prefix="mx-"))
+    path = directory / "s.sock"
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(path))
+        server.listen(1)
+        code = f'''
+import errno, socket
+with socket.socket(socket.AF_UNIX) as client:
+    try:
+        client.connect({str(path)!r})
+    except OSError as exc:
+        assert exc.errno in (errno.EPERM, errno.EACCES), exc
+        print("unix-denied")
+    else:
+        raise AssertionError("AF_UNIX connect was allowed")
+'''
+        result = subprocess.run(loopback_only_command([sys.executable, "-c", code]),
+                                capture_output=True, text=True, timeout=10)
+    shutil.rmtree(directory, ignore_errors=True)
+    assert result.returncode == 0, result.stderr
+    assert "unix-denied" in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS system resolver under the loopback policy")
+def test_loopback_mode_system_resolver_resolves_only_local_names():
+    code = '''
+import socket
+assert {item[4][0] for item in socket.getaddrinfo("localhost", 80)} & {"127.0.0.1", "::1"}
+try:
+    socket.getaddrinfo("example.com", 443)
+except socket.gaierror:
+    print("external-name-unresolved")
+else:
+    raise AssertionError("external name resolved inside the loopback policy")
+'''
+    result = subprocess.run(loopback_only_command([sys.executable, "-c", code]),
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert "external-name-unresolved" in result.stdout
+
+
+@pytest.fixture
+def live_marvis_api(tmp_path, monkeypatch):
+    """A real loopback MARVIS server, so the peer is an actual socket."""
+    import time
+    import urllib.request
+
+    import uvicorn
+
+    from marvis.app import create_app
+
+    monkeypatch.delenv("MARVIS_LOCAL_TOKEN", raising=False)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(create_app(tmp_path / "ws"), host="127.0.0.1",
+                                           port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(200):
+        try:
+            urllib.request.urlopen(base + "/api/health", timeout=2).read()
+            break
+        except OSError:
+            time.sleep(0.05)
+    yield base
+    server.should_exit = True
+    thread.join(10)
+
+
+_API_PROBE = '''
+import sys, urllib.error, urllib.request
+try:
+    urllib.request.urlopen(sys.argv[1] + "/api/tasks", timeout=10)
+except urllib.error.HTTPError as exc:
+    print("status", exc.code)
+else:
+    print("status", 200)
+'''
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS loopback Notebook boundary")
+def test_loopback_sandboxed_process_cannot_use_marvis_api_but_browser_and_cli_can(live_marvis_api):
+    import urllib.request
+
+    # A normal (unsandboxed) local client — browser or CLI tool — keeps working.
+    with urllib.request.urlopen(live_marvis_api + "/api/tasks", timeout=10) as response:
+        assert response.status == 200
+    index = urllib.request.urlopen(live_marvis_api + "/", timeout=10).read().decode()
+    assert "<html" in index.lower()
+    plain = subprocess.run([sys.executable, "-c", _API_PROBE, live_marvis_api],
+                           capture_output=True, text=True, timeout=20)
+    assert "status 200" in plain.stdout, plain.stderr
+
+    # The same request from inside the loopback policy (and a nested child) is refused.
+    sandboxed = subprocess.run(loopback_only_command([sys.executable, "-c", _API_PROBE, live_marvis_api]),
+                               capture_output=True, text=True, timeout=30)
+    assert "status 403" in sandboxed.stdout, sandboxed.stderr
+    nested = "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-c', sys.argv[1], sys.argv[2]]))"
+    child = subprocess.run(loopback_only_command([sys.executable, "-c", nested, _API_PROBE, live_marvis_api]),
+                           capture_output=True, text=True, timeout=30)
+    assert "status 403" in child.stdout, child.stderr
+    # Static assets carry no private state and stay reachable.
+    static = subprocess.run(loopback_only_command([sys.executable, "-c",
+        "import sys,urllib.request; print(urllib.request.urlopen(sys.argv[1] + '/static/app.js').status)",
+        live_marvis_api]), capture_output=True, text=True, timeout=30)
+    assert static.stdout.strip() == "200", static.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS real loopback Notebook kernel")
+@pytest.mark.parametrize("isolated", [False, True])
+def test_loopback_notebook_kernel_request_is_rejected_and_token_withheld(
+    tmp_path, live_marvis_api, monkeypatch, isolated,
+):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "TEST_ONLY_KERNEL_TOKEN")
+    code = (
+        "import os, urllib.error, urllib.request\n"
+        f"base = {live_marvis_api!r}\n"
+        "try:\n"
+        "    urllib.request.urlopen(base + '/api/tasks', timeout=10)\n"
+        "    status = 200\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    status = exc.code\n"
+        "print('api-status', status, 'token-visible', 'MARVIS_LOCAL_TOKEN' in os.environ)\n"
+    )
+    source = tmp_path / "api-probe.ipynb"
+    nbformat.write(nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell(code)]), source)
+    result = run_notebook(source, tmp_path / "executed.ipynb", tmp_path / "run.log",
+                          timeout=60, isolated=isolated, network_mode="loopback_only")
+    assert result.succeeded, (result.error_name, result.error_value)
+    executed = nbformat.read(tmp_path / "executed.ipynb", as_version=4)
+    text = "".join(item.get("text", "") for item in executed.cells[0].outputs)
+    assert "api-status 403 token-visible False" in text
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS loopback Notebook boundary")
+def test_copied_binary_in_fake_app_bundle_inside_the_sandbox_is_still_refused(live_marvis_api, tmp_path):
+    # Review B1: no executable path is trusted; the inherited sandbox decides.
+    code = f'''
+import os, shutil, subprocess, sys
+bundle = {str(tmp_path)!r} + "/Fake.app/Contents/MacOS"
+os.makedirs(bundle, exist_ok=True)
+copy = os.path.join(bundle, "py")
+shutil.copy2(os.path.realpath(sys.executable), copy)
+raise SystemExit(subprocess.call([copy, "-c", sys.argv[1], sys.argv[2]]))
+'''
+    result = subprocess.run(loopback_only_command([sys.executable, "-c", code, _API_PROBE, live_marvis_api]),
+                            capture_output=True, text=True, timeout=60)
+    assert "status 403" in result.stdout, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS loopback Notebook boundary")
+def test_orphaned_setsid_descendant_of_a_launch_is_still_refused(live_marvis_api):
+    code = '''
+import os, sys, time
+read, write = os.pipe()
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() == 0:
+        os.close(read)
+        import urllib.error, urllib.request
+        try:
+            urllib.request.urlopen(sys.argv[1] + "/api/tasks", timeout=10)
+            status = 200
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        os.write(write, str(status).encode())
+        os._exit(0)
+    os._exit(0)
+os.close(write)
+print("status", os.read(read, 8).decode())
+'''
+    result = subprocess.run(loopback_only_command([sys.executable, "-c", code, live_marvis_api]),
+                            capture_output=True, text=True, timeout=60)
+    assert "status 403" in result.stdout, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec")
+def test_sandboxed_client_not_launched_by_marvis_is_allowed(live_marvis_api):
+    # Review B2: a user's own sandboxed CLI (or an agent shell) is not a Notebook.
+    profile = '(version 1)\n(allow default)\n(deny network-outbound (remote ip "*:443"))\n'
+    result = subprocess.run(["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/curl", "-s", "-o", "/dev/null",
+                             "-w", "%{http_code}", live_marvis_api + "/api/tasks"],
+                            capture_output=True, text=True, timeout=30)
+    assert result.stdout.strip() == "200", result.stderr
+
+
+_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not Path(_CHROME).exists(), reason="macOS with Google Chrome")
+def test_real_browser_is_allowed_while_a_loopback_launch_is_alive(live_marvis_api, tmp_path):
+    # A live launch makes the API inspect peers; the browser must still pass.
+    holder = subprocess.Popen(loopback_only_command([sys.executable, "-c", "import time; time.sleep(60)"]))
+    try:
+        result = subprocess.run([_CHROME, "--headless=new", "--disable-gpu", f"--user-data-dir={tmp_path}",
+                                 "--dump-dom", live_marvis_api + "/api/tasks"],
+                                capture_output=True, text=True, timeout=90)
+    finally:
+        holder.kill()
+        holder.wait()
+    # The task list (an empty JSON array) renders; a refusal would show the 403 detail.
+    assert "<pre>[" in result.stdout, result.stderr[-500:]
+    assert "Notebook" not in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS loopback launch markers")
+def test_no_live_launch_means_no_peer_inspection(monkeypatch, tmp_path):
+    # Review B3: with no loopback launch alive the check does no process walk.
+    import marvis.local_peer as local_peer
+
+    monkeypatch.setenv("MARVIS_LOOPBACK_MARKER_DIR", str(tmp_path / "markers"))
+    monkeypatch.setattr("psutil.pids", lambda: pytest.fail("no process walk without a live launch"))
+    assert local_peer.notebook_sandbox_peer(50000, 8000) is False

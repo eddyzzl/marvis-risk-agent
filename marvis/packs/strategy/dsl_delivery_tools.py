@@ -64,6 +64,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactNotFoundError,
     stable_task_artifact_id,
 )
+from marvis.data.file_identity import stable_file_stat as _stable_file_stat
 
 
 DELIVERY_TOOL_SCHEMA_VERSION = "strategy.export-dsl-delivery-tool.v1"
@@ -1697,16 +1698,6 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
     )
 
 
-def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-        int(value.st_nlink),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
 
 
 def _delivery_contents(

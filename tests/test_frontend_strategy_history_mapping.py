@@ -56,3 +56,38 @@ def test_history_mapping_panel_confirms_exact_preview_and_clears_stale_task_stat
       await panel.selectTask(null);
       assert.equal(fields['[data-hm-draft]'].innerHTML,'尚未选择映射。');
     """)
+
+
+def test_data_processing_panel_registers_a_task_material_and_hides_elsewhere():
+    run_node("""
+      import assert from 'node:assert/strict';
+      import {createStrategyHistoryMappingPanel} from './marvis/static/js/v2/strategy_history_mapping_panel.js';
+      function element() {
+        const listeners = new Map();
+        return {value:'',innerHTML:'',textContent:'',hidden:false,disabled:false,parentElement:{hidden:false},
+          addEventListener(kind,fn){listeners.set(kind,fn);},fire(kind,event={}){return listeners.get(kind)?.(event);}};
+      }
+      const names=['source','refresh','mode','form','cell','more','kind','name','metric','unit','format','period','version','add','instruction-label','instruction','draft','propose','preview','confirm','status','candidate','register'];
+      const fields=Object.fromEntries(names.map(name=>[`[data-hm-${name}]`,element()]));
+      const root={innerHTML:'',hidden:true,querySelector:key=>fields[key]};
+      let registered=false;const gets=[],posts=[];
+      const panel=createStrategyHistoryMappingPanel({root,taskTypes:['data_join'],registerSources:true,hideOutsideTaskTypes:true,
+        get:async url=>{gets.push(url);
+          if(url.endsWith('/sources/candidates'))return {filenames:['历史报告.csv']};
+          if(url.endsWith('/sources'))return {sources:registered?[{artifact_id:'s1',name:'CSV',status:'ready'}]:[]};
+          if(url.includes('/cells'))return {source_hash:'a'.repeat(64),cells:[],next_offset:null};
+          return {head:{revision:0,artifact_id:null,content_hash:null},mapping:null};},
+        post:async(url,body)=>{posts.push([url,body]);registered=true;return {artifact_id:'s1',status:'registered'};}});
+      assert.match(root.innerHTML,/data-hm-register/);
+      await panel.selectTask({id:'join-1',task_type:'data_join'});
+      assert.equal(root.hidden,false);
+      assert.ok(gets.some(url=>url==='/api/tasks/join-1/strategy/history-mapping/sources/candidates'));
+      assert.match(fields['[data-hm-candidate]'].innerHTML,/历史报告.csv/);
+      fields['[data-hm-candidate]'].value='历史报告.csv';fields['[data-hm-candidate]'].fire('change');
+      assert.equal(fields['[data-hm-register]'].disabled,false);
+      await fields['[data-hm-register]'].fire('click');
+      assert.deepEqual(posts,[['/api/tasks/join-1/strategy/history-mapping/sources',{filename:'历史报告.csv'}]]);
+      assert.match(fields['[data-hm-source]'].innerHTML,/s1/);
+      await panel.selectTask({id:'s-1',task_type:'strategy'});
+      assert.equal(root.hidden,true);
+    """)

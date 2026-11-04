@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from marvis.runtime_observations import measured
 
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -48,6 +50,7 @@ from marvis.validation.input_contracts import (
     FieldCandidate,
     FieldEvidence,
     FieldRecognitionResult,
+    TransformationSpec,
     ValidationInputContract,
 )
 from marvis.validation.pmml_manifest import parse_pmml_input_manifest
@@ -56,7 +59,7 @@ from marvis.validation_materials import (
     ResolvedValidationMaterials,
     resolve_selected_validation_materials,
 )
-from marvis.validation_report_copy import humanize_scan_check_message
+from marvis.validation_report_copy import humanize_scan_check_message, metadata_reason_codes
 
 
 REQUIRED_SCAN_MATERIALS = (
@@ -176,16 +179,25 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         resolved_materials = resolve_selected_validation_materials(task)
         record_exposure(custody_db_path, custody_workspace, resolved_materials.sample)
         record_exposure(custody_db_path, custody_workspace, resolved_materials.dictionary)
+        from marvis.agent.validation_repair import active_field_aliases
+
+        known_hashes = {
+            artifact.path.resolve(): artifact.sha256
+            for artifact in artifacts
+            if artifact.sha256
+        }
         validation_contract = build_validation_input_contract(
+            field_aliases=active_field_aliases(
+                settings.tasks_dir,
+                task.id,
+                sample_sha256=_known_or_hash(resolved_materials.sample, known_hashes),
+                pmml_sha256=_known_or_hash(resolved_materials.pmml, known_hashes),
+            ),
             notebook_path=resolved_materials.notebook,
             sample_path=resolved_materials.sample,
             pmml_path=resolved_materials.pmml,
             dictionary_path=resolved_materials.dictionary,
-            known_hashes={
-                artifact.path.resolve(): artifact.sha256
-                for artifact in artifacts
-                if artifact.sha256
-            },
+            known_hashes=known_hashes,
         )
         checks = _v2_scan_checks(resolved_materials, validation_contract)
     else:
@@ -302,8 +314,14 @@ def build_validation_input_contract(
     pmml_path: Path,
     dictionary_path: Path,
     known_hashes: dict[Path, str] | None = None,
+    field_aliases: Mapping[str, str] | None = None,
 ) -> ValidationInputContract:
-    """Build bounded, read-only v2 candidates from four selected materials."""
+    """Build bounded, read-only v2 candidates from four selected materials.
+
+    ``field_aliases`` (PMML input -> sample column) come from the task's
+    repair overrides (``marvis/agent/validation_repair.py``) and become
+    ordinary ``copy`` candidates the user still confirms.
+    """
 
     known = {Path(path).resolve(): digest for path, digest in (known_hashes or {}).items()}
     conflicts: list[str] = []
@@ -329,6 +347,9 @@ def build_validation_input_contract(
             conflicts=(f"Notebook: {exc}",),
             diagnostics=(),
         )
+
+    if field_aliases and sample_schema is not None:
+        fields = _with_alias_transformations(fields, field_aliases, sample_schema.columns)
 
     try:
         manifest = parse_pmml_input_manifest(pmml_path)
@@ -373,6 +394,25 @@ def build_validation_input_contract(
         metadata_selections=metadata_selections,
         conflicts=tuple(conflicts),
     )
+
+
+def _with_alias_transformations(
+    fields: FieldRecognitionResult,
+    aliases: Mapping[str, str],
+    columns,
+) -> FieldRecognitionResult:
+    sample_columns = set(columns)
+    produced = {spec.output_field for spec in fields.transformations}
+    extra = tuple(
+        TransformationSpec("copy", str(name), (str(column),), {})
+        for name, column in sorted(aliases.items())
+        if name not in sample_columns
+        and column in sample_columns
+        and name not in produced
+    )
+    if not extra:
+        return fields
+    return replace(fields, transformations=(*fields.transformations, *extra))
 
 
 def assemble_validation_input_contract(
@@ -695,9 +735,16 @@ def material_candidates_payload(
         role.value: [] for role, _, _ in REQUIRED_SCAN_MATERIALS
     }
     seen: dict[str, set[str]] = {role.value: set() for role, _, _ in REQUIRED_SCAN_MATERIALS}
+    selected_sample = _selected_material_path(task=task, source_dir=source_dir, field="sample_path")
     for artifact in artifacts:
         artifact_key = _relative_material_path(artifact.path, source_dir)
         assessment = compatibility.get(artifact_key)
+        if assessment is None and (
+            artifact.path.resolve() == selected_sample or _is_explicitly_named_sample(artifact)
+        ):
+            # The sample data is never feature metadata; without an explicit
+            # assessment the dialog would offer it as a usable dictionary.
+            assessment = dict(SAMPLE_AS_DICTIONARY_ASSESSMENT)
         for role in material_candidate_roles(artifact):
             role_key = role.value
             candidate = material_candidate_payload(artifact, source_dir)
@@ -734,6 +781,39 @@ def material_candidates_payload(
             for role, label, field in REQUIRED_SCAN_MATERIALS
         ],
     }
+
+
+def material_dictionary_diagnostics(task: TaskRecord) -> dict | None:
+    """Why each data-dictionary candidate is (un)usable, as fixed reason codes.
+
+    The Agent explains material problems from this instead of guessing; the
+    sample file offered under every CSV role is left out.
+    """
+    try:
+        payload = material_candidates_payload(task)
+    except Exception:  # noqa: BLE001 - diagnostics never break chat or failure cards
+        return None
+    selected = str((payload.get("selection") or {}).get("dictionary_path") or "")
+    rows = []
+    for candidate in (payload.get("candidates") or {}).get("data_dictionary") or []:
+        assessment = candidate.get("metadata_compatibility") or {}
+        codes = metadata_reason_codes(assessment.get("blocking_errors"))
+        if codes == ["sample_file"]:
+            continue
+        rows.append({
+            "name": str(candidate.get("relative_path") or ""),
+            "status": str(assessment.get("status") or "not_evaluated"),
+            "reasons": codes,
+            "selected": bool(selected) and candidate.get("relative_path") == selected,
+        })
+    return {"data_dictionary": rows}
+
+
+SAMPLE_AS_DICTIONARY_ASSESSMENT = {
+    "status": "incompatible",
+    "selection_count": 0,
+    "blocking_errors": ["metadata file: candidate is the sample data file"],
+}
 
 
 def _feature_metadata_candidate_compatibility(
@@ -954,6 +1034,8 @@ def validate_material_selection(task: TaskRecord, selection: dict[str, str]) -> 
             label=label,
             value=selection.get(field, ""),
         )
+    if normalized["dictionary_path"] == normalized["sample_path"]:
+        raise ValueError("样本数据和数据字典不能选同一个文件；数据字典需要 feature、category、importance 三类列。")
     return normalized
 
 

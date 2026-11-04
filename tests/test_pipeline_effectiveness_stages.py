@@ -235,3 +235,71 @@ def test_repeated_notebook_psi_cancellation_clears_old_result_and_can_resume(
     for name in ("metrics-psi", "metrics-binning"):
         exec(compile(by_name[name], f"<{name}>", "exec"), namespace)
     assert namespace["_rmc_effectiveness"] == expected
+
+
+def _legacy_metrics_kwargs(namespace, tmp_path):
+    sample = namespace["RMC_SAMPLE_DF"].reset_index(drop=True)
+    sample_path = tmp_path / "sample.csv"
+    sample.to_csv(sample_path, index=False)
+    pd.DataFrame({"row_index": sample.index, "code_model_score": sample.x}).to_csv(
+        tmp_path / "scores.csv", index=False
+    )
+    return dict(
+        task=SimpleNamespace(model_name="fixture", model_version="v1", split_col="split", time_col="month"),
+        settings=SimpleNamespace(bin_count=2, random_sample_size=12, random_seed=42,
+                                 data_dict_feature_col="feature", data_dict_category_col="category"),
+        contract=RuntimeContract(
+            target_col="y", split_col="split", time_col="month",
+            pmml_output_field="probability_1", score_decimal_places=6,
+            code_model_scores_path=tmp_path / "scores.csv", feature_importance_path=None,
+            model_params_path=None, algorithm="lgb",
+        ),
+        fallback_sample_path=sample_path,
+        dictionary_path=tmp_path / "dictionary.csv",
+        model_meta_path=tmp_path / "model_meta.json",
+        reproducibility_json_path=tmp_path / "reproducibility.json",
+        excel_path=tmp_path / "validation.xlsx",
+    )
+
+
+def test_legacy_metrics_results_are_identical_with_a_cancellation_check(notebook_metrics, tmp_path):
+    """F15: threading a no-op cancellation check must not change V1 metrics."""
+    _, namespace, _ = notebook_metrics
+    kwargs = _legacy_metrics_kwargs(namespace, tmp_path)
+    calls = []
+    without = write_platform_validation_metrics(
+        **kwargs, results_json_path=tmp_path / "without.json",
+    )
+    with_check = write_platform_validation_metrics(
+        **kwargs, results_json_path=tmp_path / "with.json",
+        cancellation_check=lambda: calls.append(1),
+    )
+    assert json.loads(without.read_text()) == json.loads(with_check.read_text())
+    # The check is consulted at service checkpoints and inside the kernels.
+    assert len(calls) > 4
+
+
+def test_legacy_metrics_cancellation_stops_before_results_are_written(
+    notebook_metrics, tmp_path, monkeypatch
+):
+    """F15: a cancellation raised during effectiveness aborts the V1 metrics path."""
+    _, namespace, _ = notebook_metrics
+    kwargs = _legacy_metrics_kwargs(namespace, tmp_path)
+    cancelled = {"flag": False}
+    original = effectiveness.compute_overall_ks
+
+    def cancel_after_ks(**inner):
+        result = original(**inner)
+        cancelled["flag"] = True
+        return result
+
+    def check():
+        if cancelled["flag"]:
+            raise RuntimeError("cancelled by test")
+
+    monkeypatch.setattr(effectiveness, "compute_overall_ks", cancel_after_ks)
+    with pytest.raises(RuntimeError, match="cancelled by test"):
+        write_platform_validation_metrics(
+            **kwargs, results_json_path=tmp_path / "results.json", cancellation_check=check,
+        )
+    assert not (tmp_path / "results.json").exists()

@@ -24,6 +24,11 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 MAX_REVISIONS = 128
 MAX_BINDINGS = 128
 _PLAN_VERSION = "strategy.history-mapping-proposal.v1"
+# V3 5.7: the same mapping also serves data processing tasks. Strategy tasks
+# register sources through their project context; data processing tasks
+# register a task material directly (register_source).
+HISTORY_TASK_TYPES = frozenset({"strategy", "data_join"})
+_LOCATABLE_SUFFIXES = (".csv", ".xlsx", ".json")
 
 
 class StrategyHistoryMappingRepository:
@@ -39,8 +44,64 @@ class StrategyHistoryMappingRepository:
     @staticmethod
     def _task(conn, task_id):
         row = conn.execute("SELECT task_type FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is None or row[0] != "strategy":
-            raise HistoryMappingError("history_strategy_task_required", "历史策略资料映射仅适用于当前策略任务。")
+        if row is None or row[0] not in HISTORY_TASK_TYPES:
+            raise HistoryMappingError("history_strategy_task_required", "历史材料映射仅适用于策略任务和数据处理任务。")
+        return row[0]
+
+    def source_candidates(self, task_id):
+        """Task material files a data processing task may register as history."""
+        with connect(self.settings.db_path) as conn:
+            self._require_data_task(conn, task_id)
+            source_dir = conn.execute("SELECT source_dir FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+        root = Path(source_dir or "")
+        if not source_dir or not root.is_dir() or root.is_symlink():
+            return []
+        return sorted(
+            path.relative_to(root).as_posix() for path in root.rglob("*")
+            if path.is_file() and not path.is_symlink() and path.suffix.lower() in _LOCATABLE_SUFFIXES
+        )[:500]
+
+    def register_source(self, task_id, filename):
+        """Register one task material of a data processing task as a history source.
+
+        Uses the strategy project context's own snapshot, staging and
+        registration, so locating, proposing and confirming are unchanged.
+        """
+        from marvis.packs.strategy.errors import StrategyError
+        from marvis.packs.strategy import project_context_tools as context_tools
+        if not isinstance(filename, str) or Path(filename).suffix.lower() not in _LOCATABLE_SUFFIXES:
+            raise HistoryMappingError("history_source_suffix_unsupported", "只能登记可定位的 CSV、XLSX 或 JSON 材料。")
+        uow = ArtifactUnitOfWork()
+        try:
+            with connect(self.settings.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._require_data_task(conn, task_id)
+                source_dir = conn.execute("SELECT source_dir FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+                try:
+                    snapshots = context_tools._snapshot_external_reports(source_dir, [filename])
+                except (StrategyError, OSError):
+                    raise HistoryMappingError("history_source_unavailable", "任务材料里找不到这个文件，或文件无法安全读取；请重新上传后再登记。") from None
+                tasks_root = Path(self.settings.tasks_dir).absolute()
+                path = context_tools._external_artifact_path(tasks_root, task_id=task_id, snapshot=snapshots[0])
+                existing = conn.execute("SELECT id FROM task_artifacts WHERE task_id=? AND kind=? AND path=?",
+                                        (task_id, SOURCE_KIND, str(path))).fetchone()
+                if existing is not None:
+                    return {"artifact_id": existing["id"], "content_hash": snapshots[0].content_hash, "status": "already_registered"}
+                if context_tools._stage_external_sources(uow=uow, tasks_root=tasks_root, task_id=task_id,
+                                                         source_dir=source_dir, snapshots=snapshots):
+                    uow.promote_all()
+                record = context_tools._register_external_sources(
+                    conn, task_artifacts=TaskArtifactRepository(self.settings.db_path), tasks_root=tasks_root,
+                    task_id=task_id, snapshots=snapshots)[0]
+            uow.commit()
+            return {"artifact_id": record["id"], "content_hash": record["content_hash"], "status": "registered"}
+        except Exception:
+            uow.rollback()
+            raise
+
+    def _require_data_task(self, conn, task_id):
+        if self._task(conn, task_id) != "data_join":
+            raise HistoryMappingError("history_data_task_required", "策略任务请在“项目现状与历史材料”中登记历史材料。")
 
     def sources(self, task_id):
         with connect(self.settings.db_path) as conn:

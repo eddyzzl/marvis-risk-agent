@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from docx import Document
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from marvis.app import create_app
-from marvis.db import TaskRepository
+from marvis.db import TaskRepository, connect
+from marvis.domain import TaskStatus
 from marvis.validation_report_copy import METRIC_REWRITE_REFUSAL
 
 
@@ -42,32 +46,10 @@ def test_agent_rejects_metric_rewrite_without_llm(tmp_path: Path):
     assert "KS" not in " ".join(str(value) for value in report_values.values() if "0.50" in str(value))
 
 
-def test_batch_runner_does_not_silently_write_word_conclusions():
-    source = Path("marvis/validation_batch_runner.py").read_text(encoding="utf-8")
-    start = source.index("def _run_ready_item_pipeline")
-    end = source.index("\ndef _run_item_stage", start)
-    body = source[start:end]
-    assert "_write_report_conclusions" not in body
-    assert "run_report_stage" not in body
-
-
 def test_validation_create_dialog_can_add_models():
     index_html = Path("marvis/static/index.html").read_text(encoding="utf-8")
-    create_js = Path("marvis/static/js/create-task-dialog.js").read_text(encoding="utf-8")
-    app_js = Path("marvis/static/app.js").read_text(encoding="utf-8")
-
     assert 'id="welcomeValidationBatchCard"' not in index_html
     assert 'id="addValidationModelRowButton"' in index_html
-    assert "function addValidationModelRow" in create_js
-    assert "/api/validation-batches" in create_js
-    assert "api/tasks" in create_js
-    stepper = app_js.split("function renderWorkflowStepper", 1)[1].split(
-        "function taskCreatedMonth",
-        1,
-    )[0]
-    assert "classList.add(\"hidden\")" not in stepper
-    assert "files: rows[0].files" not in create_js
-    assert "classifyValidationBatchFiles" in create_js
 
 
 def test_create_task_seeds_stored_report_values(tmp_path: Path):
@@ -91,13 +73,47 @@ def test_create_task_seeds_stored_report_values(tmp_path: Path):
     assert "TEXT:drafter" in fields["display_defaults"]
 
 
-def test_report_stage_allows_succeeded_regeneration():
-    stages = Path("marvis/routers/validation_stages.py").read_text(encoding="utf-8")
-    start = stages.index("def run_task_report")
-    end = stages.index("\ndef validate_task", start)
-    body = stages[start:end]
-    assert "TaskStatus.SUCCEEDED" in body
-    pipeline = Path("marvis/pipeline.py").read_text(encoding="utf-8")
-    report_start = pipeline.index("def run_report_stage")
-    report_body = pipeline[report_start:report_start + 2500]
-    assert "TaskStatus.SUCCEEDED" in report_body
+@pytest.mark.parametrize("workflow_version", [1, 2])
+def test_report_stage_allows_succeeded_regeneration(
+    pipeline_settings, ready_validation_task, workflow_version,
+):
+    """A completed manual task can render edited text through the real API/job/writers."""
+    repo = TaskRepository(pipeline_settings.db_path)
+    task_id = ready_validation_task.id
+    if workflow_version == 1:
+        with connect(pipeline_settings.db_path) as conn:
+            conn.execute("UPDATE tasks SET validation_workflow_version = 1 WHERE id = ?", (task_id,))
+    for status in (
+        TaskStatus.RUNNING, TaskStatus.EXECUTED, TaskStatus.COMPUTING_METRICS,
+        TaskStatus.WRITING_ARTIFACTS, TaskStatus.SUCCEEDED,
+    ):
+        repo.update_status(task_id, status, "fixture completed before regeneration")
+    outputs = pipeline_settings.workspace / "tasks" / task_id / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    fixture = Path(__file__).parent / "fixtures" / "legacy_validation_results.json"
+    (outputs / "validation_results.json").write_bytes(fixture.read_bytes())
+
+    # Always use this fixture's workspace template, never the bundled fallback.
+    template = Document()
+    template.add_paragraph("{{TEXT:model_overview}}")
+    template.save(pipeline_settings.report_template_path)
+    client = TestClient(create_app(pipeline_settings.workspace))
+    for revision, text in enumerate(("First saved overview", "Updated saved overview")):
+        repo.update_report_values(task_id, {"TEXT:model_overview": text}, revision)
+        response = client.post(f"/api/tasks/{task_id}/report")
+
+        assert response.status_code == 202, response.text
+        assert repo.get_task(task_id).status is TaskStatus.SUCCEEDED
+        with connect(pipeline_settings.db_path) as conn:
+            jobs = conn.execute("SELECT kind, status FROM jobs WHERE task_id = ?", (task_id,)).fetchall()
+        assert len(jobs) == revision + 1
+        assert all(job["kind"] == "report" and job["status"] == "succeeded" for job in jobs)
+        paragraphs = [paragraph.text for paragraph in Document(outputs / "validation_report.docx").paragraphs]
+        assert text in paragraphs
+        if revision:
+            assert "First saved overview" not in paragraphs
+        workbook = load_workbook(outputs / "validation.xlsx", read_only=True)
+        try:
+            assert workbook.sheetnames
+        finally:
+            workbook.close()

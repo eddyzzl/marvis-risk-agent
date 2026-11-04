@@ -89,13 +89,11 @@ export function gateMessageForCurrentTool(message) {
     delete metadata.screen;
     changed = true;
   }
-  // The setup workbench is actionable only while accepting the split/model
-  // specification or configuring the tuning budget. Later gates can still
-  // depend on that output for evidence, but must not resurrect its controls.
-  if (
-    meta.modeling_setup
-    && !["screen_features", "configure_tuning"].includes(gateTool)
-  ) {
+  // The four-step setup workbench is shown once: at the gate that accepts the
+  // split/model specification. Later gates (including the tuning-config gate)
+  // still carry that output as evidence and show it in their 建模规格 table,
+  // but must not render the whole form again for a decision already made.
+  if (meta.modeling_setup && gateTool !== "screen_features") {
     delete metadata.modeling_setup;
     changed = true;
   }
@@ -147,7 +145,12 @@ export function driverGateBodyHtml(message, renderers = {}, options = {}) {
   if (meta.join_c1) return renderC1Form(message, { interactive });
   if (meta.screen) return `${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}`;
   if (meta.modeling_setup) return `${renderModelingSetup(message, { interactive })}${renderTables(message)}`;
-  if (meta.join_keys) return `${renderTables(message)}${renderJoinKeyPicker(message, { interactive })}`;
+  // A non-unique key also needs the dedup choice; the dedup picker then owns
+  // the confirm (review H1: the key picker alone left no way forward).
+  if (meta.join_keys) {
+    const dedup = meta.dedup ? renderDedupPicker(message, { interactive }) : "";
+    return `${renderTables(message)}${renderJoinKeyPicker(message, { interactive })}${dedup}`;
+  }
   if (meta.dedup) return `${renderTables(message)}${renderDedupPicker(message, { interactive })}`;
   if (meta.feature_binning) return `${renderTables(message)}${renderFeatureBinning(message, { interactive })}`;
   if (meta.special_values) return `${renderTables(message)}${renderSpecialValues(message, { interactive })}`;
@@ -220,9 +223,14 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     // A stable per-step anchor so the rail's lightweight "待确认" locate entry can
     // scroll to (and flash) exactly this middle gate section.
     const stepId = meta.step_id ? String(meta.step_id) : "";
-    const gateAttr = isPendingGate
+    // D17: every step's section is a jump target for the plan rail.
+    const jumpStepId = String(meta.step_id || meta.expected_step_id || "");
+    const jumpPlanId = String(meta.plan_id || meta.expected_plan_id || "");
+    const gateAttr = (isPendingGate
       ? ` data-driver-gate-section="${escapeAttr(stepId)}"`
-      : "";
+      : "")
+      + (jumpStepId ? ` data-plan-step-message="${escapeAttr(jumpStepId)}"` : "")
+      + (jumpPlanId ? ` data-plan-message="${escapeAttr(jumpPlanId)}"` : "");
     const sectionClass = isPendingGate ? "driver-analysis-section is-gate-pending" : "driver-analysis-section";
     if (hasWorkflowErrorDiagnostic(meta)) {
       const diagnostic = workflowMessageContentHtml(
@@ -281,7 +289,9 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
       continue;
     }
     if (meta.join_keys) {
-      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
+      // The key picker only re-diagnoses; the gate's own confirm follows it.
+      const confirm = isPendingGate ? renderGateConfirm(message) : "";
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}${confirm}</section>`);
       continue;
     }
     if (meta.dedup) {
@@ -314,7 +324,7 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     if (!String(message.content || "").trim() && !tables && !confirm && !hasIngestNotices) continue;
     sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${tables}${renderResultDataset(message)}${renderReportDownload(message)}${confirm}</section>`);
   }
-  return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
+  return sections.join("") || '<div class="plan-rail-empty">还没有分析结果，计划跑完的步骤会显示在这里。</div>';
 }
 
 // Minimal attribute escaper for the anchor id (backend step slugs are safe, but

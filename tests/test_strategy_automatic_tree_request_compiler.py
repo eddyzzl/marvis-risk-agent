@@ -345,7 +345,47 @@ def test_automatic_tree_build_rejects_llm_controls_not_grounded_in_user_text(
     assert result.draft is None
     assert result.clarification_code == "automatic_tree_build_controls_not_grounded"
     assert missing in result.clarification_fields
+    # The raw entry stays in fields; the prose never repeats control paths.
+    for internal in ("_col=", "max_depth", "min_weight_fraction_leaf", "=decreasing", "LLM"):
+        assert internal not in result.clarification
     assert len(llm.calls) == 1
+
+
+def test_automatic_tree_ungrounded_controls_are_named_in_business_terms() -> None:
+    llm = _FakeLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "automatic_tree_candidate_build",
+            "workflow_inputs": {
+                "features": ["age", "income"],
+                "sample_weight_col": "other_weight",
+                "directions": {"age": "decreasing"},
+                "max_depth": 5,
+            },
+        }
+    )
+
+    result = compile_strategy_request(
+        "用 age 构建自动树候选，权重列 weight，age 单调递增，最大深度 4",
+        allowed_columns=["age", "income", "weight", "other_weight", "loan_amount"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.clarification_fields == (
+        "income",
+        "sample_weight_col=other_weight",
+        "sample_weight_col=weight",
+        "age=decreasing",
+        "directions.age=increasing",
+        "max_depth=5",
+        "max_depth=4",
+    )
+    assert (
+        "当前无法核对：特征「income」、样本权重列「other_weight」、样本权重列「weight」、"
+        "特征「age」的方向（单调递减）、特征「age」的方向（单调递增）、"
+        "最大树深「5」、最大树深「4」。"
+    ) in result.clarification
 
 
 @pytest.mark.parametrize(

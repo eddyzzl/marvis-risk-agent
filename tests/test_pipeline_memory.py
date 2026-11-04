@@ -1,8 +1,12 @@
-import inspect
 from types import SimpleNamespace
 
+import pytest
+
+import marvis.pipeline as pipeline_module
 from marvis.agent_memory.extractors import extract_model_experience
-from marvis.pipeline import _execute_v2_metrics_stage
+from marvis.db import TaskRepository
+from marvis.domain import TaskStatus
+from marvis.pipeline import run_metrics_stage, run_pmml_scoring_stage
 from marvis.pipeline_memory import _memory_channel, _memory_model_experience_payload
 
 
@@ -97,9 +101,41 @@ def test_model_experience_does_not_label_an_unknown_split_as_oot():
     assert payload["metrics"]["ks"] == .2
 
 
-def test_v2_metrics_stage_captures_agent_memory_after_success():
-    source = inspect.getsource(_execute_v2_metrics_stage)
-    assert "_capture_agent_memory_for_metrics_success" in source
+def _record_memory_capture(monkeypatch, repo):
+    calls = []
+
+    def record(*, repo, task_id, outputs_dir, hook_dispatcher):
+        calls.append((task_id, repo.get_task(task_id).status, (outputs_dir / "validation_results.json").is_file()))
+
+    monkeypatch.setattr(pipeline_module, "_capture_agent_memory_for_metrics_success", record)
+    return calls
+
+
+def test_v2_metrics_stage_captures_agent_memory_after_success(
+    ready_validation_task, pipeline_settings, monkeypatch
+):
+    repo = TaskRepository(pipeline_settings.db_path)
+    calls = _record_memory_capture(monkeypatch, repo)
+    run_pmml_scoring_stage(task_id=ready_validation_task.id, settings=pipeline_settings)
+    run_metrics_stage(task_id=ready_validation_task.id, settings=pipeline_settings)
+    # Memory is captured once, only after results are durable and the status advanced.
+    assert calls == [(ready_validation_task.id, TaskStatus.WRITING_ARTIFACTS, True)]
+
+
+def test_v2_metrics_stage_failure_does_not_capture_agent_memory(
+    ready_validation_task, pipeline_settings, monkeypatch
+):
+    repo = TaskRepository(pipeline_settings.db_path)
+    calls = _record_memory_capture(monkeypatch, repo)
+    run_pmml_scoring_stage(task_id=ready_validation_task.id, settings=pipeline_settings)
+
+    def fail(**_kwargs):
+        raise ValueError("metrics kernel failed")
+
+    monkeypatch.setattr(pipeline_module, "compute_platform_validation_results", fail)
+    with pytest.raises(Exception):
+        run_metrics_stage(task_id=ready_validation_task.id, settings=pipeline_settings)
+    assert calls == []
 
 
 def test_memory_channel_prefers_explicit_input_and_does_not_invent_cohorts():

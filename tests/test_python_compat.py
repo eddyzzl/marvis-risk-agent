@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 
@@ -9,10 +10,15 @@ def test_kernel_imported_modules_do_not_require_stdlib_strenum():
         "marvis/domain.py",
         "marvis/validation/results.py",
     ]:
-        source = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
-
-        assert "from enum import StrEnum" not in source
-        assert "marvis.compat import StrEnum" in source
+        tree = ast.parse((PROJECT_ROOT / relative_path).read_text(encoding="utf-8"))
+        imports = {
+            (node.module, alias.name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        assert ("enum", "StrEnum") not in imports
+        assert ("marvis.compat", "StrEnum") in imports
 
 
 def test_kernel_imported_modules_defer_annotations_at_runtime():
@@ -30,7 +36,17 @@ def test_kernel_imported_modules_defer_annotations_at_runtime():
 
 
 def test_kernel_runtime_code_avoids_pep604_type_union_expressions():
-    source = (PROJECT_ROOT / "marvis/report_texts.py").read_text(encoding="utf-8")
-
-    assert "isinstance(sample_period, list | tuple)" not in source
-    assert "isinstance(sample_period, (list, tuple))" in source
+    tree = ast.parse((PROJECT_ROOT / "marvis/report_texts.py").read_text(encoding="utf-8"))
+    runtime_type_checks = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"isinstance", "issubclass"}
+        and len(node.args) >= 2
+    ]
+    assert runtime_type_checks, "The report formatting module must retain runtime type checks"
+    for check in runtime_type_checks:
+        assert not any(
+            isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)
+            for node in ast.walk(check.args[1])
+        ), f"Python 3.7 cannot evaluate a type union at line {check.lineno}"

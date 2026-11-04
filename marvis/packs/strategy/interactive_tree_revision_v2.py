@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-import hashlib
 import hmac
 import json
 import math
@@ -18,6 +17,7 @@ from marvis.packs.strategy.automatic_tree_asset import (
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.interactive_tree_replay import (
+    _sha256,
     InteractiveTreeReplayResult,
 )
 
@@ -2542,15 +2542,3 @@ def _exact_fields(
         raise InteractiveTreeRevisionV2Error(
             f"{name} fields are invalid: expected {sorted(expected)}, got {sorted(actual)}"
         )
-
-
-def _sha256(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()

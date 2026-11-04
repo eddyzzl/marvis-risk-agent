@@ -27,9 +27,9 @@
   max-width: 100%;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--card);
 }
 
 .validation-batch-switcher-list {
@@ -47,7 +47,6 @@
 }
 
 .validation-batch-switcher-item {
-  --switcher-tone: transparent;
   display: inline-flex;
   flex: 0 0 auto;
   flex-direction: column;
@@ -55,10 +54,12 @@
   gap: 2px;
   max-width: 220px;
   padding: 6px 10px;
-  border: 1px solid var(--border-strong);
+  /* Batch 4: a flat segmented chip; the status lives in the progress word's
+     colour, not in a coloured stripe or outline (D3). */
+  border: 1px solid transparent;
   border-radius: var(--radius-control);
-  background: var(--surface);
-  box-shadow: inset 2px 0 0 var(--switcher-tone);
+  background: var(--fill);
+  box-shadow: none;
   color: var(--text);
   cursor: pointer;
   font-size: 12px;
@@ -69,7 +70,7 @@
 }
 
 .validation-batch-switcher-item:hover {
-  background: color-mix(in srgb, var(--surface) 90%, var(--text) 10%);
+  background: var(--fill-2);
 }
 
 .validation-batch-switcher-item:focus-visible {
@@ -87,51 +88,40 @@
 
 .validation-batch-switcher-progress {
   color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
-.validation-batch-switcher-item[data-tone="running"] {
-  --switcher-tone: var(--accent);
-}
-
-.validation-batch-switcher-item[data-tone="running"] .validation-batch-switcher-progress {
+/* Tones come from js/task-status.js (ok | fail | run | review | neutral);
+   neutral (待开始, 排队中, 已取消 ...) keeps the plain chip. */
+.validation-batch-switcher-item[data-tone="run"] .validation-batch-switcher-progress {
   color: var(--accent);
 }
 
-.validation-batch-switcher-item[data-tone="success"] {
-  --switcher-tone: var(--success);
-}
-
-.validation-batch-switcher-item[data-tone="success"] .validation-batch-switcher-progress {
+.validation-batch-switcher-item[data-tone="ok"] .validation-batch-switcher-progress {
   color: var(--success-strong);
 }
 
-.validation-batch-switcher-item[data-tone="warning"] {
-  --switcher-tone: var(--warning);
-}
-
-.validation-batch-switcher-item[data-tone="warning"] .validation-batch-switcher-progress {
+.validation-batch-switcher-item[data-tone="review"] .validation-batch-switcher-progress {
   color: var(--warning-strong);
 }
 
-.validation-batch-switcher-item[data-tone="danger"] {
-  --switcher-tone: var(--danger);
-}
-
-.validation-batch-switcher-item[data-tone="danger"] .validation-batch-switcher-progress {
+.validation-batch-switcher-item[data-tone="fail"] .validation-batch-switcher-progress {
   color: var(--danger-strong);
 }
 
-.validation-batch-switcher-item.is-selected {
-  border-color: var(--button-primary-border);
-  background: color-mix(in srgb, var(--surface) 92%, var(--brand-primary) 8%);
+/* Selected chip: raised like the pressed segment of a macOS segmented control. */
+.validation-batch-switcher-item.is-selected,
+.validation-batch-switcher-item.is-selected:hover {
+  background: var(--surface);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
-.validation-batch-switcher-item.is-selected:hover {
-  border-color: var(--button-primary-border-hover);
-  background: color-mix(in srgb, var(--surface) 88%, var(--brand-primary) 12%);
+body[data-theme="dark"] .validation-batch-switcher-item.is-selected,
+body[data-theme="dark"] .validation-batch-switcher-item.is-selected:hover {
+  background: var(--fill-2);
+  box-shadow: none;
 }
 
 .validation-batch-switcher-actions {
@@ -154,10 +144,10 @@
 .validation-batch-overview,
 .validation-batch-loading,
 .validation-batch-load-error {
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  background: var(--card);
+  box-shadow: none;
 }
 
 .validation-batch-overview {
@@ -174,8 +164,8 @@
 .validation-batch-eyebrow {
   margin: 0 0 5px;
   color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 750;
+  font-size: 12px;
+  font-weight: 700;
   letter-spacing: 0.13em;
 }
 
@@ -223,12 +213,12 @@
   min-height: 30px;
   align-items: center;
   padding: 0 11px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface-soft);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
   color: var(--text-muted);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .validation-batch-status {
@@ -237,44 +227,35 @@
   width: max-content;
   min-height: 22px;
   padding: 2px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-pill);
-  background: var(--surface-soft);
+  background: var(--fill);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
 }
 
-.validation-batch-status.running,
-.validation-batch-status.created,
-.validation-batch-status.queued {
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+.validation-batch-status.run {
+  border-color: transparent;
   background: var(--accent-soft);
   color: var(--accent);
 }
 
-.validation-batch-status.success,
-.validation-batch-status.completed,
-.validation-batch-status.succeeded {
-  border-color: var(--success-border);
+.validation-batch-status.ok {
+  border-color: transparent;
   background: var(--success-soft);
   color: var(--success-strong);
 }
 
-.validation-batch-status.warning,
-.validation-batch-status.awaiting_confirmation,
-.validation-batch-status.review_required,
-.validation-batch-status.partial_failure {
-  border-color: var(--warning-border);
+.validation-batch-status.review {
+  border-color: transparent;
   background: var(--warning-soft);
   color: var(--warning-strong);
 }
 
-.validation-batch-status.danger,
-.validation-batch-status.failed,
-.validation-batch-status.cancelled {
-  border-color: var(--danger-border);
+.validation-batch-status.fail {
+  border-color: transparent;
   background: var(--danger-soft);
   color: var(--danger-strong);
 }
@@ -292,14 +273,14 @@
   flex-direction: column;
   justify-content: center;
   padding: 9px 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface-soft);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--fill);
 }
 
 .validation-batch-stats strong {
   color: var(--text-primary);
-  font-size: 19px;
+  font-size: 20px;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }
@@ -307,13 +288,13 @@
 .validation-batch-stats span {
   margin-top: 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .validation-batch-table-wrap {
   overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  border: 1px solid var(--sep);
+  border-radius: var(--radius-md);
 }
 
 .validation-batch-table {
@@ -328,7 +309,7 @@
 .validation-batch-table th,
 .validation-batch-table td {
   padding: 10px 11px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   text-align: left;
   vertical-align: top;
 }
@@ -337,9 +318,9 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--surface-soft);
+  background: var(--card);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
 }
@@ -353,12 +334,12 @@
 }
 
 .validation-batch-table tbody tr:hover {
-  background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+  background: var(--fill);
 }
 
 .validation-batch-table tbody tr.is-deep-linked {
   background: var(--warning-soft);
-  box-shadow: inset 3px 0 0 var(--warning);
+  box-shadow: none;
 }
 
 .validation-batch-table td:first-child {
@@ -380,14 +361,14 @@
   display: block;
   margin-top: 4px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .validation-batch-error {
   margin-top: 5px;
   color: var(--danger-strong);
-  font-size: 11px;
-  font-weight: 550;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.45;
 }
 
@@ -400,7 +381,7 @@
 
 .validation-batch-link {
   color: var(--accent);
-  font-weight: 650;
+  font-weight: 600;
   text-decoration: none;
 }
 
@@ -424,8 +405,7 @@ button.validation-batch-link {
 
 .validation-batch-contract-panel {
   margin: 14px 0 0;
-  border-color: color-mix(in srgb, var(--tone-validation) 30%, var(--border));
-  box-shadow: var(--shadow);
+  box-shadow: none;
 }
 
 .validation-batch-contract-head {
@@ -443,8 +423,8 @@ button.validation-batch-link {
   display: block;
   margin-bottom: 4px;
   color: var(--tone-validation);
-  font-size: 10px;
-  font-weight: 750;
+  font-size: 12px;
+  font-weight: 700;
   letter-spacing: 0.1em;
 }
 
@@ -461,8 +441,8 @@ button.validation-batch-link {
 .validation-batch-banner-error {
   margin: 14px 0 0;
   padding: 9px 11px;
-  border: 1px solid var(--danger-border);
-  border-radius: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   background: var(--danger-soft);
   color: var(--danger-strong);
   font-size: 12px;
@@ -471,8 +451,8 @@ button.validation-batch-link {
 .validation-batch-contract-guidance {
   margin: 14px 0 0;
   padding: 9px 11px;
-  border: 1px solid var(--warning-border);
-  border-radius: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   background: var(--warning-soft);
   color: var(--warning-strong);
   font-size: 12px;

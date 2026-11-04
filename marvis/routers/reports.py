@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from marvis.errors import not_found
 
 from marvis.api_report_helpers import (
     driver_report_artifact,
     latest_driver_report_artifacts,
+    report_preview_unavailable_html,
     require_confirmed_agent_conclusions,
 )
 from marvis.api_task_helpers import get_task_or_404
@@ -50,18 +51,28 @@ def download_task_report(task_id: str, request: Request) -> FileResponse:
 
 @router.get("/tasks/{task_id}/report/preview")
 def preview_task_report(task_id: str, request: Request) -> HTMLResponse:
+    # The preview renders inside an iframe, so a refusal must be a readable
+    # page (same status code) rather than a raw JSON body.
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
-    require_confirmed_agent_conclusions(repo, task)
-    if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
-        raise not_found("report not generated")
-    report_path = resolve_fixed_task_output(
-        request.app.state.settings.tasks_dir,
-        task_id,
-        "validation_report.docx",
+    try:
+        require_confirmed_agent_conclusions(repo, task)
+    except HTTPException as exc:
+        return HTMLResponse(report_preview_unavailable_html(exc.detail), status_code=exc.status_code)
+    report_path = (
+        resolve_fixed_task_output(
+            request.app.state.settings.tasks_dir,
+            task_id,
+            "validation_report.docx",
+        )
+        if task.status in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
+        else None
     )
     if report_path is None:
-        raise not_found("report not generated")
+        return HTMLResponse(
+            report_preview_unavailable_html("报告尚未生成，请先确认报告结论并等待生成完成。"),
+            status_code=404,
+        )
     return HTMLResponse(docx_to_html_preview(report_path))
 
 

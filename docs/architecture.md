@@ -64,8 +64,9 @@ python -m marvis            → marvis/__main__.py 的 main()
 
 ### 2.1 `validation/` —— 确定性验证算法
 
-- 职责：模型验证的确定性计算内核：分箱（`binning.py`）、KS/AUC/PSI 等平台指标（`platform_metrics.py`，入口 `compute_platform_validation_results`）、PMML 打分（`pmml_scoring.py` / `pmml_score_artifacts.py`）、可复现性（`reproducibility.py`）、内存模型分（`in_memory_scores.py`）、压力测试（`stress_test.py` / `pmml_stress.py`）、Vintage（`vintage.py`）、结果类型（`results.py` 的 `ConsistencyStatus` 等）。
-- 不该拥有：DB、FastAPI、Agent、任务生命周期（AGENTS.md 原话）。
+- 职责：模型验证的确定性计算内核：分箱（`binning.py`）、KS/AUC/PSI 等平台指标（`platform_metrics.py`，入口 `compute_platform_validation_results`）、PMML 打分（`pmml_scoring.py`）、可复现性（`reproducibility.py`）、内存模型分（`in_memory_scores.py`）、压力测试（`stress_test.py`）、Vintage（`vintage.py`）、结果类型（`results.py` 的 `ConsistencyStatus` 等）。
+- 不该拥有：DB、FastAPI、Agent、任务生命周期（AGENTS.md 原话）；也不写文件系统（缓存、落盘、锁）。`tests/validation/test_algorithm_boundaries.py` 静态守门。
+- 带文件副作用的 PMML 打分产物、压力测试缓存和打分产物读取在 `validation_services/`（`pmml_score_artifacts.py` / `pmml_stress.py` / `pmml_analysis.py`）。
 
 ### 2.2 `output/` —— 从结构化 payload 渲染文档
 
@@ -210,7 +211,7 @@ Notebook 执行结束前必须在顶层作用域定义四个名字（`notebook_c
 
 ### 4.2 Notebook 内存分 vs PMML 分
 
-主分数一致性比较是 **Notebook 内存里的模型分 `RMC_SCORE_FN(sample_df)` vs 提交目录中拟投产 PMML 的打分结果**（`validation/in_memory_scores.py` 与 `validation/pmml_scoring.py` / `pmml_score_artifacts.py` 的 `build_pmml_scoring_identity` / `validate_pmml_score_artifact`）。Notebook 可额外导出 PMML 作为审计材料，但平台不再把新导出的 PMML 作为主对比对象。
+主分数一致性比较是 **Notebook 内存里的模型分 `RMC_SCORE_FN(sample_df)` vs 提交目录中拟投产 PMML 的打分结果**（`validation/in_memory_scores.py` 与 `validation/pmml_scoring.py` / `validation_services/pmml_score_artifacts.py` 的 `build_pmml_scoring_identity` / `validate_pmml_score_artifact`）。Notebook 可额外导出 PMML 作为审计材料，但平台不再把新导出的 PMML 作为主对比对象。
 
 ### 4.3 legacy live kernel 的三重 opt-in
 

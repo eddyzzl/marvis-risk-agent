@@ -685,6 +685,12 @@ def _actual_u_shape_direction(
     return "u_shape", evidence, "分箱坏率呈两端高、中间低的 U 型走势。"
 
 
+# Same bar as the modeling screen's leakage gate (marvis.feature.screen,
+# ``leakage_ks``): eval S3 recommended `score` (KS 0.46) as a candidate here
+# while modeling dropped it as suspected leakage.
+_SUSPECTED_LEAKAGE_KS = 0.40
+
+
 def _feature_recommendation(metric: dict) -> tuple[str, str]:
     """Deterministic, evidence-backed feature suggestion for the Agent surface.
 
@@ -703,7 +709,7 @@ def _feature_recommendation(metric: dict) -> tuple[str, str]:
         if missing_rate >= 0.80:
             return "不推荐", f"缺失率 {missing_rate:.1%} 过高。"
         if unique_count <= 1 or mode_rate >= 0.95:
-            return "不推荐", f"单一值率 {mode_rate:.1%}，变量几乎没有区分信息。"
+            return "不推荐", f"最常见值占比 {mode_rate:.1%}，变量几乎没有区分信息。"
 
     signal_checks: list[bool] = []
     if metric.get("iv") is not None:
@@ -717,19 +723,31 @@ def _feature_recommendation(metric: dict) -> tuple[str, str]:
     has_signal = any(signal_checks)
     if not has_signal:
         return "暂不推荐", "本次所选区分力指标未显示出足够信号。"
-
     psi_values = [
         float(metric[key])
         for key in ("psi", *_PSI_VIEWS)
         if metric.get(key) is not None
     ]
     psi = max(psi_values) if psi_values else None
+    if metric.get("ks") is not None and float(metric["ks"]) >= _SUSPECTED_LEAKAGE_KS:
+        leakage = (
+            f"单变量 KS {float(metric['ks']):.3f} ≥ {_SUSPECTED_LEAKAGE_KS:.2f}，区分度异常高，"
+            "疑似目标泄漏或本身就是模型分；建模筛选会把它剔除，请先核对来源。"
+        )
+        # The worse verdict wins: suspected leakage must not soften a drift
+        # verdict (不推荐) to 谨慎.
+        if psi is not None and psi >= 0.25:
+            return "不推荐", f"最大 PSI={psi:.3f}，稳定性风险较高；{leakage}"
+        return "谨慎", leakage
     sample_note = "样本量偏小，建议扩大样本复核；" if valid_count < 100 else ""
     if psi is None:
         return "候选", f"{sample_note}有区分力；本次没有可用 PSI 结果，需另行验证稳定性。"
-    if psi > 0.25:
+    # Platform PSI bands, shared with the delivery card
+    # (gate_payloads._stability_label): stable below 0.10, attention from
+    # 0.10 up to below 0.25, drift at 0.25 and above.
+    if psi >= 0.25:
         return "不推荐", f"最大 PSI={psi:.3f}，稳定性风险较高。"
-    if psi > 0.10:
+    if psi >= 0.10:
         return "谨慎", f"{sample_note}有区分力，但最大 PSI={psi:.3f} 需要关注。"
     return "推荐", f"{sample_note}区分力与已提供的稳定性结果均通过基础规则。"
 

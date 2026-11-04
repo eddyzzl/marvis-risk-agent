@@ -30,6 +30,7 @@ from .contracts import (
     deep_freeze,
     deep_thaw,
 )
+from marvis.agent.strategy_workflows.contracts import prepare_strategy_plan as _prepared
 
 
 AUTOMATIC_TREE_BUILD_WORKFLOW_ID = "automatic_tree_candidate_build"
@@ -1026,17 +1027,6 @@ def _require_dataset_context(
         )
 
 
-def _prepared(
-    workflow_id: str,
-    template_id: str,
-    slots: Mapping[str, Any],
-) -> PreparedStrategyPlan:
-    return PreparedStrategyPlan(
-        workflow_id=workflow_id,
-        template_id=template_id,
-        slots=deep_freeze(slots),
-        success_criteria=(),
-    )
 
 
 def _source_tree_id(value: object, *, workflow: str) -> str:

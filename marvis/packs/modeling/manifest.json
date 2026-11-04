@@ -3110,6 +3110,54 @@
               "purpose"
             ],
             "additionalProperties": false
+          },
+          "selection_origin": {
+            "enum": [
+              "platform_auto",
+              "platform_recommended_user_confirmed",
+              "user_override"
+            ]
+          },
+          "evaluation_evidence": {
+            "type": "object",
+            "properties": {
+              "basis": {
+                "enum": [
+                  "selected_experiment",
+                  "pre_refit_heldout",
+                  "delivered_experiment"
+                ]
+              },
+              "experiment_id": {
+                "type": "string"
+              },
+              "artifact_id": {
+                "type": "string"
+              },
+              "delivered_experiment_id": {
+                "type": "string"
+              },
+              "delivered_artifact_id": {
+                "type": "string"
+              },
+              "refit_applied": {
+                "type": "boolean"
+              },
+              "metrics": {
+                "type": "object"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "basis",
+              "experiment_id",
+              "metrics",
+              "refit_applied",
+              "note"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -3592,6 +3640,47 @@
           },
           "actions": {
             "type": "array"
+          },
+          "evaluation_evidence": {
+            "type": "object",
+            "properties": {
+              "basis": {
+                "enum": [
+                  "selected_experiment",
+                  "pre_refit_heldout",
+                  "delivered_experiment"
+                ]
+              },
+              "experiment_id": {
+                "type": "string"
+              },
+              "artifact_id": {
+                "type": "string"
+              },
+              "delivered_experiment_id": {
+                "type": "string"
+              },
+              "delivered_artifact_id": {
+                "type": "string"
+              },
+              "refit_applied": {
+                "type": "boolean"
+              },
+              "metrics": {
+                "type": "object"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "basis",
+              "experiment_id",
+              "metrics",
+              "refit_applied",
+              "note"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

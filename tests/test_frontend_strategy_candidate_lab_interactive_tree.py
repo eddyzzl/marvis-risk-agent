@@ -1096,11 +1096,3 @@ def test_successful_tree_submit_reloads_once_only_from_external_settle():
         assert.ok(wiring.includes("settleWhenServerIdle: true"));
         """
     )
-
-
-def test_app_wires_candidate_lab_submit_to_the_existing_task_settle_poller():
-    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
-
-    assert "settleCandidateLabSubmission: (taskId) => pollValidationProgress(" in app_js
-    assert "terminalTaskStatuses,\n    taskId,\n    { settleWhenServerIdle: true }" in app_js
-    assert "await refreshStrategyCandidateLabAfterSettled(taskId, polledTask)" in app_js

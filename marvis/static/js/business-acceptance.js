@@ -4,7 +4,7 @@ import { BUSINESS_OBJECTIVE_VERSION, EFFECT_STAGES, businessObjectiveFormHtml, c
 
 const STATUS = {
   passed: ["业务达标", "success"], failed: ["业务未达标", "danger"],
-  insufficient_evidence: ["证据不足", "warning"], not_configured: ["未配置", "neutral"],
+  insufficient_evidence: ["证据不足", "warning"], not_configured: ["未设置标准", "neutral"],
   not_applicable: ["不适用", "neutral"], pending: ["尚未评估", "neutral"],
   unsupported: ["结果版本不受支持", "warning"],
 };
@@ -30,7 +30,7 @@ export function businessAcceptanceHtml(plan, task = {}) {
   const view = businessAcceptanceProjection(plan, task);
   const { result, objective } = view;
   const reasons = result?.reasons || (view.status === "not_configured"
-    ? ["尚未配置业务验收合同。执行完成只表示计划步骤完成，不代表业务达标。"]
+    ? ["这次没有设置业务验收标准，所以只说明流程已跑完，不判断业务是否达标。"]
     : view.status === "pending" ? ["合同已记录，等待实际采用对象的认证证据；不会使用候选最优值代替。"]
     : ["当前客户端无法识别此验收结果，请更新后重新查看；不会据此认定业务通过。"]);
   const criteria = result?.criteria?.length ? result.criteria : objective?.criteria || [];

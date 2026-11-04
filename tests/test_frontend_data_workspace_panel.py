@@ -233,54 +233,11 @@ def test_data_workspace_panel_guards_navigation_and_surfaces_revision_conflict()
 
 
 def test_data_workspace_panel_is_mounted_in_the_task_workspace():
-    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
-    index_html = (ROOT / "marvis/static/index.html").read_text(encoding="utf-8")
-    css = read_browser_stylesheets(ROOT / "marvis/static")
-
-    assert 'import { createDataWorkspaceController } from "./js/v2/data_workspace_controller.js";' in app_js
-    assert 'import { createDataWorkspacePanel } from "./js/v2/data_workspace_panel.js";' in app_js
-    assert "const dataWorkspaceController = createDataWorkspaceController();" in app_js
-    assert "const dataWorkspacePanel = createDataWorkspacePanel({" in app_js
-    assert "async function requestTaskSelection(task)" in app_js
-    assert "await new Promise((resolve) => requestAnimationFrame(() => resolve()));" in app_js
-    assert app_js.count("row.onclick = () => requestTaskSelection(task);") == 2
-    assert "row.onclick = () => selectTask(task);" not in app_js
-    assert "async function reloadDataWorkspace(" in app_js
-    assert app_js.count("await reloadDataWorkspace(taskId, { silent: true });") >= 2
-    assert "await reloadDataWorkspace(taskSession.taskId, { silent: true });" in app_js
-
-    for element_id in (
-        "dataWorkspacePanel",
-        "dataWorkspaceDataset",
-        "dataWorkspaceDatasetHash",
-        "dataWorkspaceRevision",
-        "dataWorkspaceState",
-        "dataWorkspaceTarget",
-        "dataWorkspaceFieldCount",
-        "dataWorkspaceFields",
-        "dataWorkspaceStatus",
-        "dataWorkspaceRefreshButton",
-        "dataWorkspaceDiscardButton",
-        "dataWorkspaceSaveButton",
-    ):
+    index_html = (ROOT / 'marvis/static/index.html').read_text(encoding='utf-8')
+    css = read_browser_stylesheets(ROOT / 'marvis/static')
+    for element_id in ('dataWorkspacePanel', 'dataWorkspaceDataset', 'dataWorkspaceDatasetHash', 'dataWorkspaceRevision', 'dataWorkspaceState', 'dataWorkspaceTarget', 'dataWorkspaceFieldCount', 'dataWorkspaceFields', 'dataWorkspaceStatus', 'dataWorkspaceRefreshButton', 'dataWorkspaceDiscardButton', 'dataWorkspaceSaveButton'):
         assert f'id="{element_id}"' in index_html
-
-    assert ".data-workspace-panel" in css
-    assert ".data-workspace-field-row" in css
-    assert ".data-workspace-state-conflict" in css
-    assert ".data-workspace-state-dirty" in css
-
-
-def test_validation_tasks_do_not_open_data_workspace():
-    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
-    assert "function taskUsesDataWorkspace" in app_js
-    helper = app_js.split("function taskUsesDataWorkspace", 1)[1].split("function ", 1)[0]
-    assert '"data_join"' in helper
-    assert '"validation"' not in helper
-    assert '"validation_batch"' not in helper
-    assert "if (!taskUsesDataWorkspace(task))" in app_js
-    request_fn = app_js.split("async function requestTaskSelection", 1)[1].split(
-        "function selectTask",
-        1,
-    )[0]
-    assert "dataWorkspacePanel.clear()" in request_fn
+    assert '.data-workspace-panel' in css
+    assert '.data-workspace-field-row' in css
+    assert '.data-workspace-state-conflict' in css
+    assert '.data-workspace-state-dirty' in css

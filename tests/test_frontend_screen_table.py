@@ -231,7 +231,7 @@ def test_modeling_setup_weight_picker_renders_candidates():
         assert.equal(html.includes('data-modeling-gate-step-id="gate-1"'), true);
         assert.equal(html.includes('value="weight" checked'), true);
         assert.equal(html.includes("sample_weight"), true);
-        assert.equal(html.includes("lgb/xgb"), true);
+        assert.equal(html.includes("LightGBM / XGBoost"), true);
         assert.equal(html.includes("modeling-target-select"), true);
         assert.equal(html.includes("modeling-guidance-list"), true);
         assert.equal(html.includes("二分类适合 0/1 风控标签。"), true);
@@ -493,7 +493,7 @@ def test_modeling_setup_is_a_progressive_agent_journey():
           },
         });
         for (const fragment of [
-          "Agent 建模协作台",
+          "一起确定这次模型怎么做",
           "modeling-journey",
           'data-modeling-stage="split"',
           'data-modeling-stage="model"',
@@ -730,7 +730,10 @@ def test_model_delivery_panel_renders_selection_and_actions():
         }});
         assert.equal(html.includes("训练后交付"), true);
         assert.equal(html.includes("2 项需处理/不支持"), true);
-        assert.equal(html.includes("exp-lgb"), true);
+        // Experiment ids only in tooltips; the card names "实验 N · 算法".
+        assert.equal(html.includes("实验 1 · LightGBM"), true);
+        assert.equal(html.includes(">exp-lgb<"), false);
+        assert.equal(html.includes('title="exp-lgb"'), true);
         assert.equal(html.includes("已选"), true);
         assert.equal(html.includes("0.3123"), true);
         assert.equal(html.includes("稳定性"), true);
@@ -739,7 +742,8 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("模型策略"), true);
         assert.equal(html.includes("策略执行"), true);
         assert.equal(html.includes("已人工放行"), true);
-        assert.equal(html.includes("require_pmml: true"), true);
+        assert.equal(html.includes("要求可导出 PMML"), true);
+        assert.equal(html.includes("require_pmml"), false);
         assert.equal(html.includes("要求最终模型支持 PMML 导出"), true);
         assert.equal(html.includes("放行原因: 本轮只验收原生模型。"), true);
         assert.equal(html.includes("评分卡"), true);
@@ -752,13 +756,19 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("高风险"), true);
         assert.equal(html.includes("已校准(PMML不含)"), true);
         assert.equal(html.includes("仅原生"), true);
-        assert.equal(html.includes("120.00"), true);
+        assert.equal(html.includes(">120<"), true);
+        assert.equal(html.includes("120.00"), false);
         assert.equal(html.includes("PMML"), true);
         assert.equal(html.includes("验证移交"), true);
         assert.equal(html.includes("Challenger/Backtest"), true);
-        assert.equal(html.includes("创建Challenger/Backtest"), true);
+        assert.equal(html.includes("创建挑战者回测"), true);
+        assert.equal(html.includes("挑战者回测任务"), true);
         assert.equal(html.includes("模型卡"), true);
-        assert.equal(html.includes("art-lgb.model_card.md"), true);
+        // Stored files read by kind; the real file name rides in the tooltip.
+        assert.equal(html.includes('title="art-lgb.model_card.md"'), true);
+        assert.equal(html.includes(">art-lgb.model_card.md<"), false);
+        assert.equal(html.includes("Markdown 文档"), true);
+        assert.equal(html.includes("/tmp/"), false);
         assert.equal(html.includes("监控策略"), true);
         assert.equal(html.includes("model.monitoring_policy.md"), true);
         assert.equal(html.includes("可进入常规监控"), true);
@@ -768,9 +778,9 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("model.pmml"), true);
         assert.equal(html.includes("task-challenger"), true);
         assert.equal(html.includes("challenger_backtest_plan.md"), true);
-        assert.equal(html.includes("审批包"), true);
+        assert.equal(html.includes("审批材料包"), true);
         assert.equal(html.includes("approval_package.md"), true);
-        assert.equal(html.includes("审批包JSON"), true);
+        assert.equal(html.includes("审批材料包（JSON）"), true);
         assert.equal(html.includes("approval_package.json"), true);
         assert.equal(html.includes("model_report.xlsx"), true);
         assert.equal(html.includes("报告就绪度"), true);
@@ -1195,6 +1205,264 @@ def test_screen_table_shows_backend_hard_exclusion_reasons():
     assert output == "ok"
 
 
+def test_screen_table_reads_backend_chinese_reason_labels_and_watch_tag():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderScreenGateTable } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const html = renderScreenGateTable({
+          id: "reason-label-msg",
+          metadata: {
+            step_id: "screen-step",
+            screen: {
+              selected: ["safe"],
+              ranked: [["safe", 0.36]],
+              leakage: [["score", 0.448, "univariate KS 0.448 >= 0.4 — suspected target leakage"]],
+              suspected: [],
+              unusable: [],
+              leakage_watch: [["safe", 0.36, "leakage_watch: univariate KS 0.360 in [0.3, 0.4)"]],
+              reason_labels: { score: "单变量 KS 0.448 ≥ 0.4，疑似目标泄漏" },
+              scores: { safe: { ks: 0.36, iv: 0.2, missing_rate: 0, coverage: 1 } },
+              n_screened: 2,
+              thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+            },
+          },
+        });
+        assert.equal(html.includes("单变量 KS 0.448 ≥ 0.4，疑似目标泄漏"), true);
+        assert.equal(html.includes("suspected target leakage"), false);
+        assert.equal(html.includes(">需关注<"), true);
+        assert.equal(html.includes(">watch<"), false);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_defaults_to_existing_split_and_honours_oot_goal():
+    """Eval S4: an uploaded train/test/oot column is the default; a task OOT
+    goal never defaults to "no OOT"; review restates the sample plan; the
+    whole-month time cut and the 1-round tuning default are explained."""
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderModelingSetupPanel } from "./marvis/static/js/v2/modeling_setup_panel.js";
+
+        const render = (summary, extra = {}) => renderModelingSetupPanel({
+          id: "s4",
+          metadata: {
+            plan_id: "plan-1",
+            step_id: "gate-1",
+            modeling_setup: {
+              target_type: "binary", recipe: "lr", recipes: ["lr"], eligible_algorithms: ["lr"],
+              feature_count: 6, n_trials: 1,
+              split_summary: {
+                split_col: "split", total_rows: 480, warnings: [], split_config: {},
+                available_columns: ["x1", "apply_month", "split"],
+                time_column_candidates: ["apply_month"],
+                ...summary,
+              },
+              ...extra,
+            },
+          },
+        });
+        const uploaded = render({
+          split_counts: { train: 300, test: 60, oot: 120 }, has_oot: true,
+          existing_split: { column: "split", origin: "uploaded" },
+        }, { oot_requested: true, oot_requirement: "OOT KS ≥ 0.3" });
+        assert.equal(uploaded.includes("沿用样本已有的划分列（split）"), true);
+        assert.equal(/value="existing"[^>]* checked/.test(uploaded), true);
+        assert.equal(/value="none"[^>]* checked/.test(uploaded), false);
+        assert.equal(uploaded.includes('data-existing-split-col="split"'), true);
+        // Review step restates the step-1 plan as a live chip.
+        assert.equal(uploaded.includes('data-modeling-live-value="split">沿用 split 列的划分（train 300 / test 60 / OOT 120）'), true);
+        // Whole-month time cut and the 1-round default are stated plainly.
+        assert.equal(uploaded.includes("最新的若干整月"), true);
+        assert.equal(uploaded.includes("实际 OOT 占比可能和填写的百分比不同"), true);
+        assert.equal(uploaded.includes("平台默认 1 轮"), true);
+
+        const noOotYet = render({
+          split_counts: { train: 360, test: 120 }, has_oot: false,
+          existing_split: { column: "split", origin: "uploaded" },
+        }, { oot_requested: true, oot_requirement: "OOT KS ≥ 0.3" });
+        assert.equal(/value="time"[^>]* checked/.test(noOotYet), true);
+        assert.equal(noOotYet.includes('value="apply_month" selected'), true);
+        assert.equal(noOotYet.includes("你要求 OOT KS ≥ 0.3，所以默认按 apply_month 切出 OOT"), true);
+        assert.equal(noOotYet.includes("按 apply_month 切 OOT（目标约 20%，按整月切"), true);
+
+        const platformSplit = render({
+          split_counts: { train: 360, test: 120 }, has_oot: false,
+          existing_split: { column: "split", origin: "derived" },
+        });
+        assert.equal(platformSplit.includes("沿用当前划分（split 列）"), true);
+        assert.equal(platformSplit.includes("沿用样本已有的划分列"), false);
+        assert.equal(/value="existing"[^>]* checked/.test(platformSplit), true);
+
+        const legacy = render({ split_counts: { train: 360, test: 120 }, has_oot: false });
+        assert.equal(legacy.includes('value="existing"'), false);
+        assert.equal(/value="none"[^>]* checked/.test(legacy), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_split_choices_post_exact_split_config():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitModelingWeightAdjust } from "./marvis/static/js/v2/modeling_setup_panel.js";
+        const calls = [];
+        const context = {
+          selectedTaskId: "task-1",
+          acceptanceMode: "manual",
+          setActionStatus: () => {},
+          api: async (_url, options) => { calls.push(JSON.parse(options.body)); return { messages: [] }; },
+        };
+        function form({ mode, current = {}, existing = "split", time = "apply_month", test = "25", oot = "20" }) {
+          return {
+            dataset: {
+              modelingPlanId: "plan-1", modelingGateStepId: "gate-1", modelingCurrentWeight: "",
+              currentSplitConfig: JSON.stringify(current), existingSplitCol: existing,
+              expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0",
+              expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64),
+            },
+            querySelector(selector) {
+              if (selector === ".modeling-target-select") return { value: "binary", getAttribute: () => "binary" };
+              if (selector === ".modeling-n-trials-input") return { value: "1", getAttribute: () => "1" };
+              if (selector === ".modeling-recipe-control") return { dataset: { currentRecipes: "lr" }, querySelectorAll: () => [{ value: "lr" }] };
+              if (selector === ".modeling-weight-pick:checked") return { value: "" };
+              if (selector === ".modeling-override-reason-input") return { value: "" };
+              if (selector === ".modeling-split-mode:checked") return { value: mode };
+              if (selector === ".modeling-test-size-input") return { value: test };
+              if (selector === ".modeling-oot-size-input") return { value: oot };
+              if (selector === ".modeling-time-column-select") return { value: time };
+              return null;
+            },
+          };
+        }
+        const submit = (options) => submitModelingWeightAdjust({ disabled: false, closest: () => form(options) }, context);
+
+        await submit({ mode: "existing" });
+        assert.equal(calls[0].ui_action, "confirm_gate");
+        assert.equal(calls[0].adjust_params, undefined);
+
+        // Re-splitting an uploaded partition states every ratio the form shows.
+        await submit({ mode: "time" });
+        assert.equal(calls[1].ui_action, "apply_modeling_setup");
+        assert.deepEqual(calls[1].adjust_params.split_config, { test_size: 0.25, oot_by_time: "apply_month", oot_size: 0.2 });
+
+        await submit({ mode: "none" });
+        assert.deepEqual(calls[2].adjust_params.split_config, { test_size: 0.25 });
+
+        await submit({ mode: "existing", current: { test_size: 0.25, oot_by_time: "apply_month", oot_size: 0.2 } });
+        assert.deepEqual(calls[3].adjust_params.split_config, { method: "existing" });
+
+        // An unchanged generated split stays a plain confirmation.
+        await submit({ mode: "time", current: { test_size: 0.25, oot_by_time: "apply_month", oot_size: 0.2 } });
+        assert.equal(calls[4].ui_action, "confirm_gate");
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_review_step_refreshes_sample_plan_summary():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { activateModelingJourneyStep } from "./marvis/static/js/v2/modeling_setup_panel.js";
+        const classList = () => {
+          const values = new Set();
+          return { toggle: (name, on) => on ? values.add(name) : values.delete(name), contains: (name) => values.has(name) };
+        };
+        const stages = ["split", "model", "tuning", "review"].map((id) => ({
+          dataset: { modelingStage: id }, classList: classList(), scrollIntoView: () => {},
+        }));
+        const nodes = stages.map(() => ({ classList: classList(), setAttribute: () => {} }));
+        const chip = { attrs: {}, setAttribute(name, value) { this.attrs[name] = value; } };
+        const live = { textContent: "old", closest: () => chip };
+        const form = {
+          dataset: {},
+          querySelectorAll: (selector) => selector.includes("stage") ? stages : nodes,
+          querySelector(selector) {
+            if (selector === '[data-modeling-live-value="split"]') return live;
+            if (selector === ".modeling-split-mode:checked") return { value: "random" };
+            if (selector === ".modeling-test-size-input") return { value: "30" };
+            if (selector === ".modeling-oot-size-input") return { value: "15" };
+            if (selector === ".modeling-time-column-select") return { value: "" };
+            return null;
+          },
+        };
+        assert.equal(activateModelingJourneyStep(form, "review"), true);
+        assert.equal(live.textContent, "随机留出 OOT 15%，测试集占剩余 30%");
+        assert.equal(chip.attrs.title, "随机留出 OOT 15%，测试集占剩余 30%");
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_form_is_not_rendered_again_at_later_gates():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { driverGateHasWidget, gateMessageForCurrentTool } from "./marvis/static/js/v2/driver_manual_analysis.js";
+        const gate = (tool) => ({
+          id: tool,
+          metadata: { kind: "gate", gate_source_tool: tool, modeling_setup: { recipes: ["lr"] }, tables: [] },
+        });
+        assert.equal(Boolean(gateMessageForCurrentTool(gate("screen_features")).metadata.modeling_setup), true);
+        for (const tool of ["configure_tuning", "tune_hyperparameters", "select_features"]) {
+          const message = gateMessageForCurrentTool(gate(tool));
+          assert.equal(message.metadata.modeling_setup, undefined, tool);
+          assert.equal(driverGateHasWidget(gate(tool)), false, tool);
+        }
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_and_join_roles_read_for_users():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderModelingSetupPanel } from "./marvis/static/js/v2/modeling_setup_panel.js";
+        import { renderJoinC1Form } from "./marvis/static/js/v2/join_gate_controller.js";
+
+        const setupHtml = renderModelingSetupPanel({
+          id: "setup-labels",
+          metadata: {
+            step_id: "gate-setup",
+            modeling_setup: {
+              target_type: "binary", recipe: "lr", recipes: ["lr"], feature_count: 6, n_trials: 1,
+              metric_policy: "higher overfit-penalized test KS; OOT reported only, not used for selection",
+              eligible_algorithms: ["lr"],
+              disabled_algorithms: [{ recipe: "lgb_regressor", reason: "recipe target family does not match `binary`" }],
+            },
+          },
+        });
+        assert.equal(setupHtml.includes("recipe target family"), false);
+        assert.equal(setupHtml.includes("该算法不适用于二分类目标"), true);
+
+        // The file-name preview is a passive control, so the historical role
+        // table keeps its file names after the user confirms the roles.
+        const c1Html = renderJoinC1Form({
+          id: "c1",
+          metadata: { join_c1: { files: [{ dataset_id: "ds_1", name: "bureau_features.csv", row_count: 240, n_cols: 6, proposed_role: "feature" }] } },
+        }, { interactive: false });
+        const stripped = c1Html.replace(
+          /<button\b(?![^>]*\bdata-gate-passive-control\b)[^>]*>[\s\S]*?<\/button>/gi,
+          "",
+        );
+        assert.equal(stripped.includes("bureau_features.csv"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_screen_table_only_latest_gate_is_interactive():
     output = _run_node(
         f"""
@@ -1367,7 +1635,8 @@ def test_join_key_only_latest_gate_has_picker_and_one_submit_action():
         assert.equal((html.match(/data-join-key-readonly="true"/g) || []).length, 1);
         assert.equal((html.match(/data-join-key-confirm=/g) || []).length, 1);
         assert.equal(html.includes('data-join-key-gate-step-id="gate-new"'), true);
-        assert.equal(html.includes("data-duplicate-confirm"), false);
+        // Only the pending (latest) join-key gate carries the confirm button.
+        assert.equal((html.match(/data-duplicate-confirm/g) || []).length, 1);
         process.stdout.write("ok");
         """
     )
@@ -2926,7 +3195,8 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", screen: {{ selected: ["x"] }} }} }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", dedup: {{ features: [{{ feature_id: "f" }}] }} }} }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", modeling_setup: {{}} }} }}), "");
-        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", join_keys: {{ features: [{{ feature_id: "f" }}] }} }} }}), "");
+        // The join key picker only re-diagnoses, so its gate keeps the confirm (eval S6).
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", join_keys: {{ features: [{{ feature_id: "f" }}] }} }} }}).includes("data-driver-confirm"), true);
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "done" }} }}), "");
 
         let agentMessages = [];

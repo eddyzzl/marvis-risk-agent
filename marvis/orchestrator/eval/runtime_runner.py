@@ -8,19 +8,14 @@ This runner does not manufacture plans, tool results, invocations or DB state.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from http.client import HTTPConnection, HTTPSConnection
-import hmac
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import platform
-import signal
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -28,6 +23,11 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from http.client import HTTPConnection, HTTPSConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -35,10 +35,10 @@ import psutil
 
 from .runtime_budget import AdmissionBudgetExceeded, AggregateBudget
 from .runtime_contracts import (
+    RUNTIME_FINISH_REASONS,
     ModelConnection,
     RuntimeCase,
     RuntimeSuite,
-    RUNTIME_FINISH_REASONS,
     digest,
 )
 
@@ -333,7 +333,7 @@ class _CompletionObservation:
 @contextmanager
 def _model_gateway(
     profile, secret_env, attempt_path, *, max_attempts, deadline, max_output_tokens=2048,
-    budget=None, price_bytes=None, origin_ns=None,
+    budget=None, price_bytes=None, origin_ns=None, formal_provider_limits=None,
 ):
     """One credential-owning, metered endpoint shared by the app and all workers.
 
@@ -341,6 +341,15 @@ def _model_gateway(
     loopback endpoint and an ephemeral bearer token. No inherited role profile or
     model switch can bypass the case's shared attempt budget.
     """
+    if formal_provider_limits is not None:
+        from .runtime_formal_budget import ProviderLimits
+        formal_provider_limits = ProviderLimits.model_validate(formal_provider_limits)
+        if (budget is None or budget.max_cost is None or price_bytes is None
+                or formal_provider_limits.context_window != profile["context_window"]
+                or formal_provider_limits.max_output_tokens != profile["max_output_tokens"]
+                or profile.get("enable_thinking", False)
+                or formal_provider_limits.price_book_sha256 != digest(price_bytes)):
+            raise RuntimeJourneyError("formal_gateway_budget_binding_invalid")
     aggregate_budget = None
     if budget is not None and (budget.max_total_tokens is not None or budget.max_cost is not None):
         price = None
@@ -355,6 +364,7 @@ def _model_gateway(
             context_window=profile["context_window"], max_total_tokens=budget.max_total_tokens,
             max_cost=budget.max_cost, currency=budget.currency, price=price,
             price_hash=digest(price_bytes) if price is not None else None,
+            retain_full_reservations=formal_provider_limits is not None,
         )
     observer = AttemptObserver(
         attempt_path, max_attempts=max_attempts, deadline=deadline, aggregate_budget=aggregate_budget,
@@ -488,6 +498,10 @@ def _model_gateway(
                 if effective_output != requested_output:
                     payload["max_tokens"] = effective_output
                     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                if formal_provider_limits is not None:
+                    from .runtime_formal_budget import validate_formal_payload
+                    body, bounded = validate_formal_payload(payload, model_name=profile["model_name"], limits=formal_provider_limits)
+                    metadata.update(bounded)
                 metadata["provider_request_sha256"] = digest(body)
             except (ValueError, TypeError, AttributeError):
                 self.reject(400, "invalid_request")
@@ -677,24 +691,37 @@ def _model_gateway(
 def _serve(config_path: Path):
     # No case/expected file or parent dataset directory is passed to this child.
     import uvicorn
+
     from marvis.app import create_app
 
     config = json.loads(config_path.read_text())
     workspace = Path(config["workspace"])
+    if "load_nonce" in config:
+        from .runtime_warmup import child_process_identity
+        child_process_identity(config)
     settings_dir = workspace / "settings"
-    settings_dir.mkdir(parents=True)
     profile = config["profile"]
-    _write_new(
-        settings_dir / "llm.json",
-        {"default_model_id": profile["model_id"], "models": [profile]},
-    )
+    saved_profile = {"default_model_id": profile["model_id"], "models": [profile]}
+    if config.get("epoch", 0) == 0:
+        settings_dir.mkdir(parents=True)
+        _write_new(settings_dir / "llm.json", saved_profile)
+    elif json.loads((settings_dir / "llm.json").read_bytes()) != saved_profile:
+        raise RuntimeJourneyError("restart_model_profile_changed")
+    from marvis.process_timing import observe_process_timing
     from marvis.runtime_observations import observe_runtime
+    from .runtime_fault_launcher import evaluation_fault_launcher
+    from .runtime_validation_timeout import evaluation_validation_timeout
 
-    with observe_runtime(workspace.parent / "process-observations.jsonl", config["origin_ns"]) as observer:
+    suffix = "" if config.get("epoch", 0) == 0 else f"-epoch-{config['epoch']}"
+    with observe_runtime(workspace.parent / f"process-observations{suffix}.jsonl", config["origin_ns"]) as observer, \
+            observe_process_timing(workspace.parent / f"process-timing{suffix}.jsonl", config["origin_ns"]) as timing, \
+            evaluation_fault_launcher(workspace, origin_ns=config["origin_ns"]), \
+            evaluation_validation_timeout(workspace, origin_ns=config["origin_ns"]):
         app = create_app(workspace)
         # Uvicorn re-raises SIGTERM after its lifespan exits; seal during that
         # lifespan, after application shutdown handlers, before signal replay.
         app.router.add_event_handler("shutdown", observer.seal)
+        app.router.add_event_handler("shutdown", timing.seal)
         uvicorn.run(
             app,
             host="127.0.0.1",
@@ -761,6 +788,8 @@ def _application(
     price_bytes: bytes | None = None,
     process_state: dict | None = None,
     origin_ns: int | None = None,
+    load_binding: dict | None = None,
+    formal_provider_limits=None,
 ):
     deadline = time.monotonic() + case.budget.wall_seconds
     with _model_gateway(
@@ -773,10 +802,12 @@ def _application(
         budget=case.budget,
         price_bytes=price_bytes,
         origin_ns=origin_ns,
+        **({"formal_provider_limits": formal_provider_limits} if formal_provider_limits is not None else {}),
     ) as child_profile:
         with _application_process(
             root, case, child_profile, source_sha256, deadline, forbidden_inputs,
             process_state=process_state, origin_ns=origin_ns,
+            **({"load_binding": load_binding} if load_binding is not None else {}),
         ) as app:
             yield app
 
@@ -791,6 +822,7 @@ def _application_process(
     forbidden_inputs: tuple[Path, ...],
     process_state: dict | None = None,
     origin_ns: int | None = None,
+    load_binding: dict | None = None,
 ):
     workspace = root / "workspace"
     workspace.mkdir(mode=0o700)
@@ -800,6 +832,10 @@ def _application_process(
         "port": _free_port(),
         "origin_ns": time.monotonic_ns() if origin_ns is None else origin_ns,
     }
+    if load_binding is not None:
+        from .runtime_warmup import validate_load_binding
+        validate_load_binding(load_binding)
+        config["load_nonce"] = uuid.uuid4().hex
     config_path = root / "runtime-config.json"
     _write_new(config_path, config)
     source_root = Path(__file__).resolve().parents[3]
@@ -841,9 +877,21 @@ def _application_process(
         )
         if process_state is not None:
             process_state["started"] = True
+        control = None
         try:
             base_url = f"http://127.0.0.1:{config['port']}"
             with httpx.Client(base_url=base_url, trust_env=False) as client:
+                from .runtime_process_control import OwnedProcessControl
+                def launch_epoch(epoch):
+                    next_config = {**config, "epoch": epoch}
+                    next_path = root / f"runtime-config-epoch-{epoch}.json"
+                    _write_new(next_path, next_config)
+                    return subprocess.Popen([sys.executable, "-m", "marvis.orchestrator.eval.runtime_runner",
+                                             "--serve-config", str(next_path)], cwd=root, env=env,
+                                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                control = OwnedProcessControl(proc, workspace=workspace, root=root, origin_ns=config["origin_ns"],
+                                              deadline=deadline, launch=launch_epoch, client=client)
+                client._marvis_process_control = control
                 while time.monotonic() < deadline:
                     if proc.poll() is not None:
                         raise RuntimeJourneyError("application_startup_failed")
@@ -855,6 +903,21 @@ def _application_process(
                     time.sleep(0.05)
                 else:
                     raise RuntimeBudgetExceeded("application_startup_timeout")
+                if load_binding is not None:
+                    from .runtime_warmup import SCHEMA as LOAD_SCHEMA
+                    from .runtime_warmup import append_event, perform_warmup
+                    identity = json.loads((root / "runtime-child-identity.json").read_text())
+                    if (identity["pid"] != proc.pid or identity["nonce"] != config["load_nonce"]
+                            or identity["workspace_sha256"] != digest(str(workspace.resolve()))):
+                        raise RuntimeJourneyError("load_child_identity_mismatch")
+                    load_evidence = {"schema": LOAD_SCHEMA, "binding": load_binding, "origin_ns": config["origin_ns"],
+                                     "child_identity": identity, "child_identity_sha256": digest(identity), "events": []}
+                    process_state["load_originals"] = load_evidence
+                    append_event(load_evidence, "process_ready", config["origin_ns"], pid=proc.pid,
+                                 workspace_sha256=identity["workspace_sha256"], nonce=identity["nonce"])
+                    if load_binding["warmup"] is not None:
+                        perform_warmup(client, load_binding["warmup"], process=proc,
+                                       evidence=load_evidence, origin_ns=config["origin_ns"], deadline=deadline)
                 yield client, workspace, deadline
                 saved = json.loads((workspace / "settings" / "llm.json").read_text())
                 if saved != {
@@ -863,9 +926,16 @@ def _application_process(
                 }:
                     raise RuntimeJourneyError("isolated_model_profile_changed")
         finally:
-            _terminate(proc)
+            _terminate(control.process if control is not None else proc)
             if process_state is not None:
                 process_state["stopped"] = True
+                if control is not None:
+                    process_state["process_epochs"] = control.epochs
+                    process_state["process_restarts"] = control.restarts
+                if process_state.get("load_originals"):
+                    from .runtime_warmup import append_event
+                    append_event(process_state["load_originals"], "process_stopped", config["origin_ns"],
+                                 pid=control.process.pid if control is not None else proc.pid)
 
 
 class Journey:
@@ -969,6 +1039,37 @@ class Journey:
         else:
             source = workspace / "source"
             source.mkdir()
+            # Feature dictionaries are source materials, not dataset-upload
+            # roles. Let the normal setup scanner register their native role.
+            dictionaries = [m for m in self.case.materials
+                            if self.case.task.task_type == "feature_analysis" and m.role == "dictionary"]
+            if dictionaries:
+                from contextlib import ExitStack
+
+                with ExitStack() as stack:
+                    files = []
+                    for material in dictionaries:
+                        path = (dataset_root / material.path).resolve()
+                        if not path.is_relative_to(dataset_root.resolve()) or not path.is_file():
+                            raise RuntimeJourneyError("material_identity_mismatch")
+                        original = stack.enter_context(path.open("rb"))
+                        stream = stack.enter_context(tempfile.TemporaryFile())
+                        sha = hashlib.sha256()
+                        while chunk := original.read(1024 * 1024):
+                            if time.monotonic() >= self.deadline:
+                                raise RuntimeBudgetExceeded("material snapshot wall budget")
+                            sha.update(chunk)
+                            stream.write(chunk)
+                        if sha.hexdigest() != material.sha256:
+                            raise RuntimeJourneyError("material_identity_mismatch")
+                        stream.seek(0)
+                        files.append(("files", (material.path, stream)))
+                    uploaded = self.json_request("POST", "/api/material-uploads", label="upload_feature_dictionary",
+                        files=files, data={"relative_paths": [m.path for m in dictionaries]})
+                source = Path(uploaded["source_dir"]).resolve()
+                if (not source.is_relative_to((workspace / "material_uploads").resolve())
+                        or sorted(f["relative_path"] for f in uploaded["files"]) != sorted(m.path for m in dictionaries)):
+                    raise RuntimeJourneyError("material_identity_mismatch")
             extension_entry = bool(self.case.initial_message is None and self.case.actions
                                    and self.case.actions[0].kind == "submit_extension_request")
             body = self.case.task.model_dump(exclude_none=True)
@@ -978,7 +1079,7 @@ class Journey:
             from .runtime_monitoring import monitoring_materials
             delayed_materials = monitoring_materials(self.case)
             for material in self.case.materials:
-                if material.path in delayed_materials:
+                if material.path in delayed_materials or material in dictionaries:
                     continue
                 path = (dataset_root / material.path).resolve()
                 if not path.is_relative_to(dataset_root.resolve()):
@@ -1021,6 +1122,8 @@ class Journey:
                 self.wait_idle()
         for action_index, action in enumerate(self.case.actions, 1):
             self.current_action_index = action_index
+            from .runtime_recovery_followups import begin_followup, finish_followup
+            followup_originals = begin_followup(self, action, workspace)
             if action.kind == "submit_extension_request":
                 from .runtime_extensions import submit_extension
                 submit_extension(self, action, workspace)
@@ -1033,6 +1136,9 @@ class Journey:
             elif action.kind == "confirm_model_monitoring_plan":
                 from .runtime_monitoring import confirm_monitoring
                 confirm_monitoring(self, action)
+            elif action.kind == "recover_monitoring_execution":
+                from .runtime_monitoring_fault import recover_monitoring_execution
+                recover_monitoring_execution(self, action)
             elif action.kind == "start_validation_workflow":
                 self.start_validation_workflow(action)
             elif action.kind == "start_validation_agent":
@@ -1041,6 +1147,12 @@ class Journey:
             elif action.kind == "confirm_current_validation_report":
                 from .runtime_validation_adapter import confirm_current_report
                 confirm_current_report(self, action)
+            elif action.kind == "recover_validation_execution":
+                from .runtime_validation_timeout import recover_validation_execution
+                recover_validation_execution(self, action)
+            elif action.kind == "recover_validation_report":
+                from .runtime_validation_fault import recover_report
+                recover_report(self, action)
             elif action.kind == "submit_labeling_request":
                 from .runtime_labeling import submit_labeling_request
                 submit_labeling_request(self, action)
@@ -1131,8 +1243,13 @@ class Journey:
                         raise RuntimeJourneyError("native_plan_after_unavailable")
                     capture["plan_after"] = matches[0]
                 else:
+                    retry = {}
+                    if action.drop_nan_labels is not None:
+                        if "drop_nan_labels" not in step["inputs"]:
+                            raise RuntimeJourneyError("declared_label_policy_not_applicable_to_step")
+                        retry = {"inputs": {**step["inputs"], "drop_nan_labels": action.drop_nan_labels}}
                     self.json_request(
-                        "POST", prefix + "/retry", label="human_retry", json={}
+                        "POST", prefix + "/retry", label="human_retry", json=retry
                     )
                     self.wait_idle()
             elif action.kind == "replay_approval":
@@ -1160,6 +1277,8 @@ class Journey:
                     label="user_stop",
                     json={},
                 )
+
+            finish_followup(self, followup_originals, workspace)
 
     def prepare_validation_task(self, dataset_root, workspace):
         """Upload only role/hash-bound validation artifacts through the product API."""
@@ -1353,8 +1472,9 @@ class Journey:
         if not gates:
             raise RuntimeJourneyError("recommended_selection_missing_display")
         gate = gates[-1]
-        from marvis.api_schemas import StepConfirmationRequest
         from pydantic import ValidationError
+
+        from marvis.api_schemas import StepConfirmationRequest
 
         snapshot = gate.get("confirmation_snapshot")
         try:
@@ -1398,9 +1518,15 @@ class Journey:
             body["adjust_params"]["refit_on_train_plus_test"] = action.refit_on_train_plus_test
         route = f"/api/tasks/{self.task_id}/agent/messages"
         self.record_human_action(action)
-        self.json_request("POST", route, label="human_recommended_selection", json=body)
+        response = self.json_request("POST", route, label="human_recommended_selection", json=body)
+        ordinal = self.count
         self.approval = (route, body)
-        self.wait_idle(changed_step=step["id"])
+        after = self.wait_idle(changed_step=step["id"])
+        selections = getattr(self, "model_selections", [])
+        selections.append({"case_action_index": self.current_action_index, "action_sha256": digest(action.model_dump()),
+            "request": body, "response": response, "http_ordinal": ordinal, "plan_before": plan,
+            "plan_after": next(p for p in after if p["id"] == plan["id"]), "gate": gate})
+        self.model_selections = selections
 
 
 def _tool_name(value):
@@ -1420,6 +1546,7 @@ def _output_identity(output, evidence, tool):
         return {"output_sha256": digest(output)}
     except ValueError:
         from copy import deepcopy
+
         from marvis.orchestrator.evidence import payload_hash
 
         if tool != "strategy.design_cutoff_bands":
@@ -1496,10 +1623,10 @@ def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) 
     Raw tool outputs stay in memory for the scorer. The public artifact includes
     only execution identities, integrity hashes, statuses and safe counters.
     """
+    from marvis.agent.semantic_diagnostics import sanitize_diagnostics
+    from marvis.repositories.datasets import DatasetRepository
     from marvis.repositories.plans import PlanRepository
     from marvis.repositories.tasks import TaskRepository
-    from marvis.repositories.datasets import DatasetRepository
-    from marvis.agent.semantic_diagnostics import sanitize_diagnostics
     from marvis.settings import Settings
 
     db = Settings(workspace).db_path
@@ -1529,7 +1656,7 @@ def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) 
         else None
     )
     private = {"outputs": {}, "messages": tasks.list_agent_messages(task_id)}
-    from .runtime_validation_adapter import validation_entry, pipeline_receipt
+    from .runtime_validation_adapter import pipeline_receipt, validation_entry
     if case is not None and validation_entry(case) == "standard_validation_agent_v2":
         evidence["validation_pipeline"] = pipeline_receipt(
             workspace, task_id, case, private["messages"],
@@ -1642,8 +1769,9 @@ def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) 
                 except (ValueError, KeyError, OSError):
                     receipt["binding_verified"] = False
             evidence["steps"].append(receipt)
-    from .runtime_monitoring import monitoring_entry, monitoring_receipt
     from marvis.data.errors import DataLayerError
+
+    from .runtime_monitoring import monitoring_entry, monitoring_receipt
     if case is not None and monitoring_entry(case):
         evidence["runtime_entry"] = monitoring_entry(case)
         try:
@@ -1671,7 +1799,7 @@ def _read_attempts(path: Path) -> list[dict]:
 def _run_case(
     case, dataset_root, profile, case_dir, secret_env, source_sha256, forbidden_inputs,
     price_bytes=None,
-    custody_run_dir=None, custody_bindings=None,
+    custody_run_dir=None, custody_bindings=None, load_binding=None, formal_provider_limits=None,
 ):
     origin_ns = time.monotonic_ns()
     started = origin_ns / 1_000_000_000
@@ -1710,8 +1838,16 @@ def _run_case(
                 price_bytes,
                 process_state=process_state,
                 origin_ns=origin_ns,
+                **({"load_binding": load_binding} if load_binding is not None else {}),
+                **({"formal_provider_limits": formal_provider_limits} if formal_provider_limits is not None else {}),
             ) as (client, workspace, deadline):
                 journey = Journey(client, case, deadline, origin_ns=origin_ns)
+                journey.owned_process_control = getattr(client, "_marvis_process_control", None)
+                if load_binding is not None:
+                    from .runtime_warmup import append_event
+                    load_evidence = process_state["load_originals"]
+                    journey.count = (load_binding.get("warmup") or {}).get("requests", 0)
+                    append_event(load_evidence, "journey_started", origin_ns, pid=load_evidence["child_identity"]["pid"])
                 if custody_run_dir is not None:
                     from .runtime_safety_capture import capture_runtime_before
                     safety_before_dir = (root / "safety-before").resolve()
@@ -1737,6 +1873,10 @@ def _run_case(
                                 {"stage": "budget_or_failure_stop", "status_code": None}
                             )
                     raise
+                finally:
+                    if load_binding is not None:
+                        append_event(load_evidence, "journey_finished", origin_ns,
+                                     pid=journey.owned_process_control.process.pid if journey.owned_process_control is not None else load_evidence["child_identity"]["pid"])
         except KeyboardInterrupt:
             record.update(runtime_status="interrupted", error_code="operator_interrupt")
         except (RuntimeBudgetExceeded, httpx.TimeoutException):
@@ -1760,7 +1900,7 @@ def _run_case(
             )
             record["execution"] = evidence
             if journey is not None:
-                for key in ("human_decisions", "runtime_faults"):
+                for key in ("human_decisions", "runtime_faults", "validation_faults", "model_selections"):
                     if getattr(journey, key, None):
                         private[key] = getattr(journey, key)
             if journey is not None and getattr(journey, "extension_outputs", None):
@@ -1777,10 +1917,34 @@ def _run_case(
             record["runtime_status"] = "receipt_error"
         from .runtime_process import read_backend_events
         record["backend_events"] = read_backend_events(root / "process-observations.jsonl")
+        if len(process_state.get("process_epochs", [])) > 1:
+            from marvis.process_timing import read_process_timing
+            record["process_epochs"] = [{"ordinal": epoch["ordinal"], "identity": epoch["identity"],
+                "backend_events": read_backend_events(Path(epoch["process_observations_path"])),
+                "process_timing_events": read_process_timing(Path(epoch["process_timing_path"]))}
+                for epoch in process_state["process_epochs"]]
+            record["process_restarts"] = process_state["process_restarts"]
+            originals_dir = workspace / ".runtime-process-originals"
+            originals_dir.mkdir(mode=0o700)
+            for epoch, archived in zip(process_state["process_epochs"], record["process_epochs"], strict=True):
+                archived["originals"] = {}
+                for key in ("process_observations_path", "process_timing_path"):
+                    source = Path(epoch[key])
+                    if source.is_symlink() or source.stat().st_size > 8_000_000:
+                        raise RuntimeJourneyError("process_epoch_original_invalid")
+                    raw = source.read_bytes()
+                    target = originals_dir / source.name
+                    with os.fdopen(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as stream:
+                        stream.write(raw)
+                    archived["originals"][key] = {"path": target.relative_to(workspace).as_posix(),
+                                                  "sha256": digest(raw), "size": len(raw)}
+        if (root / "process-timing.jsonl").exists():
+            from marvis.process_timing import read_process_timing
+            record["process_timing_events"] = read_process_timing(root / "process-timing.jsonl")
         record["http_events"] = journey.events if journey else []
         record["human_interventions"] = journey.interventions if journey else 0
         if custody_run_dir is not None:
-            from .runtime_custody import capture_case, CustodyError
+            from .runtime_custody import CustodyError, capture_case
 
             custody_started = time.monotonic()
             try:
@@ -1820,6 +1984,8 @@ def _run_case(
     if transport_failure is not None:
         record.update(transport_failure)
     record["duration_ms"] = int((time.monotonic() - started - custody_seconds) * 1000)
+    if load_binding is not None:
+        record["load_originals"] = process_state.get("load_originals")
     record["llm_events"] = attempts
     from .runtime_process import process_observation
     record["process_observation"] = process_observation(
@@ -1895,6 +2061,9 @@ def run_runtime_suite(
     secret_env: dict | None = None,
     baseline_path: Path | None = None,
     evidence_custody_dir: Path | None = None,
+    load_binding: dict | None = None,
+    formal_provider_limits=None,
+    expected_source_identity=None,
 ) -> dict:
     """All cases enter the denominator, including infrastructure/scorer failures.
 
@@ -1902,6 +2071,16 @@ def run_runtime_suite(
     is never proof of A. Hidden independence and business approval remain external
     acceptance requirements, even for a successful real-model execution.
     """
+    if load_binding is not None:
+        from .runtime_warmup import validate_load_binding
+        validate_load_binding(load_binding)
+    price_bytes = price_book_path.read_bytes() if price_book_path else None
+    if formal_provider_limits is not None:
+        from .runtime_formal_budget import ProviderLimits
+        formal_provider_limits = ProviderLimits.model_validate(formal_provider_limits)
+        if (price_book_path is None or formal_provider_limits.context_window != model.context_window
+                or formal_provider_limits.price_book_sha256 != digest(price_bytes)):
+            raise ValueError("formal_provider_limits_profile_mismatch")
     forbidden_inputs = (cases_path, expected_path)
     _validate_package_isolation(
         Path(__file__).resolve().parents[3] / "marvis", forbidden_inputs
@@ -1919,6 +2098,9 @@ def run_runtime_suite(
     if model_source == "real_model" and model.api_key_env not in allowed_env:
         if model.api_key_env and os.environ.get(model.api_key_env):
             allowed_env[model.api_key_env] = os.environ[model.api_key_env]
+    source_identity = _source_identity()
+    if expected_source_identity is not None and source_identity != expected_source_identity:
+        raise ValueError("formal_source_changed_before_execution")
     run_id = (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:12]
     )
@@ -1941,7 +2123,7 @@ def run_runtime_suite(
         "model_id": model.model_id,
         "model_name": model.model_name,
         "model_connection_sha256": digest(model.model_dump()),
-        "source": _source_identity(),
+        "source": source_identity,
         "cases_sha256": digest(cases_bytes),
         "expected_sha256": digest(expected_bytes),
         "case_ids": [case.id for case in suite.cases],
@@ -1955,6 +2137,13 @@ def run_runtime_suite(
         report["execution_mode"] = ("real_http_manual_compatibility_workflow_tools"
                                     if entries == {"manual_compatibility_workflow"}
                                     else "real_http_validation_native_entries")
+    if load_binding is not None:
+        report["load_binding"] = load_binding
+        if load_binding["load_mode"] == "concurrent":
+            from .runtime_concurrency import host_clock_identity
+            report["clock_identity"] = host_clock_identity()
+    if formal_provider_limits is not None:
+        report["formal_provider_limits"] = formal_provider_limits.model_dump()
     report["declared_max_total_llm_attempts"] = sum(
         case.budget.max_llm_attempts for case in suite.cases
     )
@@ -1968,7 +2157,6 @@ def run_runtime_suite(
         run_dir / "manifest.json", {k: v for k, v in report.items() if k != "cases"}
     )
     initial_manifest_sha256 = digest((run_dir / "manifest.json").read_bytes())
-    price_bytes = price_book_path.read_bytes() if price_book_path else None
     from .runtime_scoring import compare_baseline, score_case, summarize
 
     interrupted = False
@@ -2004,6 +2192,8 @@ def run_runtime_suite(
                     "run_id", "source", "cases_sha256", "expected_sha256",
                     "model_connection_sha256", "model_source", "model_id", "model_name",
                 )} if custody_run_dir is not None else None,
+                **({"load_binding": load_binding} if load_binding is not None else {}),
+                **({"formal_provider_limits": formal_provider_limits} if formal_provider_limits is not None else {}),
             )
             interrupted = record["runtime_status"] == "interrupted"
         from .runtime_monitoring import monitoring_entry

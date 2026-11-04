@@ -4,7 +4,6 @@ from pathlib import Path
 
 from tests.static_stylesheets import read_browser_stylesheets
 
-
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "marvis" / "static"
 
@@ -149,24 +148,12 @@ def test_plan_rail_keeps_running_subtask_spinner_and_adds_compact_progress():
 
 
 def test_app_wires_tool_progress_into_timeline_and_css_prevents_rail_overflow():
-    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
-    plan_js = (STATIC / "js" / "v2" / "plan_rail_controller.js").read_text(encoding="utf-8")
     css = read_browser_stylesheets(STATIC)
-
-    assert 'from "./js/v2/model_tuning_progress.js"' in app_js
-    assert "hideSupersededTuningThinking(" in app_js
-    assert "renderModelTuningMessageProgress(message)" in app_js
-    assert "if (tuningProgress) return tuningProgress.statusLabel;" in app_js
-    assert "!options.hideMeta || isTuningProgress" in app_js
-    assert 'tool_progress: metadata.kind === "tool_progress"' in app_js
-    assert "progress: metadata.progress || metadata" in app_js
-    assert 'status: metadata.status || ""' in app_js
-    assert 'from "./model_tuning_progress.js"' in plan_js
-    assert "renderModelTuningProgress(step?.progress, { compact: true })" in plan_js
 
     assert ".model-tuning-progress--compact" in css
     assert ".model-tuning-progress--card" in css
-    assert "backdrop-filter: blur(18px)" in css
+    # Batch 1 (2026-10-14 redesign D1-D5): content cards are flat; glass is only for floating controls.
+    assert "backdrop-filter: blur(18px)" not in css
     assert ".model-tuning-progress {" in css
     progress_rule = css.split(".model-tuning-progress {", 1)[1].split("}", 1)[0]
     assert "min-width: 0" in progress_rule

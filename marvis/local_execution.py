@@ -15,6 +15,18 @@ import sys
 TRUSTED_LOCAL = "trusted_local"
 LOOPBACK_ONLY = "loopback_only"
 NETWORK_MODES = (TRUSTED_LOCAL, LOOPBACK_ONLY)
+# Not a mode: the settings file exists but could not be read, so the user's
+# choice is unknown. Every execution path refuses it (fail closed) instead of
+# silently assuming trusted_local.
+SETTINGS_UNREADABLE = "settings_unreadable"
+SETTINGS_UNREADABLE_MESSAGE = "执行环境设置文件存在但无法读取，Notebook 网络模式未知；为安全起见未启动 Notebook。"
+SETTINGS_UNREADABLE_NEXT_ACTION = (
+    "请在「设置 → 执行环境」中依次重新选择 Python 环境和 Notebook 网络模式，"
+    "再在「第三方工具执行边界」点「确认执行边界」（三项都明确后才重写设置文件），"
+    "或修复工作区 settings/execution_environment.json 后重试。"
+)
+# Credentials of the local API never enter a loopback Notebook tree.
+KERNEL_WITHHELD_ENV = frozenset({"MARVIS_LOCAL_TOKEN"})
 _SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 _LIMITATIONS = (
     "不隔离文件系统；本地代理与委托 IPC 服务可能转发数据；"
@@ -47,10 +59,15 @@ _LOOPBACK_PROFILE = """(version 1)
 (deny network*)
 (allow network-outbound (remote ip "localhost:*"))
 (allow network-inbound (local ip "localhost:*"))
+(deny file-read* file-write* (regex #"/\\.blind_oot(/|$)"))
 """
+# The last rule keeps sealed blind OOT custody (marvis.modeling_holdout) out of
+# loopback Notebook trees. trusted_local processes are not covered.
 
 
 def validate_network_mode(mode: str) -> str:
+    if mode == SETTINGS_UNREADABLE:
+        raise LocalExecutionIsolationError(f"{SETTINGS_UNREADABLE_MESSAGE} {SETTINGS_UNREADABLE_NEXT_ACTION}")
     if mode not in NETWORK_MODES:
         raise LocalExecutionIsolationError("Notebook 网络模式无效，请选择可信本地运行或仅本机网络。")
     return mode
@@ -82,7 +99,7 @@ def execution_capability(mode: str = TRUSTED_LOCAL, *, probe: bool = False) -> L
     if probe:
         try:
             completed = subprocess.run(
-                [str(_SANDBOX_EXEC), "-p", _LOOPBACK_PROFILE, "/usr/bin/true"],
+                [str(_SANDBOX_EXEC), "-p", _LOOPBACK_PROFILE + _inherited_rules(), "/usr/bin/true"],
                 capture_output=True, timeout=5, check=False,
             )
             if completed.returncode != 0:
@@ -101,6 +118,14 @@ def execution_capability(mode: str = TRUSTED_LOCAL, *, probe: bool = False) -> L
     )
 
 
+def _inherited_rules() -> str:
+    # A probe nested in a marked launch must keep that launch's rules, or
+    # macOS refuses the nested sandbox_apply.
+    from marvis.local_peer import inherited_marker_rules
+
+    return inherited_marker_rules()
+
+
 def preflight_execution(mode: str = TRUSTED_LOCAL) -> dict:
     capability = execution_capability(mode, probe=True)
     if not capability.available:
@@ -117,7 +142,12 @@ def execution_command(command: list[str], mode: str = TRUSTED_LOCAL) -> list[str
     capability = execution_capability(mode)
     if not capability.available:
         raise LocalExecutionIsolationError(f"{capability.message} {capability.next_action}")
-    return [str(_SANDBOX_EXEC), "-p", _LOOPBACK_PROFILE, *command]
+    from marvis.local_peer import launch_marker_rules
+
+    # Each launch carries its own marker rule. The sandbox (and so the
+    # marker) is inherited by every descendant and cannot be dropped, which
+    # lets the API recognise this launch's processes (marvis.local_peer).
+    return [str(_SANDBOX_EXEC), "-p", _LOOPBACK_PROFILE + launch_marker_rules(), *command]
 
 
 def loopback_only_command(command: list[str]) -> list[str]:
@@ -151,6 +181,8 @@ def notebook_kernel_manager_class(mode: str = LOOPBACK_ONLY):
                 )
             elif type(self.provisioner) is not LocalProvisioner:
                 raise LocalExecutionIsolationError("Notebook kernel provisioner 未通过本地隔离校验。")
+            kwargs["env"] = {key: value for key, value in (kwargs.get("env") or os.environ).items()
+                             if key not in KERNEL_WITHHELD_ENV}
             return await super()._async_pre_start_kernel(**kwargs)
 
         def format_kernel_cmd(self, extra_arguments=None):

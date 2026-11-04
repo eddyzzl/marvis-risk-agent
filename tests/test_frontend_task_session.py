@@ -113,6 +113,26 @@ assert.equal(controller.planId("a"),"p");
 ''')
 
 
+def test_plan_locale_change_discards_old_labels_without_invalidating_execution():
+    run_node(PLAN_HARNESS + '''
+controller.resetFetchThrottle();
+const oldRead=controller.maybeFetchPlan();const old=calls.at(-1);
+const execution=session.requests.capture({operation:"plan"});
+const before=projections.length;
+controller.invalidateLocale();
+assert.equal(session.requests.current(execution),true,"a UI language change does not supersede plan execution");
+assert.equal(controller.planId("a"),"");
+old.resolve({plans:[plan(1)]});await oldRead;
+assert.equal(projections.length,before,"a previous-locale response cannot publish its labels");
+assert.equal(controller.planId("a"),"");
+const fresh=controller.maybeFetchPlan();const current=calls.at(-1);
+assert.notEqual(current,old,"the fresh locale must not reuse the old fetch throttle");
+current.resolve({plans:[plan(2)]});await fresh;
+assert.equal(session.planIdentity.revision,2);
+assert.equal(controller.planId("a"),"p");
+''')
+
+
 def test_reconcile_fences_reads_before_and_during_mutation_and_deduplicates():
     run_node(PLAN_HARNESS + '''
 controller.resetFetchThrottle("a",{invalidate:false});

@@ -636,15 +636,30 @@ class ProductionGovernanceRepository:
         return result
 
     def list_promotion_requests(self, *, environment=None, limit=100, offset=0):
+        # V3 5.7: visibility, count and the page are read in the database
+        # (LIMIT/OFFSET) instead of loading every request and slicing.
         with connect(self.db_path) as conn:
             conn.execute("BEGIN")
-            where, args = (" WHERE environment=?", [environment]) if environment else ("", [])
-            rows = conn.execute("SELECT * FROM production_promotion_requests" + where + " ORDER BY created_at DESC, id DESC", args).fetchall()
-            visible = [row for row in rows if _readable_strategy(conn,row["strategy_id"])]
-            total = len(visible)
-            page = visible[offset:offset+limit]
+            clauses, args = [], []
+            if environment:
+                clauses.append("p.environment=?")
+                args.append(environment)
+            visibility, visibility_args = _readable_strategy_sql(conn)
+            if visibility:
+                clauses.append(visibility)
+                args.extend(visibility_args)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            total = conn.execute("SELECT COUNT(*) FROM production_promotion_requests p" + where, args).fetchone()[0]
+            rows = conn.execute(
+                "SELECT p.* FROM production_promotion_requests p" + where
+                + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
+                [*args, limit, offset],
+            ).fetchall()
+            # Each page row still passes the canonical policy (including a
+            # withdrawn synchronized resource, which fails the read as before).
+            page = [row for row in rows if _readable_strategy(conn, row["strategy_id"])]
             return {"requests": [_promotion_from_row(conn, row) for row in page], "count": total,
-                    "next_offset": offset + len(page) if offset + len(page) < total else None}
+                    "next_offset": offset + len(rows) if offset + len(rows) < total else None}
 
     def list_environments(self):
         with connect(self.db_path) as conn:
@@ -919,6 +934,35 @@ class ProductionGovernanceRepository:
                 "chain_head": previous_hash,
             },
         }
+
+
+def _readable_strategy_sql(conn):
+    """SQL form of ``_allowed(conn, 'strategy', id, actor, 'read')`` over ``p.strategy_id``.
+
+    Outside institutional mode every strategy is readable. Inside it, a strategy
+    is readable through its own owner/grant or its task's owner/grant, with the
+    grant unrevoked, unexpired and listing ``read`` (marvis.institution.policy).
+    """
+    if identity_mode(conn) != "institutional":
+        return "", []
+    import time
+    from marvis.institution.policy import current_actor
+    from marvis.institution.store import IdentityStore, require
+    main = next(row["file"] for row in conn.execute("PRAGMA database_list") if row["name"] == "main")
+    actor = current_actor(main)
+    require(actor, "identity_actor_required", 401)
+    IdentityStore._subject(conn, actor)
+    now = time.time()
+    granted = ("SELECT g.resource_id FROM institution_resource_grants g WHERE g.kind=? AND g.subject_id=?"
+               " AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?)"
+               " AND json_valid(g.actions_json)"
+               # One malformed grant row must not make json_each fail the whole list.
+               " AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(g.actions_json)"
+               " THEN g.actions_json ELSE '[]' END) j WHERE j.value='read')")
+    owned = "SELECT o.resource_id FROM institution_resource_owners o WHERE o.kind=? AND o.owner_id=?"
+    sql = (f"(p.strategy_id IN ({owned}) OR p.strategy_id IN ({granted})"
+           f" OR p.strategy_id IN (SELECT s.id FROM strategies s WHERE s.task_id IN ({owned}) OR s.task_id IN ({granted})))")
+    return sql, ["strategy", actor, "strategy", actor, now, "task", actor, "task", actor, now]
 
 
 def _readable_strategy(conn,strategy_id):

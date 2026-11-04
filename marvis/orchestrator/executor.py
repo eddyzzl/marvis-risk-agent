@@ -41,6 +41,7 @@ from marvis.plugins.invocation import retry_safe_invocation, valid_invocation_co
 from marvis.plugins.runner import ToolResult
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.tasks import TaskRepository
+from marvis.process_timing import timed
 from marvis.state_machine import ConflictError
 
 
@@ -278,9 +279,15 @@ class PlanExecutor:
         planner=None,
         authorizer=None,
         task_repo=None,
+        preflight_checks=None,
     ):
         self._repo = plan_repo
         self._runner = tool_runner
+        # B-line extension (2026-10-23 spec §1.1): deterministic, read-only
+        # admission checks keyed by tool label. A rejection is recorded before
+        # dispatch, so the failed step stays retryable instead of turning into
+        # an unknown side effect that needs reconciliation.
+        self._preflight_checks = dict(preflight_checks or {})
         self._reviewer = reviewer
         self._subagents = subagent_dispatcher
         self._hooks = hook_dispatcher
@@ -469,6 +476,27 @@ class PlanExecutor:
                 inputs=resolved_inputs,
                 invocation_contract=invocation_contract,
             )
+            rejection = self._preflight_rejection(plan, step, resolved_inputs)
+            if rejection is not None:
+                self._finish_step_run(
+                    run_id,
+                    status="failed",
+                    error=rejection,
+                    error_kind="preflight_rejected",
+                    duration_ms=0,
+                )
+                self._handle_step_failure(
+                    step,
+                    ToolResult(
+                        ok=False,
+                        output=None,
+                        error=rejection,
+                        error_kind="preflight_rejected",
+                        duration_ms=0,
+                    ),
+                    apply_policy=False,
+                )
+                return
             progress_publisher = self._step_progress_publisher(plan, step, run_id)
             try:
                 result = self._invoke_step(
@@ -656,6 +684,7 @@ class PlanExecutor:
                 "canonical Tool result is missing its exact invocation receipt"
             )
 
+    @timed("tool", "plan_step")
     def _invoke_step(
         self,
         plan: Plan,
@@ -750,9 +779,20 @@ class PlanExecutor:
             if result.error_kind in {"cancelled", "search_paused", "search_cancelled"}:
                 return result
             if not self._repo.step_run_retry_safe(run_id):
+                # Keep the original kind and message after the stop marker so a
+                # later diagnosis can say what failed (for example a tuning
+                # timeout); the marker alone still decides the reconciliation.
+                original = str(result.error or "").strip().replace("\n", " ")[:300]
                 return replace(
                     result, error_kind="unknown_effect",
-                    error="tool failure may have left side effects; explicit reconciliation required",
+                    error=(
+                        "tool failure may have left side effects; explicit reconciliation required"
+                        + (
+                            f"; original error_kind={result.error_kind}: {original}"
+                            if result.error_kind or original
+                            else ""
+                        )
+                    ),
                 )
             last_result = result
         return last_result or ToolResult(
@@ -762,6 +802,28 @@ class PlanExecutor:
             error_kind="execution",
             duration_ms=0,
         )
+
+    def _preflight_rejection(
+        self,
+        plan: Plan,
+        step: PlanStep,
+        resolved_inputs: dict,
+    ) -> str | None:
+        """Run the tool's read-only admission check, if one is registered.
+
+        The check never writes and never decides success; it can only reject
+        inputs the tool would reject anyway. An error inside the check itself
+        is ignored so the tool keeps the final word.
+        """
+        if step.sub_agent_scope:
+            return None
+        check = self._preflight_checks.get(step.tool_ref.label())
+        if check is None:
+            return None
+        try:
+            return check(resolved_inputs, task_id=plan.task_id)
+        except Exception:  # noqa: BLE001 - admission is advisory; the tool decides
+            return None
 
     def _prepare_invocation(self, step: PlanStep) -> dict | None:
         """Only runners enforcing the dispatch handshake can prove safety."""

@@ -503,6 +503,9 @@ def test_economics_column_references_are_limited_to_upstream_safe_whitelist() ->
     assert result.draft is None
     assert "bad" in result.clarification
     assert "不可用于策略" in result.clarification
+    assert result.clarification_fields == ("pd_col",)
+    assert "经济参数 PD 使用了" in result.clarification
+    assert "pd_col" not in result.clarification
 
 
 def test_explicit_llm_clarification_is_returned_without_repair() -> None:
@@ -1163,7 +1166,55 @@ def test_missing_candidate_economics_returns_machine_readable_clarification(
     assert result.draft is None
     assert result.clarification_code == "candidate_economics_incomplete"
     assert result.clarification_fields
-    assert "economics_inputs" in result.clarification
+    assert all(
+        field.endswith("_value") and "_col/" in field
+        for field in result.clarification_fields
+    )
+    # Raw economics keys stay in fields; the prose names them in business terms.
+    label = "额度策略" if strategy_type == "limit" else "定价策略"
+    assert f"{label}经济参数不完整，缺少：" in result.clarification
+    assert "PD、LGD" in result.clarification
+    assert "数据列或固定数值" in result.clarification
+    assert "economics_inputs" not in result.clarification
+    assert strategy_type not in result.clarification
+    for field in result.clarification_fields:
+        assert field not in result.clarification
+
+
+def test_lifecycle_and_profit_missing_fields_are_named_in_business_terms() -> None:
+    lifecycle = validate_strategy_request(
+        {"strategy_type": "approval"},
+        allowed_columns=["score"],
+    )
+    profit = validate_strategy_request(
+        {
+            "operation": "develop",
+            "strategy_type": "approval",
+            "profit": {
+                "ead_col": "ead",
+                "pd_col": "pd_12m",
+                "annual_rate": 0.12,
+                "funding_rate": 0.03,
+                "operating_cost_per_loan": 10,
+                "term_months": 12,
+            },
+        },
+        allowed_columns=["ead", "pd_12m"],
+    )
+
+    workflow = validate_strategy_request(
+        {"request_kind": "standard_workflow"},
+        allowed_columns=["score"],
+    )
+
+    assert lifecycle.clarification_fields == ("operation",)
+    assert "没有识别到策略操作" in lifecycle.clarification
+    assert "operation" not in lifecycle.clarification
+    assert workflow.clarification_fields == ("workflow", "workflow_inputs")
+    assert "没有识别到要执行的流程、流程参数" in workflow.clarification
+    assert "workflow" not in workflow.clarification
+    assert profit.clarification_fields == ("lgd",)
+    assert "利润测算参数不完整，缺少：LGD。" in profit.clarification
 
 
 def test_compile_preserves_typed_economics_clarification_without_llm_repair() -> None:

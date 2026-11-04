@@ -325,3 +325,44 @@ def test_batch_family_purge_rolls_back_tasks_gc_and_audit_together(tmp_path: Pat
              WHERE kind IN ('task.delete', 'validation_batch.delete')
             """
         ).fetchone()[0] == 0
+
+
+def test_status_summaries_feed_every_batch_row_in_the_task_list(tmp_path: Path):
+    # 2026-10-14 redesign batch 4: unselected batch parents resolve the same
+    # worst-first status word as the selected batch, so the list payload carries
+    # the batch status and each item's status/outcome.
+    from marvis.api_task_payloads import list_task_payloads
+
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    batch_repo = ValidationBatchRepository(db_path)
+    batch = batch_repo.create_batch(
+        TaskCreate(
+            task_type=TASK_TYPE_VALIDATION_BATCH,
+            model_name="批次",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        ),
+        [_child_payload(tmp_path, "模型A"), _child_payload(tmp_path, "模型B")],
+    )
+    items = batch_repo.list_items(batch.parent_task_id)
+    batch_repo.update_item(items[1].id, status="failed", stage="failure", outcome="fail")
+
+    summaries = batch_repo.status_summaries_for_parents([batch.parent_task_id, "missing"])
+    assert summaries == {
+        batch.parent_task_id: {
+            "status": "created",
+            "items": [
+                {"status": "queued", "outcome": ""},
+                {"status": "failed", "outcome": "fail"},
+            ],
+        }
+    }
+    assert batch_repo.status_summaries_for_parents([]) == {}
+
+    task_repo = TaskRepository(db_path)
+    payloads = list_task_payloads(task_repo, task_repo.list_tasks(include_batch_children=False))
+    assert payloads[0]["batch_summary"] == summaries[batch.parent_task_id]
+    assert payloads[0]["item_count"] == 2

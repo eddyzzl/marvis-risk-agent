@@ -1336,7 +1336,7 @@ def test_native_parallel_sample_drives_tradeoff_cutoff_backtest_and_compare(
         task_id,
         tmp_path,
         parallel_populations=True,
-        # The development workflow's default direction is higher_is_better.
+        # This fixture explicitly declares higher scores safer below.
         # Keep this binding regression semantically aligned so the deterministic
         # max-approval design yields a real cutoff instead of the valid
         # approve-all result (whose empty-rule representation is a separate
@@ -1370,7 +1370,7 @@ def test_native_parallel_sample_drives_tradeoff_cutoff_backtest_and_compare(
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "扫描权衡并设计审批 cutoff，回测后与基线策略比较"},
+        json={"content": "扫描权衡并设计审批 cutoff，回测后与基线策略比较，pd 越低风险越高"},
     )
 
     assert response.status_code == 202, response.text

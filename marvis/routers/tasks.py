@@ -1,5 +1,5 @@
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 import uuid
 
@@ -18,7 +18,7 @@ from marvis.api_task_helpers import (
     task_hook_payload,
     validate_model_identifier,
 )
-from marvis.api_task_payloads import list_task_payloads, task_payload
+from marvis.api_task_payloads import list_task_payloads, purge_name_lists, task_payload
 from marvis.data.task_filesystem_gc import (
     DATASET_IDENTITY_DIR,
     DATASET_TASK_DIR,
@@ -38,7 +38,7 @@ from marvis.domain import (
 from marvis.model_algorithms import normalize_algorithm
 from marvis.notebooks import close_live_notebook_session
 from marvis.modeling_holdout.guards import project_task_payloads
-from marvis.repositories.tasks import TaskRepository
+from marvis.repositories.tasks import TaskRepository, _upload_stem
 from marvis.safe_paths import lexical_child_path
 from marvis.state_machine import ConflictError
 
@@ -336,9 +336,53 @@ def purge_preview(task_id: str, request: Request) -> dict:
     _reject_if_validation_batch_managed(repo, task)
     try:
         summary = repo.purge_preview(task_id)
+        names = repo.purge_preview_names(task_id)
     except KeyError as exc:
         raise not_found(f"Task not found: {task_id}") from exc
-    return {"task_id": task_id, "purge_summary": summary}
+    uploaded = _uploaded_dataset_names(request.app.state.settings, task_id)
+    if uploaded is not None:
+        names["datasets"] = uploaded
+    return {"task_id": task_id, "purge_summary": summary, "purge_names": purge_name_lists(names)}
+
+
+def _uploaded_dataset_names(settings, task_id: str) -> list[str] | None:
+    """Original upload names (``applications.csv``) for the delete dialog.
+    Content-addressed storage drops them from the path; the registry keeps
+    them in each upload's source identity. ``None`` falls back to the stems."""
+    from marvis.data.backend import DataBackend
+    from marvis.data.registry import DatasetRegistry
+    from marvis.repositories.datasets import DatasetRepository
+
+    try:
+        registry = DatasetRegistry(
+            DatasetRepository(settings.db_path), DataBackend(settings.datasets_dir), settings.datasets_dir
+        )
+        names: list[str] = []
+        for dataset in registry.list_for_task(task_id):
+            if str(dataset.role) == "derived":
+                continue
+            identity = registry.source_identity(dataset.id) or {}
+            # file name only: an import by path may have stored a full POSIX
+            # or Windows path
+            raw = str(identity.get("original_name") or "").strip()
+            name = PureWindowsPath(PurePosixPath(raw).name).name
+            if name:
+                # the upload route stages files as <name>_<8 hex><suffix>
+                original = Path(name)
+                head, sep, tail = original.stem.rpartition("_")
+                if sep and len(tail) == 8 and all(ch in "0123456789abcdef" for ch in tail):
+                    name = f"{head}{original.suffix}"
+            else:
+                name = _upload_stem(str(dataset.source_path))
+                # a content hash is no name; the count still covers it
+                if len(name) >= 32 and all(ch in "0123456789abcdef" for ch in name):
+                    continue
+            if name not in names:
+                names.append(name)
+        return names
+    except Exception:  # noqa: BLE001 - names are a convenience; counts still show
+        logger.warning("purge preview: dataset names unavailable for %s", task_id, exc_info=True)
+        return None
 
 
 @router.delete("/tasks/{task_id}", status_code=204)

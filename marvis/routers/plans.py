@@ -588,6 +588,7 @@ def _plan_payload(request: Request, plan) -> dict:
     if reconciler is not None:
         payload["reconciliation"] = reconciler.describe(plan)
     _attach_running_step_started_at(request, payload, plan.id)
+    _attach_step_run_durations(request, payload, plan.id)
     payload["sub_agents"] = [
         _sub_agent_payload(sub)
         for sub in request.app.state.plan_repo.list_sub_agents_for_plan(plan.id)
@@ -610,6 +611,22 @@ def _reject_agent_generic_confirmation(request: Request, plan) -> None:
         raise conflict(
             "agent plans must be confirmed through the task agent message endpoint"
         )
+
+
+def _attach_step_run_durations(request: Request, payload: dict, plan_id: str) -> None:
+    """Expose each finished step's latest attempt duration.
+
+    The conversation's activity list (2026-10-14 redesign, D11) shows how long
+    each step took; the value is the platform-recorded ``duration_ms``.
+    """
+    timings = request.app.state.plan_repo.latest_step_run_timings(plan_id)
+    for step in payload.get("steps") or []:
+        run = timings.get(str(step.get("id") or ""))
+        if not run or run.get("status") == "running":
+            continue
+        duration = run.get("duration_ms")
+        if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
+            step["last_run_duration_ms"] = duration
 
 
 def _attach_running_step_started_at(request: Request, payload: dict, plan_id: str) -> None:

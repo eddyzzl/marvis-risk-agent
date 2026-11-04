@@ -255,6 +255,11 @@ class OpenAICompatibleLLMClient:
                 error_kind=LLMClientErrorKind.OUTBOUND_POLICY,
             )
         system_prompt = safe_system_prompt(system_prompt, prompt_name)
+        # D-10: conversational replies follow the language of the user's latest
+        # message (request-scoped), independent of the UI language toggle.
+        from marvis.ui_locale import with_reply_language
+
+        system_prompt = with_reply_language(system_prompt, prompt_name)
         if not _finite(temperature) or not 0 <= temperature <= 2:
             raise LLMClientError("模型温度参数无效，未发送请求。", error_kind=LLMClientErrorKind.OUTBOUND_POLICY)
         if json_schema is not None:
@@ -489,7 +494,13 @@ class OpenAICompatibleLLMClient:
                     error_kind=error_kind,
                     retry_count=retry_count,
                 ) from None
-            except URLError:
+            except URLError as exc:
+                # The reason (timeout, reset, DNS …) is the only clue when a
+                # call fails; no prompt or credential is logged.
+                logger.warning(
+                    "LLM connection failed caller=%s attempt=%s prompt_chars=%s reason=%r",
+                    caller, retry_count + 1, prompt_chars, getattr(exc, "reason", exc),
+                )
                 if retry_count < max_retries:
                     retry_count += 1
                     time.sleep(_RETRY_BACKOFF_SECONDS)

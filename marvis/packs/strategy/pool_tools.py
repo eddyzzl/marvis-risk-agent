@@ -228,6 +228,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+from marvis.packs.strategy.input_validation import require_binding_connection as _require_binding_connection
 
 
 POOL_ARTIFACT_SCHEMA_VERSION = "strategy.candidate-pool-artifact.v2"
@@ -5136,18 +5137,6 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _require_binding_connection(conn, *, db_path: Path, name: str) -> None:
-    if not conn.in_transaction:
-        raise StrategyError(f"{name} binding requires a caller-owned transaction")
-    database = conn.execute(
-        "SELECT file FROM pragma_database_list WHERE name = 'main'"
-    ).fetchone()
-    if (
-        database is None
-        or not str(database["file"])
-        or Path(str(database["file"])).absolute() != db_path
-    ):
-        raise StrategyError(f"{name} binding database changed")
 
 
 def _pool_artifact_source_binding(

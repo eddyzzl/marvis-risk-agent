@@ -1,6 +1,6 @@
 import { api as defaultApi } from "./api.js";
 
-export function createWorkerIsolationPanel({ container, api = defaultApi, onSettings = () => {} }) {
+export function createWorkerIsolationPanel({ container, api = defaultApi, onSettings = () => {}, getPendingSettings = () => ({}) }) {
   if (!container) throw new Error("worker isolation container required");
   const document = container.ownerDocument;
   let current = null;
@@ -64,11 +64,13 @@ export function createWorkerIsolationPanel({ container, api = defaultApi, onSett
     button.disabled = true;
     const requestedMode = select.value;
     try {
+      // Choices made elsewhere on the page while repairing unreadable settings.
+      const base = { ...current, ...(getPendingSettings() || {}) };
       const payload = await api("/api/settings/execution-environment", { method: "PUT", body: JSON.stringify({
-        execution_mode: current.execution_mode, kernel_name: current.kernel_name,
-        conda_env_name: current.conda_env_name, python_executable: current.python_executable,
-        notebook_network_mode: current.notebook_network_mode,
-        notebook_memory_limit_mb: current.notebook_memory_limit_mb,
+        execution_mode: base.execution_mode, kernel_name: base.kernel_name,
+        conda_env_name: base.conda_env_name, python_executable: base.python_executable,
+        notebook_network_mode: base.notebook_network_mode,
+        notebook_memory_limit_mb: base.notebook_memory_limit_mb,
         worker_isolation_mode: requestedMode,
       }) });
       render(payload);

@@ -8,6 +8,14 @@ def slice_function(source: str, signature: str) -> str:
     return source[start : end + 2]
 
 
+def _panel_state_source() -> str:
+    """The real per-task panel shape, so fixtures and app.js cannot drift."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "marvis/static/js/task-session.js").read_text()
+    return slice_function(source, "export function createPanelState(").removeprefix("export ") + "\n"
+
+
 def session_projection_fixture(script: str) -> str:
     """Explicit view double for pre-existing isolated app-consumer tests.
 
@@ -16,10 +24,11 @@ def session_projection_fixture(script: str) -> str:
     """
     if "const taskSession =" in script or "const taskSession=" in script:
         return script
-    return r'''
+    return _panel_state_source() + r'''
 // Explicit session double for isolated rendering fixtures. Real session tests
 // exercise identity, transition and message/plan acceptance separately.
 const fixtureAgentRequests = new Map();
+const fixturePanels = createPanelState();
 const taskSession = {
   beginAgentRequest(id) {
     const controller = new AbortController();
@@ -49,5 +58,6 @@ const taskSession = {
   replaceMessages(view, messages) { if (taskRequests.current(view) && Array.isArray(messages)) agentMessages = messages; },
   appendMessages(view, messages) { if (taskRequests.current(view)) agentMessages = [...agentMessages, ...messages]; },
   removeMessage(view, id) { if (taskRequests.current(view)) agentMessages = agentMessages.filter(message => message.id !== id); },
+  panels: fixturePanels,
 };
 ''' + script

@@ -291,6 +291,9 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     )
     if development_refit_evidence is not None:
         model_card["development_refit_evidence"] = development_refit_evidence
+    evaluation_evidence = _delivery_evaluation_evidence(
+        runtime, experiment, artifact, development_refit_evidence
+    )
     approval_package = _write_approval_package(
         base_dir,
         experiment=experiment,
@@ -307,9 +310,11 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         monitoring_policy=monitoring_policy,
         challenger_comparison=challenger_comparison,
         model_card=model_card,
+        evaluation_evidence=evaluation_evidence,
     )
     return {
         "experiment_id": experiment.id,
+        "evaluation_evidence": evaluation_evidence,
         "artifact_id": artifact.id,
         "native_model_path": str(artifact.model_path),
         "pmml_path": pmml_path,
@@ -332,6 +337,54 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         "model_card": model_card,
         "capabilities": capabilities,
         "actions": actions,
+    }
+
+
+def _delivery_evaluation_evidence(runtime: _Runtime, experiment, artifact: ModelArtifact, development_refit_evidence) -> dict:
+    """The held-out metrics that evaluate the delivered model.
+
+    A native development refit consumed test in its fit and was never scored on
+    OOT, so its authenticated parent's held-out metrics are the evaluation
+    evidence. A TUNE-4 refit keeps honest train/OOT but its random-holdout test
+    family is dropped (D14). Every other model is evaluated by its own metrics.
+    """
+    if development_refit_evidence is not None:
+        parent = runtime.experiments.get(development_refit_evidence["parent"]["experiment_id"])
+        return {
+            "basis": "pre_refit_heldout",
+            "experiment_id": parent.id,
+            "artifact_id": str(parent.artifact_id or ""),
+            "delivered_experiment_id": experiment.id,
+            "delivered_artifact_id": artifact.id,
+            "refit_applied": True,
+            "metrics": {
+                key: value
+                for key, value in (_json_safe(parent.metrics) or {}).items()
+                if value is not None
+            },
+            "note": (
+                f"评估指标来自所选实验 `{parent.id}` 的留出集；交付模型 `{experiment.id}` "
+                "用相同超参在 train+test 上重新拟合，原 test 已并入训练、没有独立 test 评估，交付模型未再做 OOT 评估。"
+            ),
+        }
+    is_refit = _artifact_is_refit(artifact)
+    return {
+        "basis": "delivered_experiment",
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "delivered_experiment_id": experiment.id,
+        "delivered_artifact_id": artifact.id,
+        "refit_applied": is_refit,
+        "metrics": {
+            key: value
+            for key, value in (_json_safe(experiment.metrics) or {}).items()
+            if value is not None and not (is_refit and _is_refit_holdout_tainted_metric(key))
+        },
+        "note": (
+            "交付模型在 train+test 上重新拟合；随机 5% holdout 上的 test 指标已剔除，OOT 指标为重拟合模型在 OOT 上的结果。"
+            if is_refit
+            else ""
+        ),
     }
 
 
@@ -818,13 +871,12 @@ def _challenger_comparison_status(summary: dict) -> str:
 
 def _challenger_comparison_recommendation(status: str, summary: dict) -> str:
     if status == "pass":
-        return "Challenger 不弱于 Champion 的已配置指标"
+        return "挑战者模型在已配置指标上不弱于冠军模型"
     if status == "warn":
         return (
-            "Challenger 有指标弱于 Champion, 需业务复核差异 "
-            f"({summary.get('declined_count', 0)} 项下降)"
+            f"挑战者模型有 {summary.get('declined_count', 0)} 项指标弱于冠军模型，需业务复核差异"
         )
-    return "缺少可比较的 Champion/Challenger 指标, 需补充生产模型基线"
+    return "缺少可比较的冠军/挑战者指标，需补充生产模型基线"
 
 
 def _model_card_payload(
@@ -980,9 +1032,27 @@ def _artifact_is_refit(artifact: ModelArtifact) -> bool:
 #: ``__refit_holdout__`` slice (in-distribution with the training pool, optimistically
 #: biased) and must be dropped from the model card's key-metrics table -- they are
 #: NOT a genuine held-out test evaluation. Mirrors select_tools._is_refit_holdout_tainted_key.
+def refit_train_oot_overfit_flag(metrics: dict) -> bool | None:
+    """Overfit flag of a train+test refit, from its honest train/OOT KS only.
+
+    The stored flag also used the in-distribution refit holdout (train/test gap),
+    so it is dropped as tainted; the train/OOT trigger (``OVERFIT_TRAIN_OOT_ABS``)
+    stays meaningful and is recomputed here. None when either KS is missing."""
+    from marvis.validation.overfitting import OVERFIT_TRAIN_OOT_ABS
+
+    train, oot = metrics.get("train_ks"), metrics.get("oot_ks")
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (train, oot)):
+        return None
+    return abs(float(train) - float(oot)) > OVERFIT_TRAIN_OOT_ABS
+
+
 def _is_refit_holdout_tainted_metric(key: str) -> bool:
+    # The stored overfit flag and train/test gap used the in-distribution refit
+    # holdout, so they go with the test metrics (review M3); the honest
+    # train/OOT flag is recomputed by refit_train_oot_overfit_flag.
     return (
         key in ("psi_test_vs_train", "weighted_psi_test_vs_train")
+        or key in ("overfit_flag", "overfit_train_test_gap", "overfit_gap_tt")
         or key.startswith(("test_", "weighted_test_"))
     )
 
@@ -1021,6 +1091,11 @@ def _model_card_key_metrics(metrics: dict, *, is_refit: bool = False) -> list[di
         # the random 5% __refit_holdout__ slice (in-distribution, optimistically
         # biased) -- never surface it as a headline model-card metric. OOT/train
         # stay honest and pass through.
+        if is_refit and metric == "overfit_flag":
+            flag = refit_train_oot_overfit_flag(metrics)
+            if flag is not None:
+                rows.append({"metric": metric, "value": flag, "basis": "train_oot_only"})
+            continue
         if is_refit and _is_refit_holdout_tainted_metric(metric):
             continue
         if metric in metrics and metrics.get(metric) is not None:
@@ -1133,6 +1208,7 @@ def _write_approval_package(
     monitoring_policy: dict,
     challenger_comparison: dict,
     model_card: dict,
+    evaluation_evidence: dict | None = None,
 ) -> dict[str, Path | None]:
     uow = ArtifactUnitOfWork()
     json_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.json")
@@ -1169,6 +1245,7 @@ def _write_approval_package(
         "features": list(artifact.feature_list),
         "feature_count": len(artifact.feature_list),
         "metrics": _json_safe(experiment.metrics),
+        "evaluation_evidence": _json_safe(evaluation_evidence or {}),
         "capabilities": _json_safe(capabilities),
         "selection_policy_decision": selection_policy_decision,
         "monitoring_policy": _json_safe(monitoring_policy),
@@ -1311,6 +1388,26 @@ def _approval_package_markdown(payload: dict) -> str:
             lines.append(f"| {_md_cell(key)} | {_md_cell(_metric_display(value))} |")
     else:
         lines.append("| - | - |")
+    evaluation = payload.get("evaluation_evidence") if isinstance(payload.get("evaluation_evidence"), dict) else {}
+    if evaluation.get("basis") == "pre_refit_heldout":
+        evaluation_metrics = evaluation.get("metrics") if isinstance(evaluation.get("metrics"), dict) else {}
+        lines.extend([
+            "",
+            "## 评估证据（所选实验留出集）",
+            "",
+            f"- 说明: {_md_inline(evaluation.get('note') or '-')}",
+            f"- 评估实验ID: `{_md_inline(evaluation.get('experiment_id'))}`",
+            "",
+            "| 指标 | 数值 |",
+            "| --- | ---: |",
+        ])
+        evaluation_rows = [
+            (key, value)
+            for key, value in evaluation_metrics.items()
+            if key.startswith(("train_", "test_", "oot_", "psi_")) or key in {"overfit_flag"}
+        ]
+        for key, value in sorted(evaluation_rows) or [("-", "-")]:
+            lines.append(f"| {_md_cell(key)} | {_md_cell(_metric_display(value))} |")
     lines.extend([
         "",
         "## 策略执行",

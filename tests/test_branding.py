@@ -28,6 +28,7 @@ def test_default_marvis_logo_assets_are_transparent_squares():
         "marvis/static/brand/marvis-favicon.png",
         "marvis/static/brand/marvis-workspace-logo.png",
         "marvis/static/brand/marvis-chat-logo.png",
+        "marvis/static/brand/marvis-home-hero.png",
     ]:
         image = Image.open(PROJECT_ROOT / relative_path).convert("RGBA")
         width, height = image.size
@@ -75,7 +76,8 @@ def test_branding_defaults_to_public_marvis_without_config(tmp_path: Path):
         "browserTitle": "MARVIS-全能风控智能体",
         "primaryColor": "#303034",
         "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
-        "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+        # Batch 5 (2026-10-14 redesign): the home hero is the mascot illustration.
+        "workspaceLogoUrl": "static/brand/marvis-home-hero.png?v=20261016-hero",
         "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
         "validatorAliases": {},
         "source": "default",
@@ -230,9 +232,25 @@ def test_branding_ignores_unsafe_asset_paths(tmp_path: Path):
         "browserTitle": "Private",
         "primaryColor": "#303034",
         "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
-        "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+        # Batch 5 (2026-10-14 redesign): the home hero is the mascot illustration.
+        "workspaceLogoUrl": "static/brand/marvis-home-hero.png?v=20261016-hero",
         "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
         "validatorAliases": {},
         "source": "workspace",
     }
     assert client.get("/branding/assets/../secret.svg").status_code == 404
+
+
+def test_index_html_brand_name_is_two_lines_from_first_paint(tmp_path: Path):
+    # The sidebar mark must not jump from one line to two once branding.js runs.
+    html = _client(tmp_path / "default").get("/").text
+    assert '<h1 id="platformName"><b>MARVIS</b><small>全能风控智能体</small></h1>' in html
+
+    branding_dir = tmp_path / "custom" / "branding"
+    branding_dir.mkdir(parents=True)
+    (branding_dir / "brand.json").write_text(
+        json.dumps({"platform_name": "Acme <风控> - 智能平台"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    html = _client(tmp_path / "custom").get("/").text
+    assert '<h1 id="platformName"><b>Acme &lt;风控&gt;</b><small>智能平台</small></h1>' in html

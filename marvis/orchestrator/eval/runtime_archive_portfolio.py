@@ -1,6 +1,6 @@
 """Independent, read-only checks of externally bound portfolio originals.
 
-The normal no-trend workflow is supported. This establishes consistency and
+Normal workflows with and without a frozen score baseline are supported. This establishes consistency and
 arithmetic, not native signature authentication, actor authority or real outcomes.
 """
 from contextlib import ExitStack, closing
@@ -11,7 +11,7 @@ import re
 import sqlite3
 import tempfile
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from .runtime_archive_datasets import _dataset, _source_input
 from .runtime_archive_reader import (
@@ -31,8 +31,17 @@ _PARENTS = {"flow": (), "migration": (), "segment": (), "expected_loss": ("migra
             "gate": _METRICS, "report": (*_METRICS, "gate")}
 _SHEETS = ["组合概览", "桶迁徙", "逐月流量", "细分画像", "稳定性趋势", "预期损失", "数据质量红旗"]
 _CHECKS = ("archive_integrity", "recomputation_snapshot", "external_bindings", "native_steps",
-           "business_contract", "registered_dataset", "source_material", "independent_metrics",
+           "business_contract", "registered_dataset", "source_material", "trend_baseline", "independent_metrics",
            "gate_and_report_inputs", "artifact_record", "workbook_cells", "download_binding")
+
+
+class FrozenPortfolioBaseline(BaseModel):
+    """Caller-held identity of a retained training baseline, not a training audit."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    experiment_id: str = Field(pattern=_ID)
+    artifact_id: str = Field(pattern=_ID)
+    task_id: str = Field(pattern=_ID)
+    baseline_sha256: str = Field(pattern=_HASH)
 
 
 class FrozenPortfolioBinding(BaseModel):
@@ -52,6 +61,14 @@ class FrozenPortfolioBinding(BaseModel):
     expected_sha256: str = Field(pattern=_HASH)
     source: dict
     model_connection_sha256: str = Field(pattern=_HASH)
+    trend_baseline: FrozenPortfolioBaseline | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_identity(self, handler):
+        result = handler(self)
+        if result.get("trend_baseline") is None:
+            result.pop("trend_baseline", None)
+        return result
 
     @model_validator(mode="after")
     def bindings_required(self):
@@ -64,14 +81,34 @@ class FrozenPortfolioBinding(BaseModel):
                 or len(set(self.states)) != len(self.states) or any(not s for s in self.states)
                 or not any(a.kind == "download_portfolio_report" for a in self.case.actions)):
             raise ValueError("explicit portfolio sample, business rule, ordered states and download required")
-        if (set(self.step_ids) != set(_TOOLS) or len(set(self.step_ids.values())) != len(_TOOLS)
+        tools = _tools(self)
+        request = self.case.actions[declarations[0]].portfolio_request
+        if ((request.experiment_id is not None) != (self.trend_baseline is not None)
+                or (self.trend_baseline is not None and (request.experiment_id != self.trend_baseline.experiment_id
+                    or not request.score_col))):
+            raise ValueError("trend requires the exact caller-held experiment baseline and score column")
+        if (set(self.step_ids) != set(tools) or len(set(self.step_ids.values())) != len(tools)
                 or any(not re.fullmatch(_ID, value) for value in self.step_ids.values())
-                or set(self.output_sha256) != set(_TOOLS)
+                or set(self.output_sha256) != set(tools)
                 or any(not re.fullmatch(_HASH, value) for value in self.output_sha256.values())
                 or not isinstance(self.source.get("source_sha256"), str)
                 or not re.fullmatch(_HASH, self.source["source_sha256"])):
             raise ValueError("complete native identities and external source binding required")
         return self
+
+
+def _tools(binding):
+    return {**_TOOLS, **({"trend": "analysis.score_stability_trend"} if binding.trend_baseline else {})}
+
+
+def _metrics(binding):
+    return ("flow", "migration", "segment", "trend", "expected_loss") if binding.trend_baseline else _METRICS
+
+
+def _parents(binding):
+    metrics = _metrics(binding)
+    return {**_PARENTS, **({"trend": ()} if binding.trend_baseline else {}),
+            "gate": metrics, "report": (*metrics, "gate")}
 
 
 def _equal(actual, expected):
@@ -106,18 +143,18 @@ def _native(conn, binding):
     if (task is None or plan is None or task["task_type"] != "portfolio" or task["run_mode"] != "agent"
             or plan["task_id"] != binding.task_id or plan["status"] != "done"):
         raise ValueError("portfolio task or plan mismatch")
-    if plan["template_id"] != "portfolio_analysis_no_trend":
+    if plan["template_id"] != ("portfolio_analysis" if binding.trend_baseline else "portfolio_analysis_no_trend"):
         raise _Unsupported("portfolio template requires additional independent domain checks")
     _equal(sorted(s[0] for s in conn.execute("SELECT id FROM plan_steps WHERE plan_id=?", (binding.plan_id,))),
            sorted(binding.step_ids.values()))
     outputs, inputs, evidence, refs = {}, {}, {}, {}
-    for key, tool in _TOOLS.items():
+    for key, tool in _tools(binding).items():
         step_id = binding.step_ids[key]
         step = conn.execute("SELECT * FROM plan_steps WHERE id=?", (step_id,)).fetchone()
         if (step is None or step["plan_id"] != binding.plan_id or step["status"] != "done"
                 or f"{step['tool_plugin']}.{step['tool_name']}" != tool):
             raise ValueError("portfolio step identity mismatch")
-        _equal(json.loads(step["depends_on_json"]), [binding.step_ids[parent] for parent in _PARENTS[key]])
+        _equal(json.loads(step["depends_on_json"]), [binding.step_ids[parent] for parent in _parents(binding)[key]])
         if key == "gate" and (step["confirmed"] != 1 or step["needs_confirmation"] != 1
                               or json.loads(step["policy_json"]).get("human_decision_gate") != "required"):
             raise ValueError("portfolio gate native confirmation missing")
@@ -146,10 +183,10 @@ def _native(conn, binding):
                 or native.get("tool_version") != run["tool_version"]
                 or native.get("schema_version") != "evidence.v1" or native.get("output_ref") != step["output_ref"]):
             raise ValueError("portfolio native run binding mismatch")
-        _equal(native.get("source_dataset_refs"), [f"dataset:{binding.dataset_id}"] if key in _METRICS else [])
+        _equal(native.get("source_dataset_refs"), [f"dataset:{binding.dataset_id}"] if key in _metrics(binding) else [])
         _equal(native.get("result_dataset_bindings"), [])
         outputs[key], inputs[key], evidence[key], refs[key] = output, run_input, native, step["output_ref"]
-    for key, parents in _PARENTS.items():
+    for key, parents in _parents(binding).items():
         _equal(evidence[key].get("parent_output_refs"), [refs[p] for p in parents])
         _equal(evidence[key].get("parent_output_bindings"), [
             {"step_id": binding.step_ids[p], "output_ref": refs[p], "output_hash": payload_hash(outputs[p])}
@@ -159,8 +196,6 @@ def _native(conn, binding):
 
 def _contract(binding, inputs):
     request = next(a.portfolio_request for a in binding.case.actions if a.portfolio_request is not None)
-    if request.experiment_id is not None or request.score_col is not None:
-        raise _Unsupported("trend requires its independent source and domain calculator")
     source = {"dataset_id": binding.dataset_id, "expected_content_hash": binding.dataset_sha256}
     common = {**source, **{key: getattr(request, key) for key in
               ("id_col", "snapshot_col", "bucket_col", "balance_col")}, "states": binding.states}
@@ -169,17 +204,75 @@ def _contract(binding, inputs):
     _equal(inputs["expected_loss"], {**common, **{key: getattr(request, key) for key in
            ("loss_state", "lgd", "horizon_months")}})
     _equal(inputs["segment"], {**source, "segment_col": request.segment_col, "ead_col": request.balance_col})
+    if binding.trend_baseline:
+        _equal(inputs["trend"], {**source, "experiment_id": request.experiment_id,
+                                "month_col": request.snapshot_col, "score_col": request.score_col})
+    elif request.score_col is not None:
+        raise _Unsupported("score column without a retained trend baseline")
     return request
 
 
+def _baseline(conn, binding):
+    frozen = binding.trend_baseline
+    if frozen is None:
+        return None
+    experiment = conn.execute("SELECT * FROM experiments WHERE id=?", (frozen.experiment_id,)).fetchone()
+    artifact = conn.execute("SELECT * FROM model_artifacts WHERE id=?", (frozen.artifact_id,)).fetchone()
+    if (experiment is None or artifact is None or experiment["task_id"] != frozen.task_id
+            or experiment["artifact_id"] != frozen.artifact_id or artifact["experiment_id"] != frozen.experiment_id):
+        raise ValueError("retained baseline experiment and artifact binding mismatch")
+    raw = artifact["baseline_distributions_json"]
+    if not isinstance(raw, str) or digest(raw.encode()) != frozen.baseline_sha256:
+        raise ValueError("caller-held baseline bytes missing or changed")
+    baseline = json.loads(raw)
+    if not isinstance(baseline, dict):
+        raise ValueError("baseline must be an object")
+    return baseline
+
+
+def _reference_largest_segment(segment):
+    sizes = [(str(row.get("segment")), row["pop_pct"]) for row in segment.get("segments") or []
+             if isinstance(row, dict) and type(row.get("pop_pct")) in {int, float}]
+    if not sizes:
+        return None
+    largest = max(size for _name, size in sizes)
+    return "、".join(name for name, size in sizes if size == largest)
+
+
+def _reference_worst_worsening(migration):
+    # States run from good to bad; a worsening move goes to a later state.
+    rank = {str(state): index for index, state in enumerate(migration.get("states") or [])}
+    worst = None
+    for row in migration.get("heat_table") or []:
+        start = str(row.get("from") or "")
+        for end, rate in row.items():
+            if (end == "from" or start not in rank or end not in rank or rank[end] <= rank[start]
+                    or type(rate) not in {int, float} or rate <= 0):
+                continue
+            if worst is None or rate > worst["rate"]:
+                worst = {"from": start, "to": end, "rate": float(rate)}
+    return worst
+
+
 def _aggregate(reference):
-    flags = [{"source": _TOOLS[key].split(".")[1], **flag}
-             for key in _METRICS for flag in reference[key]["red_flags"]]
+    tools = {**_TOOLS, "trend": "analysis.score_stability_trend"}
+    keys = ("flow", "migration", "segment", "trend", "expected_loss") if "trend" in reference else _METRICS
+    flags = [{"source": tools[key].split(".")[1], **flag}
+             for key in keys for flag in reference[key]["red_flags"]]
     loss, segment, migration = reference["expected_loss"], reference["segment"], reference["migration"]
-    return {"highlights": {"total_el": loss["total_el"],
-            "total_el_basis": "reference_snapshot", "reference_snapshot": loss["assumptions"]["reference_snapshot"],
-            "hhi": segment["concentration"]["hhi"], "top1_pct": segment["concentration"]["top1_pct"],
-            "migration_months": migration["window_months"]},
+    highlights = {"total_el": loss["total_el"],
+                  "total_el_basis": "reference_snapshot", "reference_snapshot": loss["assumptions"]["reference_snapshot"],
+                  "hhi": segment["concentration"]["hhi"], "top1_pct": segment["concentration"]["top1_pct"]}
+    largest = _reference_largest_segment(segment)
+    if largest is not None:
+        highlights["top1_segment"] = largest
+    highlights["concentration_flagged"] = any(
+        flag.get("kind") == "high_concentration" for flag in segment["red_flags"])
+    highlights["migration_months"] = migration["window_months"]
+    worst = _reference_worst_worsening(migration)
+    if worst is not None:
+        highlights["worst_migration"] = worst
+    return {"highlights": highlights,
             "red_flags": flags, "red_flag_count": len(flags), "checklist": [f["message"] for f in flags]}
 
 
@@ -229,11 +322,20 @@ def _workbook(path, reference, gate):
     overview += [["ead_concentration_basis", "ead"]]
     overview += [[f"ead_concentration.{key}", value] for key, value in segment["ead_concentration"].items()]
     overview += [["数据质量红旗数", gate["red_flag_count"]]]
-    sheets = dict(zip(_SHEETS, [overview, table(reference["migration"]["heat_table"]),
+    from marvis.output.portfolio_report import PORTFOLIO_FLAG_LABELS, PORTFOLIO_STEP_LABELS
+
+    # The workbook shows readable headers; the values under them are unchanged.
+    migration_rows = [{("起始状态" if key == "from" else key): value for key, value in row.items()}
+                      for row in reference["migration"]["heat_table"]]
+    flag_rows = [{"说明": flag.get("message") or "",
+                  "类型": PORTFOLIO_FLAG_LABELS.get(str(flag.get("kind") or ""), "数据质量提示"),
+                  "来源步骤": PORTFOLIO_STEP_LABELS.get(str(flag.get("source") or ""), str(flag.get("source") or ""))}
+                 for flag in gate["red_flags"]]
+    sheets = dict(zip(_SHEETS, [overview, table(migration_rows),
                   table(reference["flow"]["net_flows"]), table(segment["segments"]),
-                  [["无数据（未提供 experiment_id，趋势步已剪除）"]],
+                  table(reference["trend"]["trend"]) if "trend" in reference else [["无数据（未提供 experiment_id，趋势步已剪除）"]],
                   table(loss["el_by_month"]) + [[]] + [["链式吸收概率"]] + table(loss["chain"]),
-                  table(gate["red_flags"]) if gate["red_flags"] else [["无红旗"]]]))
+                  table(flag_rows) if flag_rows else [["无红旗"]]]))
     book = load_workbook(path, read_only=True, data_only=False, keep_links=False)
     checked = 0
     try:
@@ -281,7 +383,8 @@ def revalidate_portfolio_archive(archive: Path, *, expected_manifest_sha256: str
               "unsupported": {"native_signature_authentication": "original_key_not_available",
                               "business_outcome_truth": "requires_independent_source_verification",
                               "actor_authorization_and_duplicate_side_effect_safety": "not_established_by_portfolio_arithmetic",
-                              "trend_vintage_and_recovery": "require_separate_domain_checks",
+                              "baseline_training_and_business_truth": "requires_independent_modeling_and_source_adjudication",
+                              "vintage_and_recovery": "require_separate_domain_checks",
                               "original_runtime_cost_and_timing": "not_recomputed"}}
     checks, current = result["checks"], "archive_integrity"
     try:
@@ -307,7 +410,7 @@ def revalidate_portfolio_archive(archive: Path, *, expected_manifest_sha256: str
         conn.row_factory = sqlite3.Row
         current = "native_steps"
         outputs, inputs = _native(conn, binding)
-        checks[current] = {"status": "verified", "steps": 6, "scope": "native_runs_versioned_outputs_and_all_parent_bindings"}
+        checks[current] = {"status": "verified", "steps": len(_tools(binding)), "scope": "native_runs_versioned_outputs_and_all_parent_bindings"}
         current = "business_contract"
         request = _contract(binding, inputs)
         checks[current] = {"status": "verified", "scope": "frozen_business_declaration_states_and_exact_native_inputs"}
@@ -319,19 +422,32 @@ def revalidate_portfolio_archive(archive: Path, *, expected_manifest_sha256: str
         current = "source_material"
         _source_input(archive, manifest, binding, source, frame, scratch)
         checks[current] = {"status": "verified", "scope": "frozen_upload_and_registered_source_values"}
+        current = "trend_baseline"
+        baseline = _baseline(conn, binding)
+        checks[current] = {"status": "verified", "scope": "caller_frozen_baseline_bytes_and_registered_experiment" if baseline else "no_trend_declared"}
         current = "independent_metrics"
         rows = frame.to_dict("records")
         fields = {key: getattr(request, key) for key in
                   ("id_col", "snapshot_col", "bucket_col", "balance_col", "loss_state", "lgd", "horizon_months")}
         reference = transition_reference(rows, states=binding.states, **fields)
         reference["segment"] = segment_reference(rows, segment_col=request.segment_col, balance_col=request.balance_col)
+        if baseline is not None:
+            from .runtime_portfolio_trend_reference import score_trend_reference
+            if request.score_col not in frame.columns:
+                raise ValueError("declared score column missing")
+            months = [(str(month), group[request.score_col].tolist())
+                      for month, group in frame.groupby(frame[request.snapshot_col].astype(str), sort=True)]
+            reference["trend"] = score_trend_reference(baseline.get("score_edges") or [],
+                ((baseline.get("score_distribution") or {}).get("train") or {}).get("bin_proportions") or [], months)
         for key in _METRICS:
             for flag in reference[key]["red_flags"]:
                 flag["message"] = reference_flag_text(flag)
             _numbers(outputs[key], reference[key])
-        checks[current] = {"status": "verified", "scope": "four_independent_metrics_and_semantic_flags", "rows_recomputed": len(rows)}
+        if baseline is not None:
+            _numbers(outputs["trend"], reference["trend"])
+        checks[current] = {"status": "verified", "scope": "independent_portfolio_metrics_and_declared_score_trend", "rows_recomputed": len(rows)}
         current = "gate_and_report_inputs"
-        native_metrics = {key: outputs[key] for key in _METRICS}
+        native_metrics = {key: outputs[key] for key in _metrics(binding)}
         _equal(inputs["gate"], native_metrics)
         _equal(inputs["report"], native_metrics)
         gate = _aggregate(reference)
@@ -351,7 +467,8 @@ def revalidate_portfolio_archive(archive: Path, *, expected_manifest_sha256: str
                    for e in observed["http_events"]):
             raise ValueError("portfolio actual download binding missing")
         checks[current] = {"status": "verified", "scope": "externally_bound_bytes_native_report_identity_and_HTTP_record"}
-        result["values"] = {"metric_sha256": {key: digest(reference[key]) for key in _METRICS},
+        result["values"] = {"metric_sha256": {key: digest(reference[key]) for key in _metrics(binding)},
+                            "trend": reference.get("trend"),
                             "segment_count": len(reference["segment"]["segments"]),
                             "total_el": reference["expected_loss"]["total_el"],
                             "red_flag_count": gate["red_flag_count"], "source_rows": len(rows)}
@@ -371,3 +488,6 @@ def revalidate_portfolio_archive(archive: Path, *, expected_manifest_sha256: str
         temporary.close()
     result["supported_checks_verified"] = all(item["status"] == "verified" for item in checks.values())
     return result
+
+# Standard Vintage is a portfolio-risk analysis; its reader lives beside this one.
+from .runtime_archive_vintage import FrozenVintageBinding, revalidate_vintage_archive  # noqa: E402,F401

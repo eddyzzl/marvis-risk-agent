@@ -7269,7 +7269,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "marvis/validation/pmml_score_artifacts.py": {
+    "marvis/validation_services/pmml_score_artifacts.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -7295,7 +7295,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "marvis/validation/pmml_stress.py": {
+    "marvis/validation_services/pmml_stress.py": {
       "CONFIDENCE.HIGH": 1,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,

@@ -14,6 +14,32 @@ _STATUS = {"success": "success", "passed": "success", "pass": "success", "ok": "
            "通过": "success", "已通过": "success", "error": "error", "failed": "error",
            "fail": "error", "pending": "pending", "warning": "warning", "skipped": "skipped"}
 _CONTRACT_NAMES = {"RMC_SAMPLE_DF", "RMC_SCORE_FN", "RMC_TARGET_COL", "RMC_ALGORITHM"}
+_METADATA_STATUS = {"compatible", "incompatible", "not_evaluated"}
+
+
+def dictionary_requirements():
+    """The platform's fixed data-dictionary column contract (constants only)."""
+    from marvis.validation_report_copy import dictionary_required_columns
+
+    return {name: {"label": label, "accepted_column_names": list(aliases)}
+            for name, label, aliases in dictionary_required_columns()}
+
+
+def material_diagnostics_context(value):
+    """Dictionary candidate statuses as fixed reason codes; no file names."""
+    from marvis.validation_report_copy import METADATA_REASON_LABELS
+
+    rows = value.get("data_dictionary") if isinstance(value, dict) else None
+    out = []
+    for row in _rows(rows)[:20]:
+        reasons = row.get("reasons")
+        out.append({
+            "status": row["status"] if row.get("status") in _METADATA_STATUS else "not_evaluated",
+            "reasons": [code for code in reasons if code in METADATA_REASON_LABELS][:6]
+            if isinstance(reasons, list) else [],
+            "selected": row.get("selected") is True,
+        })
+    return {"data_dictionary_candidates": out, "data_dictionary_requirements": dictionary_requirements()}
 
 
 def scan_context(evidence, *, workflow_version):
@@ -30,6 +56,11 @@ def scan_context(evidence, *, workflow_version):
         status = check.get("status")
         status = _STATUS.get(status.strip().lower(), "unknown") if isinstance(status, str) else "unknown"
         item = {"check_index": index, "status": status}
+        message = check.get("message")
+        if isinstance(message, str) and ("column alias" in message or "sample data file" in message):
+            from marvis.validation_report_copy import metadata_reason_codes
+
+            item["metadata_reasons"] = metadata_reason_codes([message])
         if isinstance(name, str) and name in _LABEL_IDS.values():
             item["id"] = name
             by_id.setdefault(name, []).append(status)
@@ -84,5 +115,8 @@ def scan_prompt(evidence, *, workflow_version):
             "pending_confirmation 或 needs_confirmation=true 表示候选仍需确认，不能声称已确认。"
             "源码、文件名、错误原文、原始字段值及样本未发送，具体诊断应查看本地检查项。"
             "pickle/pkl 和后续评分、效果产物不是扫描必需材料；不要猜测其他材料缺失。"
+            "检查项带 metadata_reasons 时按原因说明数据字典问题（如 missing_importance_column 即缺少 importance 列）。"
+            "回复用中文名称称呼材料和检查项，不输出 material_*、required_materials_complete、"
+            "pending_confirmation、needs_confirmation 等内部键名。"
         ),
     })

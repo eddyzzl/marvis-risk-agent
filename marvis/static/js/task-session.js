@@ -14,6 +14,11 @@ export function createTaskSession() {
   let planIdentity = null;
   let plan = null;
   const agentRequests = new Map();
+  // F17: per-task panel projections that app.js used to keep as module-level
+  // globals. Each group is sealed, so a misspelt field throws instead of
+  // silently creating new state; owner ids stay explicit because a panel may
+  // keep showing the previous model while a switch loads.
+  const panels = createPanelState();
 
   function freeze(value) {
     if (value && typeof value === "object") {
@@ -109,7 +114,7 @@ export function createTaskSession() {
   return Object.freeze({
     requests, activities, selectTask, refreshTask, selectModel, projectModel,
     replaceMessages, appendMessages, removeMessage, acceptPlan,
-    beginAgentRequest, finishAgentRequest, abortAgentRequest,
+    beginAgentRequest, finishAgentRequest, abortAgentRequest, panels,
     get taskId() { return taskId; },
     get task() { return task; },
     get modelId() { return modelId; },
@@ -117,5 +122,19 @@ export function createTaskSession() {
     get messages() { return messages; },
     get planIdentity() { return planIdentity; },
     get plan() { return plan; },
+  });
+}
+
+export function createPanelState() {
+  return Object.freeze({
+    metrics: Object.seal({
+      values: {}, valuesTaskId: null, tableSections: [], scoreEvidence: null, sectionsOwnerId: null,
+    }),
+    contract: Object.seal({ value: null, taskId: "", context: null, loadVersion: 0 }),
+    notebook: Object.seal({ steps: [] }),
+    reportDraft: Object.seal({ expanded: false, cardTaskId: "", renderedSignature: "" }),
+    scroll: Object.seal({
+      pendingRestoreTaskId: null, suppressAutoScrollTaskId: null, pendingContentLoadTaskId: null,
+    }),
   });
 }

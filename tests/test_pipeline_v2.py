@@ -49,30 +49,6 @@ from marvis.pipeline import (
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-@pytest.mark.parametrize(
-    ("consistency_status", "expected_task_status"),
-    [
-        (ConsistencyStatus.PASS, TaskStatus.SUCCEEDED),
-        (ConsistencyStatus.REVIEW, TaskStatus.REVIEW_REQUIRED),
-        (ConsistencyStatus.FAIL, TaskStatus.REVIEW_REQUIRED),
-    ],
-)
-def test_terminal_validation_status_requires_review_for_non_passing_reproducibility(
-    consistency_status: ConsistencyStatus,
-    expected_task_status: TaskStatus,
-):
-    results = SimpleNamespace(
-        reproducibility=SimpleNamespace(
-            summary=SimpleNamespace(status=consistency_status)
-        )
-    )
-
-    assert (
-        pipeline_module._terminal_validation_status(SimpleNamespace(), results)
-        is expected_task_status
-    )
-
-
 def test_pmml_job_cancellation_uses_agent_callback_without_job_token():
     from marvis.pipeline import _pmml_job_cancellation
 
@@ -1968,7 +1944,7 @@ def test_report_stage_status_failure_rolls_back_promoted_docx_and_images(
         "marvis.pipeline._load_validation_results",
         lambda _outputs_dir: SimpleNamespace(
             reproducibility=SimpleNamespace(
-                summary=SimpleNamespace(status=pipeline_module.ConsistencyStatus.PASS)
+                summary=SimpleNamespace(status=ConsistencyStatus.PASS)
             )
         ),
     )

@@ -287,8 +287,10 @@ def test_natural_language_sample_design_binds_active_workspace_and_renders_evide
         for message in response.json()["messages"]
         if message.get("role") == "assistant"
     )
-    assert "策略样本设计 V2 已固化" in assistant_text
-    assert "范围 `strategy_development`" in assistant_text
+    assert "策略样本设计已固化" in assistant_text
+    # Batch 3b (2026-10-14 redesign): prose uses business wording; the raw scope stays in the evidence table.
+    assert "用于策略开发" in assistant_text
+    assert "`strategy_development`" not in assistant_text
     assert "未创建策略、未采纳、未部署" in assistant_text
     assert len(llm.calls) == 1
 

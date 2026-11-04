@@ -110,3 +110,18 @@ __all__ = [
     "not_implemented",
     "domain_error",
 ]
+
+
+def parse_if_match_revision(if_match: str | None) -> int:
+    """Parse an ``If-Match`` revision header: 428 when missing, 400 when not a non-negative integer."""
+    if if_match is None:
+        raise precondition_required("If-Match header is required")
+    if not if_match.isascii() or not if_match.isdecimal():
+        raise bad_request("If-Match must be a non-negative integer")
+    try:
+        expected_revision = int(if_match)
+    except ValueError as exc:
+        raise bad_request("If-Match must be a non-negative integer") from exc
+    if expected_revision < 0:
+        raise bad_request("If-Match must be a non-negative integer")
+    return expected_revision

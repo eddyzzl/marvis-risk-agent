@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from marvis.agent.memory_bridge import build_workflow_memory_context
 from marvis.agent.memory_bridge import capture_agent_memory_for_driver_done
 from marvis.agent.plan_driver import PlanDriver
+from marvis.agent.suggested_reply import attach_suggested_reply
 from marvis.agent.workflow_error_diagnostics import build_workflow_error_diagnostic
 from marvis.agent.workflow_error_diagnostics import failure_envelope_for_diagnostic
 from marvis.agent.workflow_error_diagnostics import workflow_error_content
@@ -31,6 +32,15 @@ def append_driver_messages(
 ) -> None:
     """Persist driver output with the complete governed runtime context."""
 
+    # B-line extension: a classified step failure gets the deterministic
+    # diagnosis; in Agent mode an ``auto`` option runs (and reports) instead of
+    # showing the card first (workflow_repair_turn.py).
+    from . import workflow_repair_turn as repair_lane
+
+    try:
+        turn, auto_repair = repair_lane.prepare_turn(runtime, repo, task, turn)
+    except Exception:  # noqa: BLE001 - diagnosis never blocks persisting the turn
+        auto_repair = None
     _append_driver_messages_core(
         repo,
         task.id,
@@ -40,6 +50,10 @@ def append_driver_messages(
         llm_client=getattr(runtime, "llm_client", None),
         hook_dispatcher=getattr(runtime, "hook_dispatcher", None),
     )
+    if auto_repair is not None:
+        repair_lane.run_auto_repair(
+            runtime, repo, task, auto_repair, append=append_driver_messages
+        )
 
 
 def _append_context_free_driver_messages(
@@ -89,8 +103,10 @@ def _append_driver_messages_core(
                 stage=message.stage,
                 metadata=metadata,
                 content=content,
+                task=task,
             )
         if insight_context is not None:
+            insight_context["awaiting_confirmation"] = message.stage == "gate"
             insight = render_workflow_insight(
                 insight_context,
                 client=llm_client,
@@ -98,8 +114,14 @@ def _append_driver_messages_core(
             )
             content += f"\n\n{insight['content']}"
             metadata["agent_insight"] = {
-                key: value for key, value in insight.items() if key != "content"
+                key: value for key, value in insight.items()
+                if key not in {"content", "suggested_reply"}
             }
+            # UI-6: display-only; nothing on the backend reads it back.
+            # A gate that needs a human decision never gets 「确认」 offered.
+            attach_suggested_reply(metadata, insight.get("suggested_reply"),
+                                   user_message=_latest_user_text(repo, task_id),
+                                   human_decision_required=str(metadata.get("human_decision_gate") or "").lower() == "required")
         receipts: list[dict] = []
         if settings is not None and task is not None and message.stage == "done":
             receipts = capture_agent_memory_for_driver_done(
@@ -173,6 +195,18 @@ def append_workflow_error(
         "status": "error",
         "messages": repo.list_agent_messages(task.id),
     }
+
+
+def _latest_user_text(repo, task_id: str) -> str:
+    """The user's own words, so identifiers they typed may be echoed back."""
+    try:
+        messages = repo.list_agent_messages(task_id)
+    except Exception:
+        return ""
+    for item in reversed(messages or []):
+        if isinstance(item, dict) and item.get("role") == "user":
+            return str(item.get("content") or "")
+    return ""
 
 
 def latest_open_gate(messages: list[dict]) -> dict | None:

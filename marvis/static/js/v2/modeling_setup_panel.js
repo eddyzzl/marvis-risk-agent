@@ -23,9 +23,9 @@ export function renderModelingSetupPanel(message, options = {}) {
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const uniqueCandidates = [...new Set(selected ? [selected, ...candidates] : candidates)];
   const recipeText = Array.isArray(setup.recipes) && setup.recipes.length
-    ? setup.recipes.map((recipe) => String(recipe)).join("/")
+    ? setup.recipes.map((recipe) => recipeDisplayName(recipe)).join(" / ")
     : "-";
-  const primaryRecipe = String(setup.recipe || (Array.isArray(setup.recipes) ? setup.recipes[0] : "") || "-");
+  const primaryRecipe = recipeDisplayName(setup.recipe || (Array.isArray(setup.recipes) ? setup.recipes[0] : "") || "-");
   const featureCount = Number.isFinite(Number(setup.feature_count)) ? String(Number(setup.feature_count)) : "-";
   const candidateFeatureCount = Number.isFinite(Number(setup.candidate_feature_count))
     ? String(Number(setup.candidate_feature_count))
@@ -58,11 +58,66 @@ export function renderModelingSetupPanel(message, options = {}) {
   const splitColumns = Array.isArray(splitSummary?.available_columns)
     ? splitSummary.available_columns.map(String).filter(Boolean)
     : [];
-  const splitMode = splitConfig.oot_by_time ? "time" : splitConfig.random_oot ? "random" : "none";
-  const testPercent = Number.isFinite(Number(splitConfig.test_size)) ? Number(splitConfig.test_size) * 100 : 25;
-  const ootPercent = Number.isFinite(Number(splitConfig.oot_size)) ? Number(splitConfig.oot_size) * 100 : 20;
+  // A split column the plan passes through (the user's own train/test/oot
+  // column, or the platform's setup split) is a real choice of its own.
+  const existingSplit = String(splitSummary?.existing_split?.column || "").trim()
+    ? {
+      column: String(splitSummary.existing_split.column).trim(),
+      origin: String(splitSummary.existing_split.origin || ""),
+    }
+    : null;
+  const passthroughSplit = isPassthroughSplitConfig(splitConfig);
+  const currentSplitMode = splitConfig.oot_by_time
+    ? "time"
+    : splitConfig.random_oot
+      ? "random"
+      : existingSplit && passthroughSplit ? "existing" : "none";
+  const previewHasOot = typeof splitSummary?.has_oot === "boolean"
+    ? splitSummary.has_oot
+    : splitCounts.some(([split, count]) => String(split).toLowerCase() === "oot" && Number(count) > 0);
+  const currentHasOot = currentSplitMode === "time"
+    || currentSplitMode === "random"
+    || (currentSplitMode === "existing" && previewHasOot);
+  const timeCandidates = Array.isArray(splitSummary?.time_column_candidates)
+    ? splitSummary.time_column_candidates.map(String).filter(Boolean)
+    : [];
+  const ootRequirement = String(setup.oot_requirement || "").trim();
+  const ootRequested = Boolean(setup.oot_requested) || Boolean(ootRequirement);
+  let splitMode = currentSplitMode;
+  let timeColumn = String(splitConfig.oot_by_time || "");
+  let splitDefaultNote = "";
+  if (splitSummary && ootRequested && !currentHasOot) {
+    // The task asks about OOT: never pre-select a split without one.
+    const suggested = timeCandidates[0] || "";
+    splitMode = suggested ? "time" : "random";
+    if (suggested) timeColumn = suggested;
+    splitDefaultNote = `你要求${ootRequirement ? ` ${ootRequirement}` : "评估 OOT"}，所以默认${suggested ? `按 ${suggested} 切出 OOT` : "随机留出 OOT（样本里没有识别到时间字段）"}；下方预览还是当前切分，确认后会按所选方式重新切分。`;
+  }
+  const configTestSize = optionalNumber(splitConfig.test_size);
+  const configOotSize = optionalNumber(splitConfig.oot_size);
+  const testPercent = configTestSize !== null ? configTestSize * 100 : defaultTestPercent(splitConfig);
+  const ootPercent = configOotSize !== null ? configOotSize * 100 : DEFAULT_OOT_PERCENT;
+  const splitCountMap = Object.fromEntries(splitCounts.map(([split, count]) => [String(split), count]));
+  const existingSplitSummary = existingSplit
+    ? describeSplitChoice({
+      mode: "existing",
+      existingColumn: existingSplit.column,
+      counts: passthroughSplit ? splitCountMap : null,
+    })
+    : "";
+  const splitChoiceText = splitSummary
+    ? describeSplitChoice({
+      mode: splitMode,
+      timeColumn,
+      testPercent,
+      ootPercent,
+      existingColumn: existingSplit?.column || "",
+      counts: passthroughSplit ? splitCountMap : null,
+    })
+    : "沿用现有样本口径";
   const specChips = [
-    ["目标", String(setup.target_type || "binary")],
+    ["样本方案", splitChoiceText, splitChoiceText, "split"],
+    ["目标", TARGET_TYPE_LABELS[String(setup.target_type || "binary")] || String(setup.target_type || "binary")],
     ["算法", recipeText],
     ["主调参", primaryRecipe],
     [
@@ -72,7 +127,7 @@ export function renderModelingSetupPanel(message, options = {}) {
     ],
     ["调参轮数", nTrials],
     ["选择指标", metricPolicyLabel, metricPolicy],
-  ].map(([label, value, detail = value]) => `<div class="modeling-spec-chip" title="${escapeHtml(detail)}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  ].map(([label, value, detail = value, liveKey = ""]) => `<div class="modeling-spec-chip" title="${escapeHtml(detail)}"><span>${escapeHtml(label)}</span><strong${liveKey ? ` data-modeling-live-value="${escapeHtml(liveKey)}"` : ""}>${escapeHtml(value)}</strong></div>`).join("");
   const eligibleAlgorithms = Array.isArray(setup.eligible_algorithms)
     ? setup.eligible_algorithms.map((item) => String(item)).filter(Boolean)
     : [];
@@ -91,7 +146,7 @@ export function renderModelingSetupPanel(message, options = {}) {
   })), ...disabledAlgorithms.map((item) => ({
     recipe: String(item.recipe || ""),
     state: "不可用",
-    reason: String(item.reason || ""),
+    reason: humanAlgorithmReason(item.reason),
     enabled: false,
   }))]);
   const algorithmHtml = algorithmChoices.filter((item) => item.recipe).map((item) => `<div class="modeling-algorithm-chip" data-enabled="${item.enabled ? "true" : "false"}">
@@ -132,17 +187,28 @@ export function renderModelingSetupPanel(message, options = {}) {
       <small>${escapeHtml(recipeFamily(recipe))} · ${escapeHtml(pmmlText)}</small>
     </label>`;
   }).join("");
+  const existingModeChoice = existingSplit
+    ? existingSplit.origin === "uploaded"
+      ? ["existing", `沿用样本已有的划分列（${existingSplit.column}）`, "直接使用样本里的 train / test / OOT 划分，不重新切分"]
+      : ["existing", `沿用当前划分（${existingSplit.column} 列）`, "使用上方预览里的 train / test / OOT 划分，不重新切分"]
+    : null;
   const splitModeOptions = [
-    ["none", "不设置 OOT", "只切分 train / test"],
-    ["time", "按时间字段切分 OOT（推荐）", "用较新的时间段做外推验证"],
+    ...(existingModeChoice ? [existingModeChoice] : []),
+    ["time", existingSplit ? "按时间字段切分 OOT" : "按时间字段切分 OOT（推荐）", "用较新的整月做外推验证"],
     ["random", "随机留出 OOT", "没有可靠时间字段时才使用"],
+    ["none", "不设置 OOT", "只切分 train / test"],
   ].map(([value, label, note]) => `<label class="modeling-split-mode-option">
     <input type="radio" name="modelingSplitMode-${escapeHtml(messageId)}" class="modeling-split-mode" value="${value}"${splitMode === value ? " checked" : ""}${disabledAttr}>
     <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(note)}</small></span>
   </label>`).join("");
   const timeColumnOptions = ['<option value="">请选择时间字段</option>'].concat(splitColumns.map((column) => (
-    `<option value="${escapeHtml(column)}"${String(splitConfig.oot_by_time || "") === column ? " selected" : ""}>${escapeHtml(column)}</option>`
+    `<option value="${escapeHtml(column)}"${timeColumn === column ? " selected" : ""}>${escapeHtml(column)}</option>`
   ))).join("");
+  const splitNotes = [
+    ...(Array.isArray(splitSummary?.notes) ? splitSummary.notes.map(String).filter(Boolean) : []),
+    ...(splitDefaultNote ? [splitDefaultNote] : []),
+  ];
+  const splitNotesHtml = splitNotes.map((note) => `<p class="modeling-split-help" data-modeling-split-note>${escapeHtml(note)}</p>`).join("");
   const splitControlsHtml = splitSummary ? `<section class="modeling-split-controls">
     <div class="modeling-section-heading"><strong>数据集切分设置</strong><span>系统当前展示的是切分预览，确认后才会进入特征筛选和训练。</span></div>
     <div class="modeling-split-mode-list" role="radiogroup" aria-label="OOT 切分方式">${splitModeOptions}</div>
@@ -151,7 +217,8 @@ export function renderModelingSetupPanel(message, options = {}) {
       <label>OOT 占比（%）<input type="number" class="modeling-oot-size-input" min="1" max="50" step="1" value="${escapeHtml(String(ootPercent))}"${disabledAttr}></label>
       <label>OOT 时间字段<select class="modeling-time-column-select"${disabledAttr}>${timeColumnOptions}</select></label>
     </div>
-    <p class="modeling-split-help">训练集 / 测试集 / OOT 会按同一分组键整体分配，避免同一客户跨集合造成泄漏。选择“不设置 OOT”时，仅保留 train / test。</p>
+    ${splitNotesHtml}
+    <p class="modeling-split-help">训练集 / 测试集 / OOT 会按同一分组键整体分配，避免同一客户跨集合造成泄漏。选择“不设置 OOT”时，仅保留 train / test。按时间切 OOT 时，最新的若干整月（同一个时间值不会拆开）整体进入 OOT，所以实际 OOT 占比可能和填写的百分比不同，以确认后的切分结果为准。</p>
   </section>` : "";
   const targetAlgorithmControlsHtml = `<div class="modeling-setup-controls modeling-target-controls">
     <label>目标类型
@@ -180,7 +247,7 @@ export function renderModelingSetupPanel(message, options = {}) {
       <span>调参轮数</span>
       <strong data-modeling-live-value="trials">${escapeHtml(nTrials)}</strong>
       <input type="number" class="modeling-n-trials-input" min="1" max="200" step="1" value="${escapeHtml(nTrials === "-" ? "" : nTrials)}"${disabledAttr} data-current-n-trials="${escapeHtml(nTrials === "-" ? "" : nTrials)}" />
-      <small>轮数越高，搜索更充分，但执行时间也会增加。</small>
+      <small>调参轮数是每个算法要试的参数组数。平台默认 1 轮：每个算法只试 1 组参数，用来先快速跑通流程；要正式比较模型效果，建议 40–80 轮（先粗搜再细搜）。轮数越高，搜索更充分，但执行时间也会增加。</small>
     </label>
     <div class="modeling-weight-control">
       <span>样本权重</span>
@@ -220,12 +287,11 @@ export function renderModelingSetupPanel(message, options = {}) {
   const journeyNav = journey.map(([id, label, note], index) => `<button type="button" class="modeling-journey-node${index === 0 ? " is-active" : ""}" data-modeling-step-jump="${id}" data-step-index="${index + 1}" aria-current="${index === 0 ? "step" : "false"}"${disabledAttr}>
     <span>${index + 1}</span><strong>${label}</strong><small>${note}</small>
   </button>`).join("");
-  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-plan-id="${escapeHtml(planId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}" data-current-split-config="${escapeHtml(JSON.stringify(splitConfig))}" data-modeling-active-step="split"${snapshotAttrs}${interactive ? "" : ' data-modeling-readonly="true"'}>
+  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-plan-id="${escapeHtml(planId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}" data-current-split-config="${escapeHtml(JSON.stringify(splitConfig))}" data-existing-split-col="${escapeHtml(existingSplit?.column || "")}" data-existing-split-summary="${escapeHtml(existingSplitSummary)}" data-modeling-active-step="split"${snapshotAttrs}${interactive ? "" : ' data-modeling-readonly="true"'}>
     <div class="modeling-setup-head">
-      <span class="modeling-setup-title"><small>Agent 建模协作台</small><strong>一起确定这次模型怎么做</strong></span>
+      <span class="modeling-setup-title"><strong>一起确定这次模型怎么做</strong></span>
       <span class="modeling-setup-status"><i></i>${interactive ? "等待你逐步确认" : "历史规格"}</span>
     </div>
-    <div class="modeling-agent-note"><span aria-hidden="true">✦</span><p><strong>Agent 已准备一版方案</strong>按四个小步骤复核即可；每次选择都会保留，最后统一执行。</p></div>
     <nav class="modeling-journey" aria-label="建模规格步骤">${journeyNav}</nav>
     <div class="modeling-step-progress" aria-hidden="true"><i></i></div>
     <div class="modeling-step-error" role="status" aria-live="polite"></div>
@@ -369,8 +435,9 @@ function collectModelingSetupAdjustParams(form) {
   const params = {};
   const splitMode = form.querySelector(".modeling-split-mode:checked");
   if (splitMode) {
-    const currentSplit = normalizeSplitConfig(parseSplitConfig(form.dataset.currentSplitConfig));
-    const selectedSplit = selectedSplitConfig(form, currentSplit);
+    const rawCurrentSplit = parseSplitConfig(form.dataset.currentSplitConfig);
+    const currentSplit = normalizeSplitConfig(rawCurrentSplit);
+    const selectedSplit = selectedSplitConfig(form, rawCurrentSplit);
     if (JSON.stringify(selectedSplit) !== JSON.stringify(currentSplit)) {
       params.split_config = selectedSplit;
     }
@@ -420,13 +487,39 @@ function parseSplitConfig(value) {
   }
 }
 
+// Native make_split defaults when a non-empty split_config omits a ratio
+// (marvis/packs/modeling/prepare.py DEFAULT_TEST_SIZE / DEFAULT_OOT_SIZE). An
+// empty config passes the setup's own split through; its auto split used 25%.
+const DEFAULT_OOT_PERCENT = 20;
+
+function defaultTestPercent(config = {}) {
+  return isPassthroughSplitConfig(config) ? 25 : 30;
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+// {} and {method: "existing"} both keep the partition the split step already
+// reads; any other key re-splits the sample.
+function isPassthroughSplitConfig(config = {}) {
+  if (!config || typeof config !== "object") return true;
+  if (config.method === "existing") return true;
+  return Object.keys(config).length === 0;
+}
+
 function normalizeSplitConfig(config = {}) {
+  if (config?.method === "existing") return { method: "existing" };
   const normalized = {};
-  if (Number.isFinite(Number(config.test_size))) normalized.test_size = Number(config.test_size);
+  const testSize = optionalNumber(config.test_size);
+  if (testSize !== null) normalized.test_size = testSize;
   if (config.oot_by_time) normalized.oot_by_time = String(config.oot_by_time);
   if (config.random_oot) normalized.random_oot = true;
-  if ((config.oot_by_time || config.random_oot) && Number.isFinite(Number(config.oot_size))) {
-    normalized.oot_size = Number(config.oot_size);
+  const ootSize = optionalNumber(config.oot_size);
+  if ((config.oot_by_time || config.random_oot) && ootSize !== null) {
+    normalized.oot_size = ootSize;
   }
   if (Array.isArray(config.group_cols) && config.group_cols.length) {
     normalized.group_cols = config.group_cols.map(String);
@@ -435,36 +528,104 @@ function normalizeSplitConfig(config = {}) {
   return normalized;
 }
 
-function selectedSplitConfig(form, current) {
+function selectedSplitConfig(form, rawCurrent = {}) {
+  const current = normalizeSplitConfig(rawCurrent);
+  const passthrough = isPassthroughSplitConfig(rawCurrent);
   const mode = String(form.querySelector(".modeling-split-mode:checked")?.value || "none");
-  const testPercent = Number(form.querySelector(".modeling-test-size-input")?.value || 25);
-  const ootPercent = Number(form.querySelector(".modeling-oot-size-input")?.value || 20);
+  if (mode === "existing") return passthrough ? current : { method: "existing" };
+  const existingSplitCol = String(form.dataset?.existingSplitCol || "").trim();
+  const testDefault = defaultTestPercent(rawCurrent);
+  const testPercent = Number(form.querySelector(".modeling-test-size-input")?.value || testDefault);
+  const ootPercent = Number(form.querySelector(".modeling-oot-size-input")?.value || DEFAULT_OOT_PERCENT);
   const timeColumn = String(form.querySelector(".modeling-time-column-select")?.value || "").trim();
   const selected = { ...current };
-  // An empty split_config means "keep the setup's existing 75/25 split". The
-  // form renders that effective default as 25%; leaving it untouched must be a
-  // confirmation, not a synthetic adjustment that reruns the same gate.
-  if (Object.prototype.hasOwnProperty.call(current, "test_size") || testPercent !== 25) {
+  delete selected.method;
+  delete selected.oot_by_time;
+  delete selected.random_oot;
+  delete selected.oot_size;
+  const withOot = mode === "time" || mode === "random";
+  if (mode === "time") selected.oot_by_time = timeColumn;
+  if (mode === "random") selected.random_oot = true;
+  // Leaving a split untouched must stay a confirmation, not a synthetic
+  // adjustment. But re-splitting a passed-through partition states every ratio
+  // the form shows, so the native defaults never silently replace them.
+  const resplitsPassthrough = passthrough && (withOot || (mode === "none" && Boolean(existingSplitCol)));
+  if (
+    Object.prototype.hasOwnProperty.call(current, "test_size")
+    || testPercent !== testDefault
+    || resplitsPassthrough
+  ) {
     selected.test_size = testPercent / 100;
   } else {
     delete selected.test_size;
   }
-  delete selected.oot_by_time;
-  delete selected.random_oot;
-  delete selected.oot_size;
-  if (mode === "time") {
-    selected.oot_by_time = timeColumn;
-    selected.oot_size = ootPercent / 100;
-  } else if (mode === "random") {
-    selected.random_oot = true;
+  if (withOot && (
+    Object.prototype.hasOwnProperty.call(current, "oot_size")
+    || ootPercent !== DEFAULT_OOT_PERCENT
+    || resplitsPassthrough
+  )) {
     selected.oot_size = ootPercent / 100;
   }
   return normalizeSplitConfig(selected);
 }
 
+// Plain-language summary of a split choice, shown in the review step.
+function describeSplitChoice({
+  mode,
+  timeColumn = "",
+  testPercent = 25,
+  ootPercent = DEFAULT_OOT_PERCENT,
+  existingColumn = "",
+  counts = null,
+} = {}) {
+  if (mode === "existing") {
+    const order = ["train", "test", "oot"];
+    const countText = counts && typeof counts === "object"
+      ? Object.entries(counts)
+        .sort(([left], [right]) => {
+          const a = order.indexOf(String(left).toLowerCase());
+          const b = order.indexOf(String(right).toLowerCase());
+          return (a < 0 ? order.length : a) - (b < 0 ? order.length : b);
+        })
+        .map(([split, count]) => `${String(split).toLowerCase() === "oot" ? "OOT" : split} ${count}`)
+        .join(" / ")
+      : "";
+    return `沿用 ${existingColumn || "现有"} 列的划分${countText ? `（${countText}）` : ""}`;
+  }
+  const test = `测试集占剩余 ${testPercent}%`;
+  if (mode === "time") {
+    const monthly = /month|月/i.test(String(timeColumn || ""));
+    const whole = monthly ? "按整月切" : "同一时间值整体切分";
+    return `按 ${timeColumn || "时间字段"} 切 OOT（目标约 ${ootPercent}%，${whole}，实际占比以切分结果为准），${test}`;
+  }
+  if (mode === "random") return `随机留出 OOT ${ootPercent}%，${test}`;
+  return `不设 OOT，只切 train / test（${test}）`;
+}
+
+function currentSplitChoiceText(form) {
+  const mode = String(form.querySelector(".modeling-split-mode:checked")?.value || "");
+  if (!mode) return "";
+  if (mode === "existing") return String(form.dataset?.existingSplitSummary || "") || describeSplitChoice({ mode });
+  return describeSplitChoice({
+    mode,
+    timeColumn: String(form.querySelector(".modeling-time-column-select")?.value || "").trim(),
+    testPercent: Number(form.querySelector(".modeling-test-size-input")?.value || 0),
+    ootPercent: Number(form.querySelector(".modeling-oot-size-input")?.value || 0),
+  });
+}
+
+function refreshSplitChoiceSummary(form) {
+  const text = currentSplitChoiceText(form);
+  const target = form.querySelector('[data-modeling-live-value="split"]');
+  if (!text || !target) return;
+  target.textContent = text;
+  target.closest?.(".modeling-spec-chip")?.setAttribute?.("title", text);
+}
+
 function modelingSplitInputError(form) {
   const modeControl = form.querySelector(".modeling-split-mode:checked");
   if (!modeControl) return "";
+  if (String(modeControl.value || "") === "existing") return "";
   const testPercent = Number(form.querySelector(".modeling-test-size-input")?.value);
   if (!Number.isFinite(testPercent) || testPercent <= 0 || testPercent > 50) {
     return "测试集比例必须大于 0% 且不超过 50%。";
@@ -514,6 +675,32 @@ function recipeFamily(recipe) {
   return "binary";
 }
 
+const TARGET_TYPE_LABELS = { binary: "二分类", continuous: "连续值", multiclass: "多分类" };
+
+// Recipe codes in the review chips read as algorithm names (eval S4 showed
+// 「目标 binary 算法 lr」); the code stays in the chip's tooltip.
+const RECIPE_FAMILY_NAMES = {
+  lr: "逻辑回归", logistic: "逻辑回归", lgb: "LightGBM", lightgbm: "LightGBM", xgb: "XGBoost",
+  xgboost: "XGBoost", catboost: "CatBoost", scorecard: "评分卡", mlp: "神经网络", rf: "随机森林",
+};
+
+function recipeDisplayName(recipe) {
+  const code = String(recipe || "").trim();
+  if (!code || code === "-") return "-";
+  const [family, ...rest] = code.toLowerCase().split("_");
+  const name = RECIPE_FAMILY_NAMES[family];
+  if (!name) return code;
+  const variant = rest.join("_");
+  return variant === "multiclass" ? `${name}（多分类）` : variant === "regressor" ? `${name}（回归）` : name;
+}
+
+// "recipe target family does not match `binary`" -> 该算法不适用于二分类目标.
+function humanAlgorithmReason(reason) {
+  const text = String(reason || "").trim();
+  const match = /^recipe target family does not match `?([a-z]+)`?$/.exec(text);
+  return match ? `该算法不适用于${TARGET_TYPE_LABELS[match[1]] || match[1]}目标` : text;
+}
+
 function humanMetricPolicy(policy) {
   const value = String(policy || "-").trim();
   const normalized = value.toLocaleLowerCase();
@@ -539,6 +726,8 @@ export function activateModelingJourneyStep(form, requestedStep) {
     node.setAttribute("aria-current", index === targetIndex ? "step" : "false");
   });
   form.dataset.modelingActiveStep = requestedStep;
+  // The review step restates the sample plan picked in step 1.
+  if (requestedStep === "review") refreshSplitChoiceSummary(form);
   const progress = form.querySelector(".modeling-step-progress > i");
   if (progress) progress.style.setProperty("--modeling-progress", `${targetIndex / Math.max(stages.length - 1, 1) * 100}%`);
   form.querySelector("[data-modeling-stage].is-active")?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
@@ -552,6 +741,13 @@ export function handleModelingSetupInteraction(event) {
     const value = String(event.target.value || "-");
     const liveValue = form.querySelector('[data-modeling-live-value="trials"]');
     if (liveValue) liveValue.textContent = value;
+    return;
+  }
+  if (
+    event.type === "input"
+    && event.target?.matches?.(".modeling-split-mode, .modeling-test-size-input, .modeling-oot-size-input, .modeling-time-column-select")
+  ) {
+    refreshSplitChoiceSummary(form);
     return;
   }
   const control = event.target?.closest?.("[data-modeling-step-next], [data-modeling-step-back], [data-modeling-step-jump]");

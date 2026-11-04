@@ -182,12 +182,19 @@ def test_bucket_migration_hand_computed_avg(tmp_path):
         task_id=task.id,
     )
     assert result.ok is True, result.error
-    # M1 row avg across the two months: month1 M1 base 0 -> row all 0; month2 M1 -> [0,0,0.5,0.5]
-    # avg = ([0,0,0,0] + [0,0,0.5,0.5]) / 2 = [0,0,0.25,0.25]
-    assert result.output["avg_matrix"][1] == pytest.approx([0.0, 0.0, 0.25, 0.25])
+    # M1 has no base in month1, so only month2 (B bad, D exited) enters its pooled row:
+    # [0,0,0.5,0.5] -- an empty month is not averaged in as 0% (row sums to 1).
+    assert result.output["avg_matrix"][1] == pytest.approx([0.0, 0.0, 0.5, 0.5])
+    # bad is never a from-state in the window -> explicit undefined row, not zeros
+    assert result.output["avg_matrix"][2] == [None, None, None, None]
+    assert result.output["worst_matrix"][2] == [None, None, None, None]
     # heat_table row shape
     assert result.output["heat_table"][1]["from"] == "M1"
-    assert result.output["heat_table"][1]["exited"] == pytest.approx(0.25)
+    assert result.output["heat_table"][1]["exited"] == pytest.approx(0.5)
+    flags = {flag["kind"]: flag for flag in result.output["red_flags"]}
+    assert flags["unobserved_state"]["states"] == ["bad"]
+    # per-month alignment flags are reported once, by flow_rate
+    assert "sparse_month" not in flags
 
 
 @pytest.mark.slow
@@ -216,7 +223,7 @@ def test_segment_profile_hand_computed_hhi_and_other_merge(tmp_path):
     assert conc["top1_pct"] == pytest.approx(0.6)
     assert conc["hhi"] == pytest.approx(0.46)
     kinds = {flag["kind"] for flag in result.output["red_flags"]}
-    assert "high_concentration" in kinds  # top1 .6 > .40
+    assert "high_concentration" in kinds  # top1 .6 > max(.40, 1.5/3 segments)
 
     # top_k=1 -> B,C merged into 「其他」
     merged = runner.invoke(

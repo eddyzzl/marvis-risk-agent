@@ -103,7 +103,9 @@ def test_v2_source_mode_resolver_is_typed_and_capability_aware() -> None:
     }
 
 
-def _setup(tmp_path: Path, *, target_bad_value: int = 1) -> dict:
+def _setup(
+    tmp_path: Path, *, target_bad_value: int = 1, month_values: list[str] | None = None
+) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     task = TaskRepository(settings.db_path).create_task(
@@ -139,6 +141,8 @@ def _setup(tmp_path: Path, *, target_bad_value: int = 1) -> dict:
     )
     if target_bad_value == 0:
         frame["bad"] = frame["bad"].map({0.0: 1, 1.0: 0})
+    if month_values is not None:
+        frame["apply_month"] = month_values
     source = tmp_path / "sample.parquet"
     frame.to_parquet(source, index=False)
     registry = DatasetRegistry(
@@ -581,8 +585,138 @@ def test_v2_time_field_requires_date_semantics_and_rejects_numeric_epoch(
         run_materialize_sample_design_v2(
             request, fx["ctx"], fx["runtime"]
         )
-    with pytest.raises(StrategyError, match="numeric epoch-style"):
-        v2_tools._date_series(pd.Series([20261231]), "apply_date")
+    with pytest.raises(StrategyError, match="不按时间戳解读"):
+        v2_tools._date_periods(pd.Series([20261231]), "apply_date")
+
+
+_MONTHS = ["2026-01", "2026-01", "2026-02", "2026-02", "2026-03", "2026-03"]
+
+
+def _month_request(fx: dict) -> dict:
+    """D-2: the month-only column (YYYY-MM) is the sample's time field."""
+
+    request = deepcopy(fx["request"])
+    request["field_bindings"]["time_field"] = "apply_month"
+    request["field_bindings"]["month_field"] = "apply_month"
+    return request
+
+
+def test_v2_month_only_time_field_is_mature_when_its_month_end_is(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path, month_values=_MONTHS)
+    request = _month_request(fx)
+    # cutoff 2026-04-30 - 30 days = 2026-03-31: the 2026-03 month end just fits.
+    output = run_materialize_sample_design_v2(request, fx["ctx"], fx["runtime"])
+
+    maturity = output["bundle"]["populations"][1]["maturity_evidence"]
+    assert maturity["status"] == "confirmed_matured"
+    assert maturity["eligible_count"] == 6
+    # OOT months start after every development/validation month ends.
+    temporal = next(
+        item for item in output["bundle"]["diagnostics"] if item["code"] == "temporal_oot"
+    )
+    assert temporal["status"] == "pass"
+
+
+def test_v2_month_only_rows_whose_month_end_is_late_are_not_mature(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path, month_values=_MONTHS)
+    request = _month_request(fx)
+    # cutoff 2026-04-29 - 30 days = 2026-03-30: the 2026-03 rows (days 1 and
+    # 10 in apply_date) would be mature by day, but their month ends 03-31.
+    request["maturity"]["cutoff_date"] = "2026-04-29"
+
+    with pytest.raises(StrategyError, match="every risk row"):
+        run_materialize_sample_design_v2(request, fx["ctx"], fx["runtime"])
+
+    request["scope"] = "exploration_only"
+    request["maturity"] = {
+        "status": "not_matured",
+        "performance_window_days": 30,
+        "cutoff_date": "2026-04-29",
+        "reason": "The latest month is still inside its performance window.",
+    }
+    output = run_materialize_sample_design_v2(request, fx["ctx"], fx["runtime"])
+    maturity = output["bundle"]["populations"][1]["maturity_evidence"]
+    assert maturity["status"] == "not_matured"
+    assert maturity["eligible_count"] == 4
+
+    day_fx = _setup(tmp_path / "day", month_values=_MONTHS)
+    day_request = deepcopy(day_fx["request"])
+    day_request["maturity"]["cutoff_date"] = "2026-04-29"
+    day_output = run_materialize_sample_design_v2(
+        day_request, day_fx["ctx"], day_fx["runtime"]
+    )
+    assert day_output["bundle"]["populations"][1]["maturity_evidence"][
+        "eligible_count"
+    ] == 6
+
+
+def test_v2_month_only_observation_window_counts_whole_months(tmp_path: Path) -> None:
+    fx = _setup(tmp_path, month_values=_MONTHS)
+    request = _month_request(fx)
+    # apply_date rows end on 2026-03-10, but the 2026-03 month runs to 03-31.
+    request["observation_window"]["end"] = "2026-03-15"
+
+    with pytest.raises(StrategyError, match="outside the observation window"):
+        run_materialize_sample_design_v2(request, fx["ctx"], fx["runtime"])
+
+    request["observation_window"]["end"] = "2026-03-31"
+    request["maturity"]["cutoff_date"] = "2026-04-30"
+    output = run_materialize_sample_design_v2(request, fx["ctx"], fx["runtime"])
+    assert output["bundle"]["populations"][1]["maturity_evidence"]["status"] == (
+        "confirmed_matured"
+    )
+
+
+def test_v2_month_only_time_ranges_partition_whole_months(tmp_path: Path) -> None:
+    fx = _setup(tmp_path, month_values=_MONTHS)
+    request = _month_request(fx)
+    request["partitioning"] = {
+        "method": "time_ranges",
+        "column": "apply_month",
+        "ranges": {
+            "development": {"start": "2026-01-01", "end": "2026-01-31"},
+            "validation": {"start": "2026-02-01", "end": "2026-02-28"},
+            "oot": {"start": "2026-03-01", "end": "2026-03-31"},
+        },
+    }
+
+    output = run_materialize_sample_design_v2(request, fx["ctx"], fx["runtime"])
+
+    assert output["legacy_mapping"]["row_equal"] is True
+
+
+def test_v2_mixed_month_and_day_time_values_are_rejected_clearly() -> None:
+    with pytest.raises(StrategyError) as raised:
+        v2_tools._date_periods(
+            pd.Series(["2026-01", "2026-01-15", "2026-02"]), "apply_month"
+        )
+
+    message = str(raised.value)
+    assert "apply_month" in message
+    assert "不能混用" in message
+    assert "YYYY-MM" in message
+    firsts, lasts = v2_tools._date_periods(pd.Series(["2026-02", "2024-02"]), "m")
+    assert [item.isoformat() for item in firsts] == ["2026-02-01", "2024-02-01"]
+    assert [item.isoformat() for item in lasts] == ["2026-02-28", "2024-02-29"]
+    with pytest.raises(StrategyError, match="ISO calendar dates"):
+        v2_tools._date_periods(pd.Series(["2026-13"]), "m")
+
+
+def test_v2_month_values_accept_yyyymm_integers_and_strings() -> None:
+    """D-2: month columns stored as 202601 (int or text) are whole months."""
+
+    for values in ([202601, 202402], ["202601", "202402"], ["2026-01", "2024-02"]):
+        firsts, lasts = v2_tools._date_periods(pd.Series(values), "apply_month")
+        assert [item.isoformat() for item in firsts] == ["2026-01-01", "2024-02-01"]
+        assert [item.isoformat() for item in lasts] == ["2026-01-31", "2024-02-29"]
+    with pytest.raises(StrategyError) as raised:
+        v2_tools._date_periods(pd.Series([1767225600]), "apply_month")
+    message = str(raised.value)
+    assert "apply_month" in message and "YYYYMM" in message and "YYYY-MM-DD" in message
 
 
 def test_v2_time_ranges_resolve_the_same_exact_legacy_development_rows(tmp_path: Path) -> None:

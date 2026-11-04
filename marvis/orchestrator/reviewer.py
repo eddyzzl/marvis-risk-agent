@@ -101,6 +101,7 @@ class Reviewer:
 
     def llm_critique(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict:
         from marvis.llm_outbound import outbound_prompt, review_repair_prompt
+        from marvis.llm_outbound_instructions import review_goal_or_omitted
         # AGT-6: no LLM configured is the common manual-mode case, not a failure —
         # every step used to deterministically render a "failed" llm_critic verdict
         # (a full English exception message) purely because settings had no model
@@ -119,14 +120,19 @@ class Reviewer:
         try:
             prompt = json.dumps(
                 {
-                    "goal": goal,
                     "step": step.title,
                     "output_summary": output,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            prompt = outbound_prompt(json.loads(prompt))
+            payload = json.loads(prompt)
+            # Verbatim goal (negations, conditions, thresholds) or refusal
+            # before any request; never reduced to topic words.
+            approved_goal = review_goal_or_omitted(goal)
+            if approved_goal is not None:
+                payload["goal"] = approved_goal
+            prompt = outbound_prompt(payload)
             raw = llm.complete(
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,

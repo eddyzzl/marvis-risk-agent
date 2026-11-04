@@ -6,6 +6,10 @@ import re
 import unicodedata
 from collections.abc import Sequence
 
+from marvis.agent.strategy_control_labels import (
+    join_control_labels as _join_control_labels,
+)
+
 from . import contracts as _contracts
 from . import grounding as _grounding
 from . import identifiers as _identifiers
@@ -2075,8 +2079,8 @@ def _ground_automatic_tree_candidate_build(
     return _contracts._clarification(
         "请在原话中明确列出自动树候选的全部特征，以及实际需要覆盖的权重列、"
         "金额列、方向或树参数；当前无法核对："
-        + "、".join(unique_missing)
-        + "。平台不会采用 LLM 猜测的列、参数、默认值、结果或推荐。",
+        + _join_control_labels(unique_missing, bare_value="特征", bare_keys=False)
+        + "。平台不会替你猜测列、参数、默认值、结果或推荐。",
         code="automatic_tree_build_controls_not_grounded",
         fields=unique_missing,
     )

@@ -21,11 +21,10 @@ from marvis.data.analysis_service import (
 )
 from marvis.data.descriptive import DescriptiveConfig, DescriptiveConfigError
 from marvis.errors import (
-    bad_request,
     conflict,
     not_found,
+    parse_if_match_revision,
     precondition_failed,
-    precondition_required,
     unprocessable,
 )
 from marvis.repositories.data_analysis import (
@@ -89,20 +88,6 @@ class DataAnalysisPostRequest(BaseModel):
         )
 
 
-def _parse_if_match(if_match: str | None) -> int:
-    if if_match is None:
-        raise precondition_required("If-Match header is required")
-    if not if_match.isascii() or not if_match.isdecimal():
-        raise bad_request("If-Match must be a non-negative integer")
-    try:
-        expected_revision = int(if_match)
-    except ValueError as exc:
-        raise bad_request("If-Match must be a non-negative integer") from exc
-    if expected_revision < 0:
-        raise bad_request("If-Match must be a non-negative integer")
-    return expected_revision
-
-
 @router.post("/tasks/{task_id}/data-analysis")
 def request_data_analysis(
     task_id: str,
@@ -112,7 +97,7 @@ def request_data_analysis(
     background_tasks: BackgroundTasks,
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> dict[str, object]:
-    expected_revision = _parse_if_match(if_match)
+    expected_revision = parse_if_match_revision(if_match)
     service = DataAnalysisService(request.app.state.settings)
     try:
         dispatch = service.request_analysis(

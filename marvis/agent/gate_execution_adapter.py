@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 
-from marvis.agent.adjust_specs import adjust_param_error, normalize_adjust_params
+from marvis.agent.adjust_specs import (
+    FEATURE_BINNING_ADJUST_PARAMS,
+    adjust_param_error,
+    normalize_adjust_params,
+)
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_payloads import screen_known_features
 from marvis.agent.gates.adapters import monitoring_verdict_error
 from marvis.agent.plan_utils import downstream_step_ids, find_step
+from marvis.orchestrator.capability import resolve_tier
 from marvis.orchestrator.contracts import (
     Plan,
     PlanStatus,
@@ -20,6 +26,119 @@ from marvis.orchestrator.contracts import (
 
 ACTION_OUTCOME_METADATA_KEY = "action_outcome"
 ACTION_OUTCOME_REJECTED = "rejected"
+
+# The literal quick-reply command offered when feature metrics ran without
+# stability: one click recomputes only the metrics step with monthly PSI.
+FEATURE_STABILITY_COMMAND = "补算按月 PSI 并重算特征指标"
+_PSI_VIEWS = ("psi_month_first", "psi_month_last", "psi_month_previous", "psi_split")
+_LEGACY_FEATURE_METRICS = ("iv", "ks", "auc", "coverage", "lift", "psi")
+_FEATURE_STABILITY_RE = re.compile(r"PSI|稳定性|稳定度", re.IGNORECASE)
+_FEATURE_STABILITY_SPLIT_RE = re.compile(r"split|样本集|训练集|测试集|OOT", re.IGNORECASE)
+_NAMED_COLUMN_RE = re.compile(r"按\s*([A-Za-z_][A-Za-z0-9_]*)")
+_FEATURE_METRIC_LABELS = {
+    "iv": "IV",
+    "ks": "KS",
+    "auc": "AUC",
+    "coverage": "覆盖率",
+    "lift": "Lift",
+    "psi": "PSI（需对比数据集）",
+    "vif": "共线性（VIF）",
+    "head_tail_lift": "头尾 Lift",
+    "importance": "重要性",
+    "meaning_consistency": "含义一致性",
+}
+_PARAM_LABELS = {
+    "features": "特征",
+    "bins": "分箱数",
+    "metrics": "指标",
+    "leakage_ks": "泄漏 KS 阈值",
+    "max_missing_rate": "缺失率上限",
+    "iv_min": "IV 下限",
+    "corr_max": "相关性上限",
+    "n_trials": "调参次数",
+    "num_boost_round": "迭代轮数",
+    "seed": "随机种子",
+    "recipes": "算法",
+    "target_type": "目标类型",
+    "sample_weight_col": "样本权重列",
+    "split_config": "样本切分",
+    "key_overrides": "拼接键",
+    "band_edges": "分数带边界",
+    "threshold_patch": "监控阈值",
+    "disposition": "处置方式",
+    "reason": "理由",
+}
+
+
+def describe_adjust_params(params: dict) -> str:
+    """Business-Chinese summary of an adjustment (never a Python repr)."""
+
+    parts: list[str] = []
+    for key, value in params.items():
+        label = _PARAM_LABELS.get(str(key), f"参数 {key}")
+        if str(key) == "key_overrides" and isinstance(value, dict):
+            # Keyed by feature-table dataset id; the reader sees the columns
+            # (eval S6 read 「拼接键改为 ds_fe8e… mobile」), numbered when
+            # several feature tables change at once.
+            keys = [" + ".join(map(str, cols)) if isinstance(cols, (list, tuple)) else str(cols)
+                    for cols in value.values()]
+            value = keys if len(keys) == 1 else [f"第 {index} 张特征表 {text}" for index, text in enumerate(keys, 1)]
+        parts.append(f"{label}改为 {_describe_value(value)}")
+    return "；".join(parts)
+
+
+def _describe_value(value) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (list, tuple)):
+        return "、".join(_describe_value(item) for item in value) or "（空）"
+    if isinstance(value, dict):
+        return "，".join(f"{key} {_describe_value(item)}" for key, item in value.items()) or "（空）"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def requests_feature_stability(text: str | None) -> bool:
+    return bool(_FEATURE_STABILITY_RE.search(str(text or "")))
+
+
+def feature_metrics_without_stability(plan: Plan, gate: PlanStep | None) -> PlanStep | None:
+    """The upstream feature-metrics step when it computed no PSI view."""
+
+    if gate is None:
+        return None
+    upstream = GateExecutionAdapter._dependency_step_ids(plan, gate) | {gate.id}
+    for step in sorted(plan.steps, key=lambda item: (item.index, item.id)):
+        if step.id not in upstream or step.tool_ref.tool != "compute_feature_metrics":
+            continue
+        inputs = step.inputs or {}
+        metrics = (
+            list(inputs["metrics"])
+            if isinstance(inputs.get("metrics"), list)
+            else list(_LEGACY_FEATURE_METRICS)
+        )
+        if any(str(metric) in _PSI_VIEWS for metric in metrics):
+            return None
+        return step
+    return None
+
+
+def feature_stability_gap_explanation(step: PlanStep) -> str:
+    inputs = step.inputs or {}
+    metrics = (
+        list(inputs["metrics"])
+        if isinstance(inputs.get("metrics"), list)
+        else list(_LEGACY_FEATURE_METRICS)
+    )
+    labels = [_FEATURE_METRIC_LABELS.get(str(metric), str(metric)) for metric in metrics]
+    computed = "、".join(labels) if labels else "没有选任何指标"
+    return (
+        f"本次「{step.title}」只算了 {computed}，创建任务时没有选择稳定性（PSI），"
+        "所以结果里没有 PSI。要补上的话，点「补算按月 PSI」：我会在当前计划里给全部特征"
+        "加算按月 PSI（首月基准和逐月环比），只重算特征指标，其他设置不变；"
+        "样本里没有可识别的月份列时，结果会注明无法计算。"
+    )
 
 
 class GateExecutionAdapter:
@@ -259,8 +378,7 @@ class GateExecutionAdapter:
                 plan,
                 gate,
                 run_seq,
-                "重规划未成功（重规划预算用尽或指令无法执行）；可改为在节点处「调参重算」，"
-                "或重新创建任务调整配置。",
+                self._replan_failure_text(plan, gate),
             )
         revised = self._repo.load_plan(plan.id)
         if revised.status == PlanStatus.VALIDATED:
@@ -272,6 +390,94 @@ class GateExecutionAdapter:
         turn.messages.insert(
             0,
             DriverMessage("chat", "已按指令重规划并继续执行。", {"plan_id": plan.id, "run_seq": run_seq}),
+        )
+        return turn
+
+    @staticmethod
+    def _replan_failure_text(plan: Plan, gate: PlanStep | None) -> str:
+        """Say why the plan was kept, and name a next step that exists."""
+
+        budget = resolve_tier(plan.tier).max_replan_iterations
+        if budget <= 0:
+            head = "当前能力档位不允许重规划，计划和已有结果保持不变。"
+        elif int(plan.replan_count) >= budget:
+            head = f"这个计划的重规划次数（{budget} 次）已经用完，计划和已有结果保持不变。"
+        else:
+            head = "我没能把这条要求改写成一份能通过平台校验的新计划，计划和已有结果保持不变。"
+        where = f"当前仍停在「{gate.title}」。" if gate is not None else ""
+        return (
+            head
+            + where
+            + "可以直接说要把哪个参数改成什么值，我只重算受影响的步骤；"
+            "需要换数据或换流程时，可以新建任务重新配置。"
+        )
+
+    def add_feature_stability_metrics(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+        run_seq,
+        *,
+        instruction: str | None = None,
+    ) -> DriverTurn | None:
+        """Recompute feature metrics with monthly (and optionally split) PSI.
+
+        Only the metrics selection changes; the feature set, target and every
+        other reviewed input stay as they are.  Returns ``None`` when the plan
+        has no feature-metrics step lacking PSI.
+        """
+
+        step = feature_metrics_without_stability(plan, gate)
+        if step is None or gate is None:
+            return None
+        inputs = dict(step.inputs or {})
+        metrics = (
+            list(inputs["metrics"])
+            if isinstance(inputs.get("metrics"), list)
+            else list(_LEGACY_FEATURE_METRICS)
+        )
+        added = ["psi_month_first", "psi_month_previous"]
+        text = str(instruction or "")
+        if _FEATURE_STABILITY_SPLIT_RE.search(text):
+            added.append("psi_split")
+        inputs["metrics"] = [*metrics, *[metric for metric in added if metric not in metrics]]
+        named = _NAMED_COLUMN_RE.search(text)
+        if (
+            named is not None
+            and named.group(1).lower() not in {"psi", "split", "oot"}
+            and not str(inputs.get("time_col") or "").strip()
+        ):
+            # A column the user names is passed through; the Tool reads only
+            # columns that exist and marks the view unavailable otherwise.
+            inputs["time_col"] = named.group(1)
+        reset_ids = self._ordered_adjustment_reset_ids(
+            plan,
+            root_ids=[step.id],
+            target_step_id=gate.id,
+        )
+        self._repo.apply_gate_adjustment(
+            plan.id,
+            target_step_id=gate.id,
+            reset_step_ids=reset_ids,
+            replacement_inputs_by_step={step.id: inputs},
+            expected_plan_status=plan.status,
+            expected_plan_revision=plan.replan_count,
+            expected_plan_fingerprint=plan_fingerprint(plan),
+            expected_target_step_fingerprint=plan_step_confirmation_fingerprint(gate),
+        )
+        turn = self._run_and_handle(plan.id, run_seq=run_seq)
+        views = "首月基准、逐月环比" + ("、样本集" if "psi_split" in added else "")
+        column = f"（时间列 {inputs['time_col']}）" if inputs.get("time_col") else ""
+        feature_count = len(inputs.get("features") or [])
+        scope = f"全部 {feature_count} 个特征" if feature_count else "全部特征"
+        turn.messages.insert(
+            0,
+            DriverMessage(
+                "chat",
+                f"已在「{step.title}」里加上按月 PSI{column}（{views}），对{scope}重新计算；"
+                "特征集合和其他设置不变。",
+                {"plan_id": plan.id, "step_id": step.id, "run_seq": run_seq},
+            ),
         )
         return turn
 
@@ -305,8 +511,19 @@ class GateExecutionAdapter:
 
         primary = None
         replacement_inputs_by_step: dict[str, dict] = {}
+        # The binning gate's features/bins are its own decision inputs (which
+        # features to bin), never the upstream metrics feature set.
+        gate_owned = (
+            FEATURE_BINNING_ADJUST_PARAMS
+            if gate.tool_ref.tool == "analyze_feature_bins"
+            else frozenset()
+        )
         for dep in candidates:
-            overrides = {key: value for key, value in params.items() if key in (dep.inputs or {})}
+            overrides = {
+                key: value
+                for key, value in params.items()
+                if key in (dep.inputs or {}) and (dep is gate or key not in gate_owned)
+            }
             # Backward compatibility for plans created before the join-key picker
             # declared key_overrides in the builtin templates. Historical pending
             # gates can still be repaired in place instead of forcing a new task.
@@ -357,7 +574,7 @@ class GateExecutionAdapter:
             0,
             DriverMessage(
                 "chat",
-                f"已按指令调整参数 {dict(params)} 并重算「{primary.title}」。",
+                f"已按你的要求调整（{describe_adjust_params(params)}），并重算「{primary.title}」。",
                 {"plan_id": plan.id, "step_id": primary.id, "run_seq": run_seq},
             ),
         )
@@ -553,5 +770,10 @@ class GateExecutionAdapter:
 __all__ = [
     "ACTION_OUTCOME_METADATA_KEY",
     "ACTION_OUTCOME_REJECTED",
+    "FEATURE_STABILITY_COMMAND",
+    "describe_adjust_params",
+    "feature_metrics_without_stability",
+    "feature_stability_gap_explanation",
+    "requests_feature_stability",
     "GateExecutionAdapter",
 ]

@@ -20,6 +20,7 @@ from marvis.repositories.data_workspace import DataWorkspaceDatasetNotFound
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.data_workspace import DataWorkspaceRevisionConflict
 from marvis.repositories.tasks import TaskRepository
+from dataclasses import replace
 from typing import Callable
 import json
 import sqlite3
@@ -111,7 +112,7 @@ def _run_join_setup(
             task.id,
             role="assistant",
             stage="chat",
-            content="请确认文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
+            content="请确认文件角色与目标列：无误就点「确认角色」，要改就在下方调整后再确认。",
             metadata={"join_c1": c1_state, "tables": c1_state_lane._c1_table(c1_state)},
         )
         return responses_lane.join_turn_response(repo, task.id)
@@ -263,7 +264,11 @@ def _bind_single_join_dataset(
                 raise JoinSetupError(
                     "当前 DataWorkspace 已绑定另一份数据，请刷新并重新确认。"
                 )
-            if snapshot.semantic_mapping != confirmed_mapping:
+            # Field directions confirmed after the join are user facts that do
+            # not change the binding; target/roles/names must still match.
+            if replace(snapshot.semantic_mapping, risk_directions={}) != replace(
+                confirmed_mapping, risk_directions={}
+            ):
                 raise JoinSetupError(
                     "当前 DataWorkspace 的语义映射已变化，请刷新并重新确认。"
                 )
@@ -292,7 +297,8 @@ def _bind_single_join_dataset(
                         str(row["active_dataset_id"] or "") != dataset.id
                         or str(row["active_dataset_content_hash"] or "")
                         != dataset.content_hash
-                        or persisted_mapping != confirmed_mapping
+                        or replace(persisted_mapping, risk_directions={})
+                        != replace(confirmed_mapping, risk_directions={})
                     ):
                         raise JoinSetupError(
                             "当前 DataWorkspace 绑定已变化，请刷新并重新确认。"

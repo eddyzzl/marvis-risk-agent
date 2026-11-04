@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,11 +24,16 @@ from marvis.notebook_contract import precheck_notebook_contract
 from marvis.packs.modeling.artifact import save_model
 from marvis.packs.modeling.contracts import ModelMetrics, TrainConfig, TrainResult
 from marvis.packs.modeling.experiment import ExperimentStore
+from marvis.formatting import model_version_display
 from marvis.packs.modeling.handoff import (
+    algorithm_display_name,
     create_challenger_backtest_task,
+    delivery_model_version,
     handoff_to_validation,
     mark_validated_from_validation_task,
 )
+import marvis.packs.modeling.handoff as handoff_module
+from marvis.report_fields import default_report_values
 import marvis.packs.modeling.tools as modeling_tools
 import marvis.packs.modeling.delivery_tools as modeling_delivery_tools
 from marvis.settings import build_settings
@@ -139,9 +145,14 @@ def _seed_experiment(tmp_path: Path, *, sample_weight_col: str = "", preprocessi
     return settings, store, source_task, dataset, stored_artifact
 
 
+def _freeze_delivery_date(monkeypatch, value: date = date(2026, 10, 21)) -> None:
+    monkeypatch.setattr(handoff_module, "_delivery_date", lambda: value)
+
+
 @pytest.mark.pmml_runtime
-def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
+def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path, monkeypatch):
     settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
+    _freeze_delivery_date(monkeypatch)
 
     validation_task_id = handoff_to_validation(
         store,
@@ -156,7 +167,14 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert persisted_artifact is not None
     assert validation_task.task_type == TASK_TYPE_VALIDATION
     assert validation_task.model_name == source_task.model_name
-    assert validation_task.model_version == artifact.id
+    # D-1: the version reads 「算法名 交付日期」; the artifact id stays traceable.
+    assert validation_task.model_version == "逻辑回归 20261021"
+    assert "artifact" not in validation_task.model_name
+    assert "artifact" not in validation_task.model_version
+    assert material_dir.name == artifact.id
+    stored_values, _revision = TaskRepository(settings.db_path).get_report_values(validation_task_id)
+    assert stored_values["TEXT:source_artifact_id"] == artifact.id
+    assert stored_values["TEXT:source_experiment_id"] == artifact.experiment_id
     assert validation_task.algorithm == "lr"
     assert validation_task.run_mode == "agent"
     assert validation_task.target_col == "y"
@@ -282,6 +300,7 @@ def test_scoring_notebook_replay_is_a_no_op_without_a_preprocessing_chain(tmp_pa
 @pytest.mark.pmml_runtime
 def test_handoff_to_validation_uses_connection_scoped_task_write(tmp_path, monkeypatch):
     settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
+    _freeze_delivery_date(monkeypatch)
 
     def fail_legacy_write(self, *args, **kwargs):
         raise AssertionError("legacy task write called")
@@ -299,7 +318,9 @@ def test_handoff_to_validation_uses_connection_scoped_task_write(tmp_path, monke
         settings=settings,
     )
 
-    assert TaskRepository(settings.db_path).get_task(validation_task_id).model_version == artifact.id
+    assert TaskRepository(settings.db_path).get_task(validation_task_id).model_version == (
+        "逻辑回归 20261021"
+    )
     assert store.get(artifact.experiment_id).status == "handed_off"
 
 
@@ -344,8 +365,9 @@ def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_f
 
 
 @pytest.mark.pmml_runtime
-def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_path):
+def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_path, monkeypatch):
     settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
+    _freeze_delivery_date(monkeypatch)
 
     result = create_challenger_backtest_task(
         store,
@@ -366,7 +388,7 @@ def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_pat
     material_dir = Path(task.source_dir)
     assert task.task_type == TASK_TYPE_VALIDATION
     assert task.model_name == source_task.model_name
-    assert task.model_version == f"{artifact.id}-challenger-backtest"
+    assert task.model_version == "逻辑回归 20261021 挑战者回测"
     assert task.validator == "MARVIS Challenger Backtest"
     assert task.notebook_path == "scoring_notebook.ipynb"
     assert task.sample_path == "sample.parquet"
@@ -403,6 +425,7 @@ def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_pat
 @pytest.mark.pmml_runtime
 def test_create_challenger_backtest_uses_connection_scoped_task_write(tmp_path, monkeypatch):
     settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
+    _freeze_delivery_date(monkeypatch)
 
     def fail_legacy_write(self, *args, **kwargs):
         raise AssertionError("legacy task write called")
@@ -421,7 +444,7 @@ def test_create_challenger_backtest_uses_connection_scoped_task_write(tmp_path, 
     )
 
     assert TaskRepository(settings.db_path).get_task(result["task_id"]).model_version == (
-        f"{artifact.id}-challenger-backtest"
+        "逻辑回归 20261021 挑战者回测"
     )
     assert Path(result["package_path"]).exists()
 
@@ -854,3 +877,100 @@ def test_mark_validated_from_validation_task_updates_completed_experiment(tmp_pa
 
     assert did_update is True
     assert store.get(artifact.experiment_id).status == "validated"
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        ("lr", "逻辑回归 20261021"),
+        ("lgb", "LightGBM 20261021"),
+        ("xgb", "XGBoost 20261021"),
+        ("scorecard", "评分卡 20261021"),
+        ("lgb_regressor", "LightGBM 回归 20261021"),
+        ("ensemble", "集成模型 20261021"),
+        ("LR", "逻辑回归 20261021"),
+        ("unknown_recipe", "交付模型 20261021"),
+        ("", "交付模型 20261021"),
+    ],
+)
+def test_delivery_model_version_is_algorithm_label_and_delivery_date(algorithm, expected):
+    version = delivery_model_version(algorithm, date(2026, 10, 21))
+
+    assert version == expected
+    assert "artifact" not in version
+    assert algorithm_display_name(algorithm) == expected.rsplit(" ", 1)[0]
+
+
+def test_same_day_same_algorithm_delivery_gets_a_short_disambiguator():
+    day = date(2026, 10, 21)
+    taken = {"逻辑回归 20261021", "逻辑回归 20261021-2", "逻辑回归 20261021 挑战者回测"}
+
+    assert delivery_model_version("lr", day, taken=taken) == "逻辑回归 20261021-3"
+    assert delivery_model_version("lgb", day, taken=taken) == "LightGBM 20261021"
+    assert (
+        delivery_model_version("lr", day, taken=taken, suffix=" 挑战者回测")
+        == "逻辑回归 20261021-2 挑战者回测"
+    )
+
+
+def test_delivery_date_is_utc(monkeypatch):
+    from datetime import UTC, datetime
+
+    assert handoff_module._delivery_date() == datetime.now(UTC).date()
+
+
+def test_validation_memory_identity_uses_the_delivered_artifact():
+    from types import SimpleNamespace
+
+    from marvis.pipeline_memory import _memory_model_experience_payload
+
+    task = SimpleNamespace(
+        id="t1", model_name="A卡", model_version="逻辑回归 20261021",
+        report_values={"TEXT:source_artifact_id": "art_1"},
+    )
+    payload = _memory_model_experience_payload(task=task, results={})
+    assert payload["model_version"] == "art_1"
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("artifact_0123456789abcdef0123456789abcdef", ""),
+        ("artifact_0123456789abcdef0123456789abcdef-challenger-backtest", "挑战者回测"),
+        ("逻辑回归 20261021", "逻辑回归 20261021"),
+        ("v1", "v1"),
+        ("", ""),
+        ("artifact_v2", "artifact_v2"),
+    ],
+)
+def test_model_version_display_hides_legacy_artifact_ids_only(stored, expected):
+    assert model_version_display(stored) == expected
+
+
+def test_legacy_artifact_version_reads_cleanly_in_report_title():
+    legacy = default_report_values(
+        "贷前A卡 建模",
+        "artifact_0123456789abcdef0123456789abcdef",
+        "建模平台",
+        "lr",
+    )
+    legacy_backtest = default_report_values(
+        "贷前A卡 建模",
+        "artifact_0123456789abcdef0123456789abcdef-challenger-backtest",
+        "建模平台",
+        "lr",
+    )
+    readable = default_report_values("贷前A卡 建模", "逻辑回归 20261021", "建模平台", "lr")
+
+    assert legacy["TEXT:report_title"] == "贷前A卡 建模模型验证文档"
+    assert legacy_backtest["TEXT:report_title"] == "贷前A卡 建模模型挑战者回测版验证文档"
+    assert readable["TEXT:report_title"] == "贷前A卡 建模模型逻辑回归 20261021版验证文档"
+
+
+def test_handoff_model_name_falls_back_to_algorithm_label_without_source_task():
+    artifact = SimpleNamespace(algorithm="lgb")
+
+    assert handoff_module._handoff_model_name(None, artifact) == "LightGBM模型"
+    assert handoff_module._handoff_model_name(
+        SimpleNamespace(model_name="贷前A卡 建模"), artifact,
+    ) == "贷前A卡 建模"

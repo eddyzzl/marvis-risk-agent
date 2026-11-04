@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from marvis.agent.setup_context import dataset_file_name
 from marvis.agent.setup_context import resolve_named_col as _resolve_named_col
 from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.sample_setup import detect_setup
@@ -91,7 +92,7 @@ def build_vintage_proposal(
     bad_col = _resolve_bad_col(backend, path, columns, target_col)
     return VintageProposal(
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         cohort_col=cohort_col,
         mob_col=mob_col,
         bad_col=bad_col,
@@ -121,11 +122,6 @@ def _resolve_bad_col(backend, path: Path, columns: list[str], requested: str | N
     if setup.target_col:
         return setup.target_col
     raise VintageSetupError("未能识别 0/1 坏账标签列；请在创建任务时指定 target_col。")
-
-
-def _dataset_name(dataset) -> str:
-    source = getattr(dataset, "source_path", None)
-    return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
 __all__ = ["VintageProposal", "VintageSetupError", "build_vintage_proposal"]

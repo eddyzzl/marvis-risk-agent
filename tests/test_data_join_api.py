@@ -241,8 +241,10 @@ def test_data_join_conversation_end_to_end(
     ).get_task(task_id)
     assert persisted_task.target_col == "bad_flag"
     overview = _last_assistant(role_messages)
-    assert "手动模式请点击「开始执行」" in overview["content"]
-    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
+    # Batch 3b (2026-10-14 redesign): plan overview copy is mode-neutral; the agent-only hint is structured.
+    assert "确认没问题就开始执行。" in overview["content"]
+    assert "请回复" not in overview["content"]
+    assert overview["metadata"]["reply_hint"] == "要先改哪一步，也可以直接说。"
 
     # turn 2 — 开始: run the plan, pause at the C2 diagnostics gate
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
@@ -722,8 +724,10 @@ def test_data_join_c1_form_assignment_drives_the_join(client: TestClient, tmp_pa
     )
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "手动模式请点击「开始执行」" in overview["content"]
-    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
+    # Batch 3b (2026-10-14 redesign): plan overview copy is mode-neutral; the agent-only hint is structured.
+    assert "确认没问题就开始执行。" in overview["content"]
+    assert "请回复" not in overview["content"]
+    assert overview["metadata"]["reply_hint"] == "要先改哪一步，也可以直接说。"
     # 开始 → run to the C2 diagnostics gate
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
@@ -1815,3 +1819,88 @@ def test_data_join_plan_payload_carries_started_at_for_running_step(
         "trial_total": 40,
     }
     assert refreshed_step["progress_updated_at"]
+
+
+def _join_dir_s6(root: Path, n: int = 240) -> Path:
+    """Eval S6: 申请表 (cust_id, mobile, bad_flag, ...) + 征信特征表 (cust_id, mobile_md5, ...)
+    as uploaded CSVs — both tables carry the same 240 unique raw customer ids."""
+    src = root / "join_s6"
+    src.mkdir(parents=True, exist_ok=True)
+    cust_ids = [f"C{i:06d}" for i in range(1, n + 1)]
+    phones = [f"138{i:08d}" for i in range(n)]
+    pd.DataFrame({
+        "cust_id": cust_ids,
+        "mobile": phones,
+        "bad_flag": [int(i % 5 == 0) for i in range(n)],
+        "channel": ["app", "web", "partner"] * (n // 3),
+    }).to_csv(src / "applications.csv", index=False)
+    pd.DataFrame({
+        "cust_id": list(reversed(cust_ids)),
+        "mobile_md5": [hashlib.md5(phone.encode()).hexdigest() for phone in reversed(phones)],
+        "sig1": [float(i) for i in reversed(range(n))],
+    }).to_csv(src / "bureau_features.csv", index=False)
+    return src
+
+
+def _join_keys_feature(gate: dict) -> dict:
+    join_keys = gate["metadata"].get("join_keys")
+    assert join_keys, gate["metadata"]
+    [feature] = join_keys["features"]
+    return feature
+
+
+def test_data_join_s6_prefers_customer_id_and_switch_to_phone_keeps_rows(
+    client: TestClient, tmp_path: Path
+):
+    """S6: the C2 gate proposes cust_id (raw=raw, unique, 100%) with a business reason, keeps
+    mobile=mobile_md5 selectable, and either key executes 240 → 240 rows."""
+    src = _join_dir_s6(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "S6 客户号拼接", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认", "ui_action": "confirm_roles"})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+
+    gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "拼接诊断完成" in gate["content"]
+    assert "选用客户号 cust_id = cust_id 关联" in gate["content"]
+    assert "原值完全一致" in gate["content"] and "命中率 100.00%" in gate["content"]
+    assert "✗ raw≠md5" not in json.dumps(gate["metadata"].get("tables"), ensure_ascii=False)
+    feature = _join_keys_feature(gate)
+    assert feature["selected_anchor_cols"] == ["cust_id"]
+    assert {option["anchor_col"] for option in feature["key_options"]} == {"cust_id", "mobile"}
+    assert [alt["anchor_cols"] for alt in feature["alternatives"]] == [["mobile"]]
+
+    # switch to the hashed phone in the key picker → re-diagnosed, still unconfirmed
+    switched = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            gate,
+            action="apply_join_keys",
+            content="重新诊断拼接键",
+            adjust_params={"key_overrides": {feature["feature_id"]: ["mobile"]}},
+        ),
+    )
+    assert switched.status_code == 202, switched.text
+    gate2 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "已按你的选择改用 mobile = mobile_md5" in gate2["content"]
+    assert "原文对 MD5 哈希" in gate2["content"]
+    feature2 = _join_keys_feature(gate2)
+    assert feature2["selected_anchor_cols"] == ["mobile"]
+    assert [alt["anchor_cols"] for alt in feature2["alternatives"]] == [["cust_id"]]
+
+    # confirm → execute keeps the anchor 1:1 on the user's chosen key
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "拼接执行完成" in done["content"]
+    assert "1:1 保持" in done["content"]
+    plan_repo = client.app.state.plan_repo
+    plan = plan_repo.load_plan(done["metadata"]["result_dataset"]["plan_id"])
+    steps = {step.tool_ref.tool: step for step in plan.steps}
+    executed = plan_repo.load_step_output(steps["execute_join"].id)
+    assert executed["anchor_rows"] == 240
+    assert executed["joined_rows"] == 240
+    proposed = plan_repo.load_step_output(steps["propose_join"].id)
+    assert [pair["anchor_col"] for pair in proposed["joins"][0]["key_pairs"]] == ["mobile"]

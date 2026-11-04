@@ -9,6 +9,7 @@ new ``risk/development`` mask row for row.
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -1499,7 +1500,8 @@ def _normalize_request_against_columns(
             "provided observation window requires field_bindings.time_field"
         )
     time_field = field_bindings["time_field"]
-    if time_field is not None and dict(binding.semantic_field_roles).get(time_field) != "date":
+    # A month column confirmed as such may serve as the time field (D-2).
+    if time_field is not None and dict(binding.semantic_field_roles).get(time_field) not in {"date", "month"}:
         raise StrategyError(
             "field_bindings.time_field must be confirmed with the date semantic role"
         )
@@ -1542,14 +1544,17 @@ def _require_observation_window(
         raise StrategyError(
             "provided observation window requires a bound time field"
         )
-    dates = _date_series(frame[time_field], time_field)
+    firsts, lasts = _date_periods(frame[time_field], time_field)
     start = date.fromisoformat(window["start"])
     end = date.fromisoformat(window["end"])
     selected = _population_union(masks, "approval") | _population_union(
         masks, "risk"
     )
     outside = selected & np.array(
-        [item < start or item > end for item in dates],
+        [
+            first < start or last > end
+            for first, last in zip(firsts, lasts, strict=True)
+        ],
         dtype=np.bool_,
     )
     if bool(np.any(outside)):
@@ -1605,14 +1610,14 @@ def _resolve_masks(
                 partitioning["selectors"][partition], default=False
             )
     else:
-        dates = _date_series(frame[partitioning["column"]], partitioning["column"])
+        firsts, lasts = _date_periods(frame[partitioning["column"]], partitioning["column"])
         for partition in PARTITION_NAMES:
             bounds = partitioning["ranges"][partition]
             mask = np.ones(len(frame), dtype=np.bool_)
             if bounds["start"] is not None:
-                mask &= np.array([item >= date.fromisoformat(bounds["start"]) for item in dates], dtype=np.bool_)
+                mask &= np.array([item >= date.fromisoformat(bounds["start"]) for item in firsts], dtype=np.bool_)
             if bounds["end"] is not None:
-                mask &= np.array([item <= date.fromisoformat(bounds["end"]) for item in dates], dtype=np.bool_)
+                mask &= np.array([item <= date.fromisoformat(bounds["end"]) for item in lasts], dtype=np.bool_)
             partition_raw[partition] = mask
     masks: dict[str, np.ndarray] = {}
     for role in ("approval", "risk"):
@@ -1838,12 +1843,13 @@ def _maturity_evidence(
     time_field = request["field_bindings"]["time_field"]
     if time_field is None:
         raise StrategyError("evaluated maturity requires a bound time field")
-    dates = _date_series(frame[time_field], time_field)
+    # A month-only row matures only when its month end does (D-2).
+    _firsts, lasts = _date_periods(frame[time_field], time_field)
     maturity_date = date.fromisoformat(control["cutoff_date"]) - timedelta(
         days=control["performance_window_days"]
     )
     eligible = risk_mask & np.array(
-        [item <= maturity_date for item in dates], dtype=np.bool_
+        [item <= maturity_date for item in lasts], dtype=np.bool_
     )
     target = frame[binding.target_col]
     labeled = _binary_label_mask(target)
@@ -1931,9 +1937,9 @@ def _diagnostic_statistics(
     elif time_field is None:
         temporal = {"availability": "unavailable", "ordered": None, "source_refs": []}
     else:
-        dates = _date_series(frame[time_field], time_field)
-        oot_dates = [item for item, selected in zip(dates, oot_union, strict=True) if selected]
-        prior_dates = [item for item, selected in zip(dates, non_oot, strict=True) if selected]
+        firsts, lasts = _date_periods(frame[time_field], time_field)
+        oot_dates = [item for item, selected in zip(firsts, oot_union, strict=True) if selected]
+        prior_dates = [item for item, selected in zip(lasts, non_oot, strict=True) if selected]
         ordered = not prior_dates or max(prior_dates) < min(oot_dates)
         temporal = {"availability": "available", "ordered": ordered, "source_refs": [dataset_ref]}
     historical = request["historical_score"]
@@ -2892,8 +2898,23 @@ def _population_union(masks: Mapping[str, np.ndarray], role: str) -> np.ndarray:
     return np.logical_or.reduce([masks[f"{role}/{partition}"] for partition in PARTITION_NAMES])
 
 
-def _date_series(series: pd.Series, field: str) -> list[date]:
-    result: list[date] = []
+_MONTH_ONLY_VALUE_RE = re.compile(r"(\d{4})-?(\d{2})")
+
+
+def _date_periods(series: pd.Series, field: str) -> tuple[list[date], list[date]]:
+    """First and last calendar day each row's time value covers.
+
+    A day value covers that one day.  A month-only value (``YYYY-MM``, or
+    ``YYYYMM`` as text or an integer such as 202601) covers
+    its whole month (D-2, 按月口径): callers compare the first day with window
+    starts and the last day with window ends and the maturity cutoff, so a
+    month counts as inside a window, partition or matured cohort only when the
+    whole month is.  A column mixing months and days is rejected.
+    """
+
+    starts: list[date] = []
+    ends: list[date] = []
+    granularities: set[str] = set()
     for raw in series.tolist():
         missing = pd.isna(raw)
         if raw is None or (
@@ -2902,36 +2923,64 @@ def _date_series(series: pd.Series, field: str) -> list[date]:
             raise StrategyError(
                 f"sample-design V2 {field} contains missing or invalid dates"
             )
-        if isinstance(raw, bool) or isinstance(raw, Real):
+        if isinstance(raw, (bool, np.bool_)):
             raise StrategyError(
                 f"sample-design V2 {field} rejects numeric epoch-style dates"
             )
+        if isinstance(raw, Real):
+            # Month columns are often stored as integers like 202601 (YYYYMM).
+            number = float(raw)
+            if not (math.isfinite(number) and number.is_integer()
+                    and 100000 <= number <= 999999):
+                raise StrategyError(
+                    f"时间字段 {field} 里有数值型时间（如 {raw}），平台不按时间戳解读；"
+                    "按月请用 YYYYMM（如 202601）或 YYYY-MM，按日请用 YYYY-MM-DD。"
+                )
+            raw = f"{int(number):06d}"
         if isinstance(raw, pd.Timestamp):
-            result.append(raw.date())
-            continue
-        if isinstance(raw, datetime):
-            result.append(raw.date())
-            continue
-        if isinstance(raw, date):
-            result.append(raw)
-            continue
-        if not isinstance(raw, str) or not raw.strip():
+            parsed = raw.date()
+        elif isinstance(raw, datetime):
+            parsed = raw.date()
+        elif isinstance(raw, date):
+            parsed = raw
+        elif not isinstance(raw, str) or not raw.strip():
             raise StrategyError(
                 f"sample-design V2 {field} is not a valid date field"
             )
-        text = raw.strip()
-        try:
-            parsed = (
-                datetime.fromisoformat(text.replace("Z", "+00:00")).date()
-                if "T" in text or " " in text
-                else date.fromisoformat(text)
-            )
-        except ValueError as exc:
-            raise StrategyError(
-                f"sample-design V2 {field} must contain ISO calendar dates"
-            ) from exc
-        result.append(parsed)
-    return result
+        elif month := _MONTH_ONLY_VALUE_RE.fullmatch(raw.strip()):
+            try:
+                year, number = int(month.group(1)), int(month.group(2))
+                first = date(year, number, 1)
+                last = date(year, number, calendar.monthrange(year, number)[1])
+            except ValueError as exc:
+                raise StrategyError(
+                    f"sample-design V2 {field} must contain ISO calendar dates"
+                ) from exc
+            granularities.add("month")
+            starts.append(first)
+            ends.append(last)
+            continue
+        else:
+            text = raw.strip()
+            try:
+                parsed = (
+                    datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+                    if "T" in text or " " in text
+                    else date.fromisoformat(text)
+                )
+            except ValueError as exc:
+                raise StrategyError(
+                    f"sample-design V2 {field} must contain ISO calendar dates"
+                ) from exc
+        granularities.add("day")
+        starts.append(parsed)
+        ends.append(parsed)
+    if len(granularities) > 1:
+        raise StrategyError(
+            f"时间字段 {field} 里既有只到月份的值（如 2026-01），也有精确到日的日期，"
+            "不能混用；请统一成按月（YYYY-MM）或按日（YYYY-MM-DD）一种格式后再固化样本设计。"
+        )
+    return starts, ends
 
 
 def _binary_label_mask(series: pd.Series) -> np.ndarray:

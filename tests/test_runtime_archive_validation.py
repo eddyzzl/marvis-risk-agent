@@ -59,6 +59,7 @@ def _run(archive, expected_digest, binding):
     return revalidate_validation_archive(archive, expected_manifest_sha256=expected_digest, frozen_binding=binding)
 
 
+@pytest.mark.pmml_runtime
 def test_actual_domain_recomputation_reads_retained_materials_and_preserves_originals(actual_archive):
     archive, manifest_digest, binding = actual_archive
     before = {p.relative_to(archive): digest(p.read_bytes()) for p in archive.rglob("*") if p.is_file()}
@@ -75,6 +76,7 @@ def test_actual_domain_recomputation_reads_retained_materials_and_preserves_orig
     assert before == {p.relative_to(archive): digest(p.read_bytes()) for p in archive.rglob("*") if p.is_file()}
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("damage", ["missing_material", "changed_material", "redone_manifest"])
 def test_old_external_digest_rejects_missing_or_changed_originals(actual_archive, tmp_path, damage):
     archive, expected_digest, binding = _copy(actual_archive, tmp_path)
@@ -91,6 +93,7 @@ def test_old_external_digest_rejects_missing_or_changed_originals(actual_archive
     assert not result["supported_checks_verified"]
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("field", ["source", "run_id", "cases_sha256", "expected_sha256", "model_connection_sha256"])
 def test_archive_cannot_supply_its_own_external_binding(actual_archive, tmp_path, field):
     archive, _, binding = _copy(actual_archive, tmp_path)
@@ -105,6 +108,7 @@ def test_archive_cannot_supply_its_own_external_binding(actual_archive, tmp_path
     assert result["checks"]["pmml_rescoring"]["status"] == "unverified"
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("section", ["effectiveness", "stress_test"])
 def test_recomputation_rejects_well_formed_metrics_even_with_redone_inventory_and_success_flags(actual_archive, tmp_path, section):
     archive, _, binding = _copy(actual_archive, tmp_path)
@@ -127,6 +131,7 @@ def test_recomputation_rejects_well_formed_metrics_even_with_redone_inventory_an
     assert not result["supported_checks_verified"]
 
 
+@pytest.mark.pmml_runtime
 def test_rescoring_rejects_self_consistent_changed_score_artifact(actual_archive, tmp_path):
     archive, _, binding = _copy(actual_archive, tmp_path)
     outputs = archive / "workspace/tasks" / binding.task_id / "outputs"
@@ -144,6 +149,7 @@ def test_rescoring_rejects_self_consistent_changed_score_artifact(actual_archive
     assert result["checks"]["pmml_rescoring"]["status"] == "mismatch", result["checks"]
 
 
+@pytest.mark.pmml_runtime
 def test_report_download_bytes_must_match_separately_retained_identity(actual_archive, tmp_path):
     archive, _, binding = _copy(actual_archive, tmp_path)
     path = archive / "workspace/tasks" / binding.task_id / "outputs/validation_report.docx"
@@ -153,6 +159,7 @@ def test_report_download_bytes_must_match_separately_retained_identity(actual_ar
     assert result["checks"]["report_download_binding"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_excel_numeric_cells_are_checked_beyond_file_integrity(actual_archive, tmp_path):
     from openpyxl import load_workbook
 
@@ -170,6 +177,7 @@ def test_excel_numeric_cells_are_checked_beyond_file_integrity(actual_archive, t
     assert result["checks"]["excel_values"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_absent_confirmation_remains_unverified_with_no_acceptance_promotion(actual_archive):
     archive, expected_digest, binding = actual_archive
     missing = binding.model_copy(update={"confirmed_draft_sha256": None, "report_revision": None,
@@ -181,6 +189,7 @@ def test_absent_confirmation_remains_unverified_with_no_acceptance_promotion(act
     assert not result["supported_checks_verified"]
 
 
+@pytest.mark.pmml_runtime
 def test_missing_or_untyped_external_binding_is_rejected(actual_archive):
     archive, expected_digest, binding = actual_archive
     with pytest.raises(ValueError, match="explicit FrozenValidationBinding"):
@@ -191,6 +200,7 @@ def test_missing_or_untyped_external_binding_is_rejected(actual_archive):
         FrozenValidationBinding.model_validate(incomplete)
 
 
+@pytest.mark.pmml_runtime
 def test_changed_sample_with_new_manifest_still_requires_frozen_input_bytes(actual_archive, tmp_path):
     archive, _, binding = _copy(actual_archive, tmp_path)
     sample_index = next(i for i, m in enumerate(binding.case.materials) if m.role == "sample")
@@ -201,6 +211,7 @@ def test_changed_sample_with_new_manifest_still_requires_frozen_input_bytes(actu
     assert result["checks"]["materials"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_missing_uploaded_copy_is_not_replaced_by_input_copy(actual_archive, tmp_path):
     archive, _, binding = _copy(actual_archive, tmp_path)
     next((archive / "workspace/material_uploads").glob("*/sample.csv")).unlink()
@@ -209,6 +220,7 @@ def test_missing_uploaded_copy_is_not_replaced_by_input_copy(actual_archive, tmp
     assert result["checks"]["materials"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("path_case", ["outside_archive", "parent_component", "wrong_selected_material"])
 def test_original_absolute_schema_identity_cannot_be_rebound(actual_archive, tmp_path, path_case):
     from contextlib import closing
@@ -236,6 +248,7 @@ def test_original_absolute_schema_identity_cannot_be_rebound(actual_archive, tmp
     assert result["checks"]["materials"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_duplicate_material_basenames_are_explicitly_unsupported_by_mapping(actual_archive, tmp_path):
     archive, _, binding = _copy(actual_archive, tmp_path)
     case = binding.case.model_copy(deep=True)
@@ -249,6 +262,7 @@ def test_duplicate_material_basenames_are_explicitly_unsupported_by_mapping(actu
     assert result["checks"]["materials"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_native_contract_change_cannot_replace_external_contract_identity(actual_archive, tmp_path):
     from contextlib import closing
     import sqlite3
@@ -265,6 +279,7 @@ def test_native_contract_change_cannot_replace_external_contract_identity(actual
     assert result["checks"]["task_contract"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_word_text_is_checked_beyond_file_integrity(actual_archive, tmp_path):
     import zipfile
 
@@ -283,6 +298,7 @@ def test_word_text_is_checked_beyond_file_integrity(actual_archive, tmp_path):
     assert result["checks"]["word_confirmed_text"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_digest_is_required_separately_from_archive(actual_archive):
     archive, _, binding = actual_archive
     with pytest.raises(TypeError):
@@ -309,6 +325,7 @@ def test_pmml_resource_filter_rejects_dtd_and_entities():
         _validate_pmml_resources(b'<!DOCTYPE PMML [<!ENTITY local "value">]><PMML>&local;</PMML>')
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("addition", ["row", "column", "sheet"])
 def test_excel_extra_business_values_are_rejected(actual_archive, tmp_path, addition):
     from openpyxl import load_workbook
@@ -328,6 +345,7 @@ def test_excel_extra_business_values_are_rejected(actual_archive, tmp_path, addi
     assert result["checks"]["excel_values"]["status"] == "mismatch"
 
 
+@pytest.mark.pmml_runtime
 def test_excel_extra_blank_formatting_is_not_business_data(actual_archive, tmp_path):
     from openpyxl import load_workbook
     from openpyxl.styles import Font
@@ -343,6 +361,7 @@ def test_excel_extra_blank_formatting_is_not_business_data(actual_archive, tmp_p
     assert result["supported_checks_verified"], result["checks"]
 
 
+@pytest.mark.pmml_runtime
 def test_recomputation_uses_authenticated_copy_when_original_changes(actual_archive, tmp_path, monkeypatch):
     import marvis.orchestrator.eval.runtime_archive_validation as validation
 
@@ -366,6 +385,7 @@ def test_recomputation_uses_authenticated_copy_when_original_changes(actual_arch
     assert destinations and all(not path.exists() for path in destinations)
 
 
+@pytest.mark.pmml_runtime
 def test_copy_is_authenticated_before_domain_parsers_run(actual_archive, tmp_path, monkeypatch):
     import marvis.orchestrator.eval.runtime_custody as custody
 
@@ -383,3 +403,39 @@ def test_copy_is_authenticated_before_domain_parsers_run(actual_archive, tmp_pat
     assert result["checks"]["recomputation_snapshot"]["status"] == "mismatch"
     assert result["checks"]["task_contract"]["status"] == "unverified"
     assert result["checks"]["pmml_rescoring"]["status"] == "unverified"
+
+
+@pytest.mark.pmml_runtime
+def test_independent_checks_recompute_without_installed_metric_or_pmml_code(actual_archive):
+    archive, expected_digest, binding = actual_archive
+    result = _run(archive, expected_digest, binding)
+    assert result["checks"]["independent_pmml_scoring"]["rows_recomputed"] == 180
+    assert result["checks"]["independent_metrics"]["status"] == "verified", result["checks"]
+    assert set(result["independence"]["independent_recomputation"]) == {"independent_pmml_scoring", "independent_metrics"}
+    assert "stress_test" in result["independence"]["not_independently_recomputed"]
+
+
+@pytest.mark.pmml_runtime
+def test_independent_metrics_catch_a_shared_producer_and_reproducer_defect(actual_archive, tmp_path, monkeypatch):
+    """A wrong KS in the retained result that the installed code also reproduces."""
+    import dataclasses
+    import marvis.validation.platform_metrics as platform_metrics
+
+    archive, _, binding = _copy(actual_archive, tmp_path)
+    path = archive / "workspace/tasks" / binding.task_id / "outputs/validation_results.json"
+    metrics = json.loads(path.read_text())
+    metrics["effectiveness"]["monthly_ks"][0]["ks"] = 0.5
+    path.write_text(json.dumps(metrics))
+    original = platform_metrics.compute_platform_validation_results
+
+    def same_defect(**kwargs):
+        value = original(**kwargs)
+        monthly = [dataclasses.replace(value.effectiveness.monthly_ks[0], ks=0.5), *value.effectiveness.monthly_ks[1:]]
+        return dataclasses.replace(value, effectiveness=dataclasses.replace(value.effectiveness, monthly_ks=monthly))
+
+    monkeypatch.setattr(platform_metrics, "compute_platform_validation_results", same_defect)
+    result = _run(archive, _rewrite_manifest(archive), binding)
+    assert result["checks"]["metrics_recomputation"]["status"] == "verified", result["checks"]
+    assert result["checks"]["independent_pmml_scoring"]["status"] == "verified"
+    assert result["checks"]["independent_metrics"]["status"] == "mismatch"
+    assert not result["supported_checks_verified"]

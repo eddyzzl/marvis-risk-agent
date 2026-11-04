@@ -170,6 +170,8 @@ class RuntimeAction(StrictModel):
         "start_validation_workflow",
         "start_validation_agent",
         "confirm_current_validation_report",
+        "recover_validation_report",
+        "recover_validation_execution",
         "submit_labeling_request",
         "download_labeling_results",
         "download_portfolio_report",
@@ -177,6 +179,7 @@ class RuntimeAction(StrictModel):
         "submit_model_monitoring_request",
         "start_model_monitoring_workflow",
         "confirm_model_monitoring_plan",
+        "recover_monitoring_execution",
         "submit_extension_request",
         "start_extension_workflow",
         "recover_governed_decision",
@@ -184,6 +187,7 @@ class RuntimeAction(StrictModel):
     content: str = ""
     tool: str = ""
     refit_on_train_plus_test: bool | None = None
+    drop_nan_labels: bool | None = None
     portfolio_request: PortfolioSetupRequest | None = None
     semantic_mapping: DataSemanticMappingRequest | None = None
     labeling_request: LabelingBusinessInput | None = None
@@ -196,10 +200,30 @@ class RuntimeAction(StrictModel):
 
     @model_validator(mode="after")
     def required_fields(self):
-        if self.fault is not None and self.kind != "approve_step":
+        if self.drop_nan_labels is not None and (self.kind != "retry_step" or not self.content.strip()):
+            raise ValueError("label exclusion policy belongs only to an explicitly explained retry")
+        if self.fault is not None and self.fault.downstream_tool is not None and (
+                self.kind != "approve_step" or (self.tool, self.fault.downstream_tool) not in {
+                    ("analysis.portfolio_gate_summary", "analysis.portfolio_report"),
+                    ("modeling.configure_tuning", "modeling.train_models"),
+                }):
+            raise ValueError("downstream fault requires its exact native approval gate")
+        validation_fault = (self.kind == "confirm_current_validation_report" and self.fault is not None
+                            and self.fault.kind in {"discard_success_response_once", "stale_report_revision_once"})
+        if self.fault is not None and self.fault.kind == "stale_report_revision_once" and not validation_fault:
+            raise ValueError("stale report revision belongs only to a native report confirmation")
+        validation_timeout = (self.kind == "start_validation_agent" and self.fault is not None
+                              and self.fault.kind == "tool_timeout_once")
+        monitoring_fault = (self.kind == "confirm_model_monitoring_plan" and self.fault is not None
+                            and self.fault.kind in {"stale_monitoring_revision_once", "tool_timeout_once"})
+        if self.fault is not None and self.fault.kind == "stale_monitoring_revision_once" and not monitoring_fault:
+            raise ValueError("monitoring CAS belongs only to its native plan confirmation")
+        if self.fault is not None and self.kind != "approve_step" and not validation_fault and not validation_timeout and not monitoring_fault:
             raise ValueError("fixed reference faults belong only to explicit native approval actions")
-        if self.kind == "recover_governed_decision":
-            if self.fault_source_action is None or not self.content.strip() or not self.tool:
+        if self.kind in {"recover_governed_decision", "recover_validation_report", "recover_validation_execution", "recover_monitoring_execution"}:
+            if (self.fault_source_action is None or not self.content.strip()
+                    or (self.kind == "recover_governed_decision" and not self.tool)
+                    or (self.kind in {"recover_validation_report", "recover_validation_execution", "recover_monitoring_execution"} and self.tool)):
                 raise ValueError("recovery requires human text, the exact native tool and an earlier fault action")
         elif self.fault_source_action is not None:
             raise ValueError("fault action reference belongs only to explicit recovery")
@@ -223,7 +247,7 @@ class RuntimeAction(StrictModel):
             raise ValueError("monitoring fields belong only to its declared start action")
         if self.kind == "confirm_model_monitoring_plan" and (self.tool or not self.content.strip()):
             raise ValueError("monitoring confirmation needs human text and its current proposal")
-        if self.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} and (
+        if self.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report", "recover_validation_report", "recover_validation_execution"} and (
             self.tool or not self.content.strip() or self.portfolio_request is not None
             or self.semantic_mapping is not None
         ):
@@ -274,6 +298,8 @@ class RuntimeAction(StrictModel):
         value = handler(self)
         if value.get("refit_on_train_plus_test") is None:
             value.pop("refit_on_train_plus_test", None)
+        if value.get("drop_nan_labels") is None:
+            value.pop("drop_nan_labels", None)
         if value.get("portfolio_request") is None:
             value.pop("portfolio_request", None)
         if value.get("semantic_mapping") is None:
@@ -314,16 +340,43 @@ class RuntimeCase(StrictModel):
     @model_validator(mode="after")
     def strategy_sample_binding(self):
         for index, action in enumerate(self.actions, 1):
-            if action.kind == "recover_governed_decision":
+            if action.kind in {"recover_governed_decision", "recover_validation_report", "recover_validation_execution", "recover_monitoring_execution"}:
                 source = action.fault_source_action
-                if source is None or source >= index or self.actions[source - 1].tool != action.tool or getattr(self.actions[source - 1].fault, "kind", None) != "discard_success_response_once":
+                from .runtime_process_faults import KINDS as process_fault_kinds
+                allowed_faults = ({"tool_timeout_once"} if action.kind == "recover_validation_execution"
+                                  else {"discard_success_response_once", "stale_report_revision_once"} if action.kind == "recover_validation_report"
+                                  else {"discard_success_response_once"})
+                if action.kind == "recover_monitoring_execution":
+                    allowed_faults = {"stale_monitoring_revision_once", "tool_timeout_once"}
+                if action.kind == "recover_governed_decision":
+                    allowed_faults |= process_fault_kinds | {"stale_step_cas_once"}
+                if source is None or source >= index or self.actions[source - 1].tool != action.tool or getattr(self.actions[source - 1].fault, "kind", None) not in allowed_faults:
                     raise ValueError("recovery references one exact earlier discarded-response approval")
+                if action.kind == "recover_monitoring_execution" and self.actions[source - 1].kind != "confirm_model_monitoring_plan":
+                    raise ValueError("monitoring recovery references its original native confirmation")
+                if action.kind == "recover_validation_execution" and self.actions[source - 1].kind != "start_validation_agent":
+                    raise ValueError("validation execution retry references its original native start")
+                if action.kind == "recover_validation_report" and self.actions[source - 1].kind != "confirm_current_validation_report":
+                    raise ValueError("validation recovery references its original report confirmation")
         if any(a.kind in {"submit_extension_request", "start_extension_workflow"} for a in self.actions):
             if self.task.task_type != "strategy" or self.family not in {"online_decision", "connector_antifraud", "collections"}:
                 raise ValueError("extension journeys require their declared family and a native strategy task")
         validation_roles = {"sample", "notebook", "pmml", "dictionary"}
         if self.task.task_type == "validation":
             compatibility = bool(self.actions and self.actions[0].kind == "start_validation_workflow")
+            kinds = [a.kind for a in self.actions]
+            normal = ["start_validation_agent", "confirm_current_validation_report"]
+            recovery = normal + ["recover_validation_report"]
+            valid_agent_actions = kinds == normal and all(a.fault is None for a in self.actions)
+            valid_agent_actions |= (kinds == normal and self.scenario in {"rejection", "recovery"} and self.actions[0].fault is None
+                                    and getattr(self.actions[1].fault, "kind", None) == "stale_report_revision_once")
+            valid_agent_actions |= (kinds == recovery and self.actions[0].fault is None and self.actions[2].fault_source_action == 2
+                                    and getattr(self.actions[1].fault, "kind", None) in {"discard_success_response_once", "stale_report_revision_once"})
+            timeout_recovery = ["start_validation_agent", "recover_validation_execution", "confirm_current_validation_report"]
+            valid_agent_actions |= (kinds == timeout_recovery and self.scenario == "recovery"
+                                    and self.actions[1].fault_source_action == 1
+                                    and getattr(self.actions[0].fault, "kind", None) == "tool_timeout_once"
+                                    and all(a.fault is None for a in self.actions[1:]))
             if (
                 self.task.algorithm is None or self.initial_message is not None
                 or len(self.materials) != len(validation_roles)
@@ -332,16 +385,25 @@ class RuntimeCase(StrictModel):
                 or not self.actions
                 or (compatibility and any(a.kind not in {"approve_step", "reject_step"}
                     or a.tool != "v1_compat.render_reports" for a in self.actions[1:]))
-                or (not compatibility and [a.kind for a in self.actions] != [
-                    "start_validation_agent", "confirm_current_validation_report"])
+                or (not compatibility and not valid_agent_actions)
             ):
                 raise ValueError("validation requires unique role-bound files and one declared native entry with its own confirmation")
         elif (self.task.algorithm is not None
-              or any(m.role in {"notebook", "pmml", "dictionary"} for m in self.materials)
-              or any(a.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} for a in self.actions)):
+              or any(m.role in {"notebook", "pmml"} or (m.role == "dictionary" and self.task.task_type != "feature_analysis")
+                     for m in self.materials)
+              or any(a.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report", "recover_validation_report", "recover_validation_execution"} for a in self.actions)):
             raise ValueError("validation files and start action belong only to validation")
         monitor = [i for i, a in enumerate(self.actions) if a.monitoring_request is not None]
         confirms = [i for i, a in enumerate(self.actions) if a.kind == "confirm_model_monitoring_plan"]
+        monitor_recovery = [i for i, a in enumerate(self.actions) if a.kind == "recover_monitoring_execution"]
+        monitor_faults = [i for i in confirms if self.actions[i].fault is not None]
+        if monitor_faults or monitor_recovery:
+            if (self.family != "monitoring" or self.scenario != "recovery" or len(monitor_faults) != 1
+                    or self.actions[monitor_faults[0] - 1].kind != "submit_model_monitoring_request"
+                    or monitor_recovery != [monitor_faults[0] + 1] or monitor_recovery[0] != len(self.actions) - 1
+                    or self.actions[monitor_recovery[0]].fault_source_action != monitor_faults[0] + 1
+                    or any(a.fault is not None for i, a in enumerate(self.actions) if i not in monitor_faults)):
+                raise ValueError("monitoring recovery requires exactly its own final plan confirmation and explicit retry")
         if monitor or confirms:
             if (len(monitor) != 1 or confirms != [monitor[0] + 1]
                     or self.task.task_type != "modeling" or monitor[0] == 0

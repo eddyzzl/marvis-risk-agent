@@ -15,6 +15,7 @@ from IPython.core.inputtransformer2 import TransformerManager
 
 from marvis.notebook_io import read_notebook_bytes
 from marvis.validation.field_transformations import (
+    _dotted_name,
     TransformationExtraction,
     inspect_safe_transformations,
 )
@@ -1568,18 +1569,6 @@ def _known_get_params_name(node: ast.expr) -> str | None:
     ):
         return function.value.id
     return None
-
-
-def _dotted_name(node: ast.AST) -> str | None:
-    parts: list[str] = []
-    current = node
-    while isinstance(current, ast.Attribute):
-        parts.append(current.attr)
-        current = current.value
-    if not isinstance(current, ast.Name):
-        return None
-    parts.append(current.id)
-    return ".".join(reversed(parts))
 
 
 def _neutralize_leading_cell_magic(source: str) -> str:

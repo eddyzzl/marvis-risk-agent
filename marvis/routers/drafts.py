@@ -89,12 +89,15 @@ def web_search(payload: dict) -> dict:
         raise unprocessable("query is required")
     max_results = _bounded_int(payload.get("max_results"), "max_results", default=5, minimum=1, maximum=10)
     try:
-        return tool_web_search(
+        result = tool_web_search(
             {"query": query, "max_results": max_results},
             SimpleNamespace(),
         )
     except FetchError as exc:
         raise bad_gateway(str(exc)) from exc
+    if result.get("refused"):
+        raise unprocessable(result["guidance"])
+    return result
 
 
 @router.post("/fetch-url")

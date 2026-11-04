@@ -29,6 +29,32 @@ export function portfolioTurnUsesDeterministicRoute(task, messages = []) {
   return false;
 }
 
+// Eval S9: the column boxes were empty while their grey placeholders were the
+// sample's real column names, so the form looked filled and failed on
+// submit. Columns whose name matches exactly one alias are prefilled for the
+// user to check; the platform still validates everything on submit.
+const PORTFOLIO_COLUMN_ALIASES = Object.freeze({
+  id_col: ["loan_id", "loanid", "loan_no", "contract_id", "account_id", "acct_id", "借据号", "贷款编号", "合同号"],
+  snapshot_col: ["snapshot_month", "snapshot", "snapshot_date", "stat_month", "data_month", "as_of_month", "month", "快照月", "统计月"],
+  bucket_col: ["bucket", "dpd_bucket", "delinquency_bucket", "overdue_bucket", "逾期桶", "逾期状态"],
+  balance_col: ["balance", "ead", "outstanding", "os_balance", "principal_balance", "余额", "在贷余额"],
+  segment_col: ["segment", "segment_name", "product", "channel", "分群", "客群"],
+});
+
+function normalizedColumn(name) {
+  return String(name || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+export function portfolioColumnSuggestions(columns = []) {
+  const names = columns.map((column) => String(column?.name ?? column ?? "")).filter(Boolean);
+  const suggestions = {};
+  for (const [field, aliases] of Object.entries(PORTFOLIO_COLUMN_ALIASES)) {
+    const matches = names.filter((name) => aliases.includes(normalizedColumn(name)));
+    if (matches.length === 1) suggestions[field] = matches[0];
+  }
+  return suggestions;
+}
+
 export function createPortfolioSetupPanel(dependencies = {}) {
   const getElementById = dependencies.getElementById || ((id) => document.getElementById(id));
   const request = dependencies.api;
@@ -68,12 +94,48 @@ export function createPortfolioSetupPanel(dependencies = {}) {
     elements.status.className = `portfolio-setup-status${kind ? ` ${kind}` : ""}`;
   }
 
+  let prefilledTaskId = "";
+  const listDatasets = dependencies.listDatasets;
+
+  async function prefillColumns(task) {
+    if (typeof listDatasets !== "function" || !task?.id || prefilledTaskId === task.id) return;
+    prefilledTaskId = task.id;
+    const fields = {
+      id_col: elements.idCol,
+      snapshot_col: elements.snapshotCol,
+      bucket_col: elements.bucketCol,
+      balance_col: elements.balanceCol,
+      segment_col: elements.segmentCol,
+    };
+    let payload;
+    try {
+      payload = await listDatasets(task.id);
+    } catch (_error) {
+      return; // No datasets yet: the user fills the form as before.
+    }
+    if (getSelectedTask()?.id !== task.id) return;
+    const datasets = Array.isArray(payload?.datasets) ? payload.datasets : [];
+    if (datasets.length !== 1) return; // Several tables: which one is the panel is the user's call.
+    const suggestions = portfolioColumnSuggestions(datasets[0].columns || []);
+    let filled = 0;
+    for (const [field, element] of Object.entries(fields)) {
+      if (!suggestions[field] || trimmedValue(element)) continue;
+      element.value = suggestions[field];
+      element.dataset.prefilled = "true";
+      filled += 1;
+    }
+    if (filled && !isSubmitting()) {
+      setStatus(`已按上传表的列名预填 ${filled} 项，请核对后提交。`, "info");
+    }
+  }
+
   function renderAvailability() {
     const task = getSelectedTask();
     const visible = task?.task_type === "portfolio"
       && !portfolioGateExists(getAgentMessages());
     elements.root.hidden = !visible;
     elements.submit.disabled = isSubmitting() || !visible;
+    if (visible) void prefillColumns(task);
     return visible;
   }
 

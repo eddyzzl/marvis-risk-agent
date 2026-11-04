@@ -13,6 +13,7 @@ from marvis.app import create_app
 from marvis.db import TaskRepository, connect
 from marvis.domain import StrategyTaskInput, TaskCreate
 from tests.strategy_sample_design_support import (
+    confirm_strategy_score_direction,
     materialize_mature_strategy_sample_design,
 )
 
@@ -63,6 +64,7 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
     created = _create_strategy_task(client, tmp_path)
     task_id = created["id"]
     assert created["strategy_input"] is None
+    confirm_strategy_score_direction(client, task_id, direction="lower_is_riskier")
 
     clarified = client.post(f"/api/tasks/{task_id}/agent/start", json={})
 
@@ -424,6 +426,7 @@ def test_nonterminal_plan_rejects_contract_replacement_without_mutation(
         strategy_input=original_contract,
     )
     task_id = created["id"]
+    confirm_strategy_score_direction(client, task_id, direction="lower_is_riskier")
     materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text

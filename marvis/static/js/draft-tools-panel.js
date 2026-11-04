@@ -1,4 +1,5 @@
 import { escapeHtml } from "./ui-utils.js";
+import { t } from "./i18n.js";
 import { schemaTableHtml } from "./v2/schema_table.js";
 
 // The plugin-admin token replaces the old fixed "local-dev" magic header. The
@@ -230,7 +231,7 @@ export function createDraftToolsPanelController({
   async function reject() {
     const draftId = selectedDraftToolId;
     if (!draftId) return;
-    const reason = window.prompt("拒绝原因", "") || "";
+    const reason = window.prompt(t("拒绝原因"), "") || "";
     setStatus("正在拒绝草稿...");
     await api(`/api/drafts/${encodeURIComponent(draftId)}/reject`, {
       method: "POST",

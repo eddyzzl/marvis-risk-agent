@@ -254,6 +254,8 @@ def test_collection_development_fails_closed_before_llm_or_plan(
 
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "clarification_required"
-    assert response.json()["code"] == "collection_strategy_unsupported"
+    assert response.json()["code"] == "collections_entry_guidance"
+    guidance = next(message for message in reversed(response.json()["messages"]) if message["role"] == "assistant")
+    assert guidance["metadata"]["entry"] == "collectionWorkspacePanel"
     assert llm.calls == []
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []

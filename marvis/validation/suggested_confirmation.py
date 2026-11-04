@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 from marvis.validation.input_contracts import (
@@ -15,11 +16,23 @@ _REQUIRED_STRING_FIELDS = (
 )
 
 
+def _value_identity(value) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+
+
 def _unique_candidate_value(contract: ValidationInputContract, key: str):
+    """The one value every candidate agrees on, else ``None``.
+
+    The same value found by two evidence sources (e.g. the Notebook and the
+    PMML both naming ``probability_1``) is not ambiguity; eval S5 stalled a
+    whole 自动审查 batch at field confirmation on exactly that.
+    """
+
     candidates = contract.candidates.get(key) or ()
-    if len(candidates) != 1:
+    values = {_value_identity(candidate.value): candidate.value for candidate in candidates}
+    if len(values) != 1:
         return None
-    return candidates[0].value
+    return next(iter(values.values()))
 
 
 def suggested_confirmation_from_contract(

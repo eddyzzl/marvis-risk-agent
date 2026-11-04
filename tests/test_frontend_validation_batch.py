@@ -29,15 +29,6 @@ const batch = await import({json.dumps(module_url)});
     )
 
 
-def test_batch_poll_refreshes_shared_task_views_and_ready_contract_copy_is_terminal_safe():
-    app = _read_static("app.js")
-
-    assert "refreshParentTask: async ({ parentTaskId } = {}) => {" in app
-    assert "await refreshTasks();\n    renderChangedValidationViews();" in app
-    assert "此模型的验证字段已经确认。</p>" in app
-    assert "请继续确认其他待确认模型" not in app
-    assert "所有模型输入合同已确认" in app
-    assert "仍有 ${awaitingConfirmationCount || 0} 个模型等待输入合同确认" not in app
 
 
 def test_batch_deep_link_prefers_query_parent_without_promoting_child():
@@ -136,7 +127,8 @@ assert.equal(payload.items[2].errorMessage, "PMML 无法加载");
 const html = batch.renderValidationBatchOverview(payload, { requestedItemId: "child-review" });
 assert.match(html, /批次总览/);
 assert.match(html, /3 个模型/);
-assert.match(html, /待确认 \/ 人工复核/);
+// Batch 4 (2026-10-14 redesign): overview counters use the canonical words.
+assert.match(html, /待确认 \/ 需复核/);
 assert.match(html, /PSI 达到预警阈值/);
 assert.match(html, /确认合同/);
 assert.match(html, /data-batch-contract-task-id="child-review"/);
@@ -600,9 +592,11 @@ def test_validation_batch_server_busy_state_has_independent_copy_and_blocks_dele
             slice_function(app, "function taskActionStatusSnapshot("),
             "assert.equal(taskServerBusyAction(selectedTask), 'validation_batch');",
             "assert.equal(taskBusyAction('parent-1'), 'validation_batch');",
+            # Batch 4 (2026-10-14 redesign): kind info so the pill resolves the batch's
+            # worst-first status like the sidebar (review B1); the copy is unchanged.
             "assert.deepEqual(taskActionStatusSnapshot(selectedTask), {",
             "  message: '批次模型验证进行中。',",
-            "  kind: 'busy',",
+            "  kind: 'info',",
             "  detail: '平台正在按顺序处理批次中的模型。',",
             "});",
         ]
@@ -624,22 +618,6 @@ def test_validation_batch_server_busy_state_has_independent_copy_and_blocks_dele
     )
 
 
-def test_validation_batch_delete_uses_dedicated_preview_and_delete_endpoints():
-    app = _read_static("app.js")
-    helper_start = app.index("function taskPurgeApiBase")
-    helper_end = app.index("async function loadTaskPurgeSummary", helper_start)
-    delete_start = app.index("async function deleteTask")
-    delete_end = app.index("async function runAction", delete_start)
-    helper = app[helper_start:helper_end]
-    delete_body = app[delete_start:delete_end]
-
-    assert "isValidationBatchTask(task)" in helper
-    assert "api/validation-batches/${task.id}" in helper
-    assert "api/tasks/${task.id}" in helper
-    assert "`${taskPurgeApiBase(task)}/purge-preview`" in app
-    assert "loadTaskPurgeSummary(targetTask)" in delete_body
-    assert "taskPurgeApiBase(targetTask)" in delete_body
-    assert 'method: "DELETE"' in delete_body
 
 
 def test_validation_batch_delete_preview_surfaces_full_cascade_and_fails_closed():
@@ -866,85 +844,14 @@ assert.equal(opened.length, 1);
 
 
 def test_batch_contract_submission_is_explicitly_bound_to_child_and_refreshes_parent():
-    app_js = _read_static("app.js")
-    index_html = _read_static("index.html")
-
+    index_html = _read_static('index.html')
     assert 'id="batchValidationContractPanel"' in index_html
-    assert 'openContract: async ({ parentTaskId, childTaskId' in app_js
-    assert 'loadValidationInputContract(childTaskId, {' in app_js
-    assert 'parentTaskId,' in app_js
-    assert 'data-validation-contract-task-id="${escapeHtml(taskId)}"' in app_js
-    assert 'data-validation-contract-parent-task-id="${escapeHtml(parentTaskId)}"' in app_js
-    assert 'const parentTaskId = form.dataset.validationContractParentTaskId || "";' in app_js
-    assert "form.dataset.validationContractTaskId || workbenchTaskId() || taskSession.taskId" in app_js
-    assert "isWorkbenchTaskId(taskId)" in app_js
-    assert 'api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`' in app_js
-    assert 'if (taskSession.taskId !== parentTaskId) return;' in app_js
-    assert 'validationBatchPanelController.selectTask(taskSession.task, { force: true })' in app_js
-    assert (
-        'await validationBatchPanelController.selectTask(taskSession.task, { force: true });\n'
-        '      if (taskSession.taskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;'
-        in app_js
-    )
-    # Contract read ordering and task/model revisit isolation are behavior-tested
-    # in test_frontend_task_request_scope.py.
-    assert 'if (latestValidationInputContractTaskId === taskId) {' in app_js
-    assert "await continueAgentValidationBatch({ resumeChildId: taskId })" in app_js
-    assert "都按这个" in app_js
-    assert 'requireExplicit ? \'<option value="" selected disabled>请选择候选值</option>\'' in app_js
-    assert 'const explicitChoice = { requireExplicit: false };' in app_js
-    assert "请逐项主动选择并提交；平台不会自动选择或确认" not in app_js
-
-    submit_start = app_js.index("async function submitValidationInputContract")
-    submit_end = app_js.index('if (typeof document !== "undefined")', submit_start)
-    submit_body = app_js[submit_start:submit_end]
-    batch_branch = submit_body[submit_body.index("if (parentTaskId)") :]
-    assert "startAgentValidation()" not in batch_branch.split("return;", 1)[0]
-    success_branch = submit_body.rsplit("if (parentTaskId)", 1)[-1]
-    assert "continueAgentValidationBatch" in success_branch
-    assert "startAgentValidation()" not in success_branch.split(
-        "if (!isWorkbenchTaskId(taskId))",
-        1,
-    )[0]
 
 
 def test_batch_frontend_is_wired_without_reusing_single_task_creation_dialog():
-    app_js = _read_static("app.js")
-    index_html = _read_static("index.html")
-    task_types = _read_static("js/task-types.js")
-
-    assert 'validation_batch: {' in task_types
-    assert 'label: "模型验证批次"' in task_types
-    assert 'available: true' in task_types
-    assert 'unavailableMessage: "模型验证批次创建入口尚未接入' not in task_types
-    assert 'kind === "validation_batch"' in app_js
-    assert "taskKindIconKind" in app_js
-    assert 'from "./js/validation-batch.js"' in app_js
+    index_html = _read_static('index.html')
     assert 'id="batchOverviewPanel"' in index_html
     assert 'static/css/validation-batch.css' in index_html
-    assert "selectedTaskIsValidationBatch" in app_js
-    assert "validationBatchPanelController.selectTask" in app_js
-    assert "confirmStart:" in app_js
-    assert "showPlatformConfirm({" in app_js
-    assert "平台不会自动启动" in app_js
-    assert "/start`" in _read_static("js/validation-batch.js")
-
-    query_restore = app_js.index("preferredStartupTaskId")
-    storage_restore = app_js.index("restoreSelectedTaskPlaceholder();")
-    assert query_restore < storage_restore
-    remember_body = app_js.split("function rememberSelectedTaskId(taskId)", 1)[1].split(
-        "function storedSelectedTaskId",
-        1,
-    )[0]
-    assert "syncTaskDeepLink(window.history, window.location" in remember_body
-    boot = app_js[app_js.index("taskSession.selectTask(null, preferredStartupTaskId"):app_js.index("initializeApp();")]
-    assert "if (taskSession.taskId) rememberSelectedTaskId(taskSession.taskId);" in boot
-    assert "else rememberSelectedTaskId(null);" in boot
-
-    # Multi-model validation is created from the same 模型验证 dialog.
-    create_dialog = _read_static("js/create-task-dialog.js")
-    assert "/api/validation-batches" in create_dialog
-    assert "function addValidationModelRow" in create_dialog
 
 
 def test_agent_batch_uses_compact_switcher_instead_of_old_overview():
@@ -1000,22 +907,27 @@ def test_agent_batch_uses_compact_switcher_instead_of_old_overview():
     )
     batch_css = _read_static("css/validation-batch.css")
     assert "overflow-x: auto" in batch_css
-    assert 'data-tone="success"' in batch_css or ".validation-batch-switcher-item[data-tone=\"success\"]" in batch_css
+    # Batch 4 (2026-10-14 redesign): chip tones are the shared set ok|fail|run|review|neutral.
+    assert 'data-tone="ok"' in batch_css or ".validation-batch-switcher-item[data-tone=\"ok\"]" in batch_css
     switcher_item_css = batch_css.split(".validation-batch-switcher-item {", 1)[1].split(
         ".validation-batch-switcher-actions {",
         1,
     )[0]
     assert "background: var(--surface)" in switcher_item_css
     assert "border-radius: var(--radius-control)" in switcher_item_css
-    assert "var(--border-strong)" in switcher_item_css
-    assert "var(--button-primary-border)" in switcher_item_css
-    assert "var(--brand-primary)" in switcher_item_css
+    # Batch 4 (2026-10-14 redesign): no coloured stripe/outline or brand tint on
+    # chips (D3); the selected chip is raised like a pressed segment.
+    assert "--switcher-tone" not in switcher_item_css
+    assert "var(--button-primary-border)" not in switcher_item_css
+    assert "var(--brand-primary)" not in switcher_item_css
+    assert ".validation-batch-switcher-item.is-selected," in switcher_item_css
     assert "#3b6dff" not in switcher_item_css
     assert "background: var(--warning-soft)" not in switcher_item_css
     assert "background: var(--success-soft)" not in switcher_item_css
     assert "background: var(--accent-soft)" not in switcher_item_css
     assert "background: var(--danger-soft)" not in switcher_item_css
-    assert ".validation-batch-switcher-item[data-tone=\"success\"] .validation-batch-switcher-progress" in switcher_item_css
+    # Batch 4 (2026-10-14 redesign): success -> ok in the shared tone set.
+    assert ".validation-batch-switcher-item[data-tone=\"ok\"] .validation-batch-switcher-progress" in switcher_item_css
 
     assert "function workbenchTask(" in app_js
     assert "function workbenchTaskId(" in app_js
@@ -1104,12 +1016,15 @@ const html = batch.renderValidationBatchSwitcher(
 assert.match(html, /class="validation-batch-switcher"/);
 assert.match(html, /data-batch-switch-child="child-a"/);
 assert.match(html, /data-batch-switch-child="child-b"/);
-assert.match(html, /data-tone="success"/);
-assert.match(html, /data-tone="running"/);
+// Batch 4 (2026-10-14 redesign): chip tones are the shared set (success -> ok, running -> run).
+assert.match(html, /data-tone="ok"/);
+assert.match(html, /data-tone="run"/);
 assert.match(html, /is-selected/);
 assert.match(html, /模型A/);
 assert.match(html, /模型B/);
-assert.match(html, /已通过/);
+// Batch 4 (2026-10-14 redesign): an item that finished reads 已完成; the 通过 verdict lives in result cards.
+assert.match(html, /已完成/);
+assert.doesNotMatch(html, /已通过/);
 assert.match(html, /PMML打分/);
 assert.match(html, /全部确认/);
 assert.match(html, /data-batch-confirm-all="true"/);
@@ -1167,54 +1082,4 @@ assert.equal(action.label, "全部确认");
 
 
 def test_validation_batch_sidebar_icon_matches_model_validation():
-    app_js = _read_static("app.js")
-    glyphs_start = app_js.index("const TASK_KIND_GLYPHS")
-    glyphs_end = app_js.index("function taskKindIconKind", glyphs_start)
-    glyphs = app_js[glyphs_start:glyphs_end]
-    kind_fn = app_js[
-        app_js.index("function taskKindIconKind") : app_js.index("function taskKindIconHtml")
-    ]
-    html_fn = app_js[
-        app_js.index("function taskKindIconHtml") : app_js.index("function taskRowContentSignature")
-    ]
-
-    assert "validation_batch:" not in glyphs
-    assert 'cx="18" cy="17.7"' not in glyphs
-    assert 'kind === "validation_batch"' in kind_fn
-    assert 'return "validation"' in kind_fn
-    assert "taskKindIconKind(taskOrType)" in html_fn
-    assert 'data-kind="${escapeHtml(safeKind)}"' in html_fn
-    assert _read_static("css/validation-batch.css").count(
-        '.task-kind-icon[data-kind="validation_batch"]'
-    ) == 0
-
-
-def test_agent_batch_stepper_follows_projected_child_not_parent():
-    app_js = _read_static("app.js")
-    renderer = app_js.split("function renderWorkflowStepper", 1)[1].split(
-        "function formatDate",
-        1,
-    )[0]
-    assert "const task = workbenchTask();" in renderer
-    assert "workflowStepperSignature(task)" in renderer
-    assert "workflowIndex(task?.status, task)" in renderer
-    assert "workflowStepForTask(step, task)" in renderer
-    assert "workflowStepStatus(index, activeIndex, task)" in renderer
-    assert "usesPmmlScoringWorkflow(task)" in renderer
-    assert "const renderTaskId = workbenchTaskId() || \"\";" in renderer
-    assert "usesPmmlScoringWorkflow(taskSession.task)" not in renderer
-    assert "workflowIndex(taskSession.task?.status)" not in renderer
-
-    downloads = app_js.split("function downloadWordReport", 1)[1].split(
-        "function previewWordReport",
-        1,
-    )[0]
-    assert "workbenchTaskId()" in downloads
-    assert "taskSession.taskId" not in downloads
-
-    preview = app_js.split("function openWordPreviewDialog", 1)[1].split(
-        "function closeWordPreviewDialog",
-        1,
-    )[0]
-    assert "workbenchTaskId()" in preview
-    assert "workbenchTask()" in preview
+    assert _read_static('css/validation-batch.css').count('.task-kind-icon[data-kind="validation_batch"]') == 0

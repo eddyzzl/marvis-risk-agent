@@ -7,6 +7,13 @@
 
 链式近似：P_h = (T^h)[:, loss]，其中 T 为强制 loss 行吸收后的方阵（去掉 exited 列，
 把概率质量重新归一到 states 内），T^h 通过矩阵幂逐步相乘得到（h 次矩阵乘法）。
+
+迁徙窗口内没有桶内迁出观测的状态（bucket_migration 的未定义行，或全部迁出都是
+exited）不能估计转移行：
+- 若它是声明的 loss_state，按声明作吸收态（与有观测时的强制吸收一致）；
+- 否则该状态的 P(损失) 为 None（未定义），链式计算中暂按"停留原状态"占位，
+  能迁入它的状态的 P(损失) 因此是偏低下限；该状态的余额不计入 EL。两者都由
+  ``unestimated_state`` 红旗显式说明，不以 0 冒充估计值。
 """
 
 from __future__ import annotations
@@ -23,12 +30,15 @@ from marvis.packs.analysis.flow import bucket_migration
 
 #: 可用月份 < 该值 -> short_history 红旗。
 SHORT_HISTORY_MIN_MONTHS = 3
+#: (T^h)[i][u] 超过该值视为状态 i 能在 horizon 内迁入未估计状态 u。
+_REACH_EPSILON = 1e-12
 
 
 @dataclass(frozen=True)
 class ChainRow:
     from_state: str
-    p_to_loss: float
+    #: None = 该状态在迁徙窗口内无桶内迁出观测，P(损失) 无法估计。
+    p_to_loss: float | None
 
 
 @dataclass(frozen=True)
@@ -98,20 +108,46 @@ def expected_loss_estimate(
             samples=[f"{flag['month']} -> {flag['to_month']}" for flag in selected_gaps[:5]],
         )
 
-    transition, was_absorbing = _absorbing_transition(migration.avg_matrix, state_order, resolved_loss)
+    transition, was_absorbing, unestimated = _absorbing_transition(
+        migration.avg_matrix, state_order, resolved_loss
+    )
     powered = _matrix_power(transition, horizon_months)
     loss_index = state_order.index(resolved_loss)
     chain = [
-        ChainRow(from_state=state, p_to_loss=float(powered[i][loss_index]))
+        ChainRow(
+            from_state=state,
+            p_to_loss=None if state in unestimated else float(powered[i][loss_index]),
+        )
         for i, state in enumerate(state_order)
     ]
     p_to_loss = {row.from_state: row.p_to_loss for row in chain}
 
-    el_by_month, total_el, months_available, reference_month = _el_by_month(
+    el_by_month, total_el, months_available, reference_month, reference_unestimated = _el_by_month(
         df, contract, state_order, p_to_loss, lgd=lgd
     )
 
     red_flags: list[dict] = []
+    if unestimated:
+        unestimated_index = [state_order.index(state) for state in unestimated]
+        affected = [
+            state
+            for i, state in enumerate(state_order)
+            if state not in unestimated
+            and state != resolved_loss
+            and float(sum(powered[i][u] for u in unestimated_index)) > _REACH_EPSILON
+        ]
+        red_flags.append(
+            {
+                "kind": "unestimated_state",
+                "states": list(unestimated),
+                "affected_states": affected,
+                "reference_snapshot": reference_month,
+                "unestimated_balance": float(reference_unestimated),
+                "message": _unestimated_message(
+                    unestimated, affected, reference_month, reference_unestimated
+                ),
+            }
+        )
     if not was_absorbing:
         red_flags.append(
             {
@@ -155,29 +191,50 @@ def expected_loss_estimate(
 
 
 def _absorbing_transition(
-    avg_matrix: list[list[float]], states: tuple[str, ...], loss_state: str
-) -> tuple[np.ndarray, bool]:
+    avg_matrix: list[list[float | None]], states: tuple[str, ...], loss_state: str
+) -> tuple[np.ndarray, bool, list[str]]:
     """把 avg_matrix (NxM, M=N+1 含 exited) 收缩成 NxN 方阵并强制 loss 行吸收。
 
     - 丢掉 exited 列，把每行概率质量重新归一到 states 内（行和=1）；
-    - loss 行强制为 one-hot 自环（吸收态）。
-    返回 (方阵, loss 态原本是否已近似吸收)。
+    - loss 行强制为 one-hot 自环（吸收态）；
+    - 无桶内迁出观测的行（None 行，或只迁往 exited）：loss 态按声明吸收；其它
+      状态放自环占位并记入 unestimated（其 P(损失) 由调用方置为 None 并示警）。
+    返回 (方阵, loss 态原本是否已近似吸收, 无法估计的非 loss 状态)。
     """
     n = len(states)
-    square = np.zeros((n, n), dtype=float)
-    for i in range(n):
-        row = np.asarray(avg_matrix[i][:n], dtype=float)  # drop exited (last) column
-        total = float(row.sum())
-        if total > 0:
-            square[i] = row / total
-        else:
-            square[i, i] = 1.0  # no observed transitions -> treat as self-absorbing
     loss_index = states.index(loss_state)
-    # detect whether loss row was already (near-)absorbing before we force it
+    square = np.zeros((n, n), dtype=float)
+    unestimated: list[str] = []
+    for i in range(n):
+        cells = avg_matrix[i][:n]  # drop exited (last) column
+        total = 0.0 if any(cell is None for cell in cells) else float(sum(cells))
+        if total > 0:
+            square[i] = np.asarray(cells, dtype=float) / total
+        else:
+            square[i, i] = 1.0  # placeholder; never presented as an estimate
+            if i != loss_index:
+                unestimated.append(states[i])
+    # detect whether loss row was already (near-)absorbing before we force it;
+    # an unobserved loss row carries no evidence of out-flow, so it counts as absorbing.
     was_absorbing = bool(square[loss_index, loss_index] >= 1.0 - 1e-9)
     square[loss_index] = 0.0
     square[loss_index, loss_index] = 1.0
-    return square, was_absorbing
+    return square, was_absorbing, unestimated
+
+
+def _unestimated_message(
+    states: list[str], affected: list[str], reference_month: str | None, balance: float
+) -> str:
+    text = (
+        f"状态 {'、'.join(states)} 在迁徙窗口内没有桶内迁出观测，到损失态的概率无法估计（显示为空）"
+    )
+    if affected:
+        text += (
+            f"；链式计算暂按其停留原状态处理，{'、'.join(affected)} 的 P(损失) 是偏低下限"
+        )
+    if reference_month is not None:
+        text += f"；参考快照 {reference_month} 中这些状态的余额 {balance:,.2f} 未计入 EL"
+    return text + "。"
 
 
 def _matrix_power(matrix: np.ndarray, power: int) -> np.ndarray:
@@ -191,18 +248,20 @@ def _el_by_month(
     df: pd.DataFrame,
     contract,
     states: tuple[str, ...],
-    p_to_loss: dict[str, float],
+    p_to_loss: dict[str, float | None],
     *,
     lgd: float,
-) -> tuple[list[MonthEL], float, int, str | None]:
+) -> tuple[list[MonthEL], float, int, str | None, float]:
     """Per-month point-in-time EL rows + a reference-snapshot headline total_el.
 
     Each MonthEL row is a self-contained point-in-time EL for that snapshot month.
     `total_el` is NOT the cross-month sum (that double-counts the same loans once
     per snapshot they appear in, inflating ~N× on an N-month panel); it is the EL
     of the reference snapshot (default = latest month present in the frame). The
-    reference row carries is_reference=True. Returns
-    (rows, total_el, months_available, reference_month).
+    reference row carries is_reference=True. Balance in a state whose P(loss) is
+    undefined (None) is excluded from EL, and the reference snapshot's excluded
+    balance is returned for the caller's red flag. Returns
+    (rows, total_el, months_available, reference_month, reference_unestimated_balance).
     """
     frame = df[[contract.snapshot_col, contract.bucket_col, contract.balance_col]].copy()
     frame["_month"] = frame[contract.snapshot_col].map(parse_snapshot_month)
@@ -212,12 +271,17 @@ def _el_by_month(
     months = sorted({str(month) for month in frame["_month"].tolist()})
     reference_month = months[-1] if months else None
     rows: list[MonthEL] = []
+    reference_unestimated = 0.0
     for month in months:
         month_frame = frame[frame["_month"] == month]
         balance = float(month_frame["_balance"].sum())
         el = 0.0
         for bucket, group in month_frame.groupby("_bucket", sort=False):
             probability = p_to_loss.get(str(bucket), 0.0)
+            if probability is None:
+                if month == reference_month:
+                    reference_unestimated += float(group["_balance"].sum())
+                continue
             el += float(group["_balance"].sum()) * probability * float(lgd)
         rows.append(
             MonthEL(
@@ -230,7 +294,7 @@ def _el_by_month(
     total_el = next(
         (row.expected_loss for row in rows if row.month == reference_month), 0.0
     )
-    return rows, total_el, len(months), reference_month
+    return rows, total_el, len(months), reference_month, reference_unestimated
 
 
 __all__ = [

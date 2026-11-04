@@ -46,15 +46,16 @@ export const packagesHtml = (rows) =>
         )
         .join("")
     : '<p class="production-note">尚无已登记冻结包。</p>';
-export const requestsHtml = (rows) =>
-  rows.length
+export const requestsHtml = (rows, nextOffset = null) =>
+  (rows.length
     ? rows
         .map(
           (r) =>
             `<button class="production-row" type="button" data-production-action="request" data-production-id="${esc(r.id)}"><strong>${esc(r.strategy_id)} · v${r.strategy_version} · ${r.deployment_slot === "shadow" ? "影子" : "正式"}</strong><span>${esc(statuses[r.status] || r.status)} · ${esc(r.id)}</span></button>`,
         )
         .join("")
-    : '<p class="production-note">尚无发布申请。</p>';
+    : '<p class="production-note">尚无发布申请。</p>') +
+  (nextOffset == null ? "" : button("more-requests", "加载更多发布申请"));
 export const installationsHtml = (rows) =>
   rows.length
     ? rows

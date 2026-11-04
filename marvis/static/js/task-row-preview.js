@@ -32,18 +32,36 @@ export function formatTaskRowPreviewTime(value) {
   }
 }
 
+const STATUS_DOTS = new Set(["run", "wait", "bad", "none"]);
+
+// D6 (batch 4): the sidebar row shows only a status dot, so the hover card
+// carries the status word (resolved by js/task-status.js in app.js).
+function statusRowHtml(statusLabel, statusDot) {
+  if (!statusLabel) return "";
+  const dot = STATUS_DOTS.has(statusDot) ? statusDot : "none";
+  return [
+    '<div class="task-row-preview-row task-row-preview-status">',
+    `<span class="task-row-preview-dot" aria-hidden="true">${dot === "none" ? "" : `<span class="task-status-dot ${dot}"></span>`}</span>`,
+    `<span><span class="task-row-preview-k">状态</span>${escapeHtml(statusLabel)}</span>`,
+    "</div>",
+  ].join("");
+}
+
 export function taskRowPreviewHtml({
   name = "",
   typeLabel = "",
   ownerLabel = "负责人",
   ownerName = "",
   createdAt = "",
+  statusLabel = "",
+  statusDot = "none",
 } = {}) {
   const createdText = formatTaskRowPreviewTime(createdAt);
   const ownerText = String(ownerName || "-").trim() || "-";
   const rows = [
+    statusRowHtml(statusLabel, statusDot),
     `<div class="task-row-preview-row">${PERSON_ICON}<span><span class="task-row-preview-k">${escapeHtml(ownerLabel)}</span>${escapeHtml(ownerText)}</span></div>`,
-  ];
+  ].filter(Boolean);
   if (createdText) {
     rows.push(
       `<div class="task-row-preview-row">${CALENDAR_ICON}<span><span class="task-row-preview-k">创建时间</span>${escapeHtml(createdText)}</span></div>`
@@ -83,6 +101,7 @@ export function bindTaskRowPreview({
   displayName,
   typeLabel,
   ownerLabel,
+  status,
 } = {}) {
   let hoveredShell = null;
   let focusedShell = null;
@@ -113,12 +132,15 @@ export function bindTaskRowPreview({
       hide();
       return;
     }
+    const taskStatus = typeof status === "function" ? status(task) : null;
     preview.innerHTML = taskRowPreviewHtml({
       name: typeof displayName === "function" ? displayName(task) : task.model_name || "",
       typeLabel: typeof typeLabel === "function" ? typeLabel(task) : "",
       ownerLabel: typeof ownerLabel === "function" ? ownerLabel(task) : "负责人",
       ownerName: task.validator || "-",
       createdAt: task.created_at || task.updated_at || "",
+      statusLabel: taskStatus?.label || "",
+      statusDot: taskStatus?.dot || "none",
     });
     preview.dataset.taskId = taskId;
     preview.hidden = false;

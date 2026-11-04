@@ -142,8 +142,8 @@ def add_agent_report_ready_message(repo: TaskRepository, task_id: str | None) ->
         role="assistant",
         stage="word_report_ready",
         content=(
-            "报告已生成。右侧步骤里的“预览”可以在线查看 Word，"
-            "“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。"
+            "报告已生成。“预览”可以在线查看 Word，“下载Word”用于下载验证报告，"
+            "“下载Excel”用于下载指标分析明细；这三个入口在这条消息的产物卡和验证步骤的“产物”里。"
         ),
         metadata={"report_ready": True},
     )

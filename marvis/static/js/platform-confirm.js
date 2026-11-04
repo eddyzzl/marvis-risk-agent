@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 // Mini line icons for the purge chips, keyed by purge_summary field name.
 // Static markup only — labels/counts go through textContent, never innerHTML.
 const PURGE_CHIP_ICONS = {
@@ -44,11 +46,37 @@ export function createPlatformConfirmController({ getElementById } = {}) {
     }
   }
 
+  // V3 UI-4: categories that carry names list them, so the user sees what
+  // goes; the rest stay count chips. At most PURGE_NAME_LIMIT names each.
+  const PURGE_NAME_LIMIT = 4;
+  // Plan template heads ("模型开发") and recipe labels are platform text; dataset
+  // file names and strategy descriptions are user data and stay as written.
+  const PLATFORM_NAME_KEYS = new Set(["plans", "experiments"]);
+
+  function purgeName(item, name) {
+    if (!PLATFORM_NAME_KEYS.has(item.key)) return name;
+    const match = /^(.*?)( ×\d+)?$/.exec(String(name));
+    return `${t(match[1])}${match[2] || ""}`;
+  }
+
+  function purgeNamesText(item) {
+    const names = Array.isArray(item.names) ? item.names.filter(Boolean).map((name) => purgeName(item, name)) : [];
+    const shown = names.slice(0, PURGE_NAME_LIMIT);
+    let text = shown.join("、");
+    const hidden = names.length - shown.length;
+    if (hidden > 0) text += t("，还有 {0} 个", { 0: hidden });
+    const extra = Number(item.extra || 0);
+    if (extra > 0) text += t("{0}另有 {1} 个中间数据", { 0: text ? "，" : "", 1: extra });
+    return text;
+  }
+
   function renderPlatformConfirmPurge(purgeItems) {
     const container = $("platformConfirmPurge");
     if (!container) return;
-    for (const chip of Array.from(container.querySelectorAll(".platform-confirm-chip"))) {
-      chip.remove();
+    for (const node of Array.from(
+      container.querySelectorAll(".platform-confirm-chip, .platform-confirm-purge-list"),
+    )) {
+      node.remove();
     }
     const items = Array.isArray(purgeItems)
       ? purgeItems.filter((item) => item && item.label && item.count)
@@ -58,7 +86,27 @@ export function createPlatformConfirmController({ getElementById } = {}) {
       return;
     }
     const doc = container.ownerDocument;
-    for (const item of items) {
+    const named = items.filter((item) => purgeNamesText(item));
+    if (named.length) {
+      const list = doc.createElement("div");
+      list.className = "platform-confirm-purge-list";
+      for (const item of named) {
+        const row = doc.createElement("div");
+        row.className = "platform-confirm-purge-row";
+        const kind = doc.createElement("span");
+        kind.className = "platform-confirm-purge-kind";
+        kind.innerHTML = PURGE_CHIP_ICONS[item.key] || "";
+        kind.appendChild(doc.createTextNode(item.label));
+        const names = doc.createElement("span");
+        names.className = "platform-confirm-purge-names";
+        names.textContent = purgeNamesText(item);
+        if (!PLATFORM_NAME_KEYS.has(item.key)) names.setAttribute("translate", "no");
+        row.append(kind, names);
+        list.appendChild(row);
+      }
+      container.appendChild(list);
+    }
+    for (const item of items.filter((entry) => !named.includes(entry))) {
       const chip = doc.createElement("span");
       chip.className = "platform-confirm-chip";
       chip.innerHTML = PURGE_CHIP_ICONS[item.key] || "";

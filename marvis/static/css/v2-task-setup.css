@@ -6,8 +6,8 @@
   margin-bottom: 12px;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--card);
 }
 
 .data-workspace-panel[hidden] {
@@ -42,7 +42,7 @@
 
 .data-workspace-identity > span {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: .04em;
 }
@@ -59,7 +59,7 @@
 .data-workspace-identity > small {
   color: var(--text-muted);
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .data-workspace-head-actions,
@@ -80,7 +80,7 @@
   border-radius: 999px;
   color: var(--text-secondary);
   background: var(--surface);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
@@ -117,8 +117,8 @@
   align-content: start;
   gap: 6px;
   color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .data-workspace-target select,
@@ -129,7 +129,7 @@
   height: 32px;
   padding: 5px 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   color: var(--text);
   background: var(--surface);
   font: inherit;
@@ -156,7 +156,7 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
 }
 
 .data-workspace-semantics > header {
@@ -182,7 +182,7 @@
 .data-workspace-semantics > header small,
 .data-workspace-semantics > header > span {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -205,7 +205,7 @@
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
   background: color-mix(in srgb, var(--surface-soft) 72%, var(--surface) 28%);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .data-workspace-fields {
@@ -235,18 +235,18 @@
   align-items: center;
   gap: 8px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .data-workspace-direction-cell select { width: 170px; }
 .data-workspace-direction-cell button {
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
   padding: 6px 8px;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 .data-workspace-direction-cell button:disabled { opacity: .55; cursor: not-allowed; }
@@ -254,7 +254,7 @@
 .data-workspace-field-row code {
   overflow: hidden;
   color: var(--text);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -263,7 +263,7 @@
   margin: 0;
   padding: 14px 10px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -272,7 +272,7 @@
   margin: 0;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -291,8 +291,8 @@
   margin-bottom: 12px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--tone-data-join) 42%, var(--border));
-  border-radius: 12px;
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--card);
 }
 
 .labeling-setup-panel[hidden],
@@ -327,8 +327,8 @@
 .labeling-setup-head span,
 .labeling-setup-form label > span {
   color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .labeling-setup-head strong,
@@ -344,7 +344,7 @@
   border-radius: 999px;
   color: var(--tone-data-join) !important;
   background: color-mix(in srgb, var(--tone-data-join) 9%, var(--surface));
-  font-size: 10px !important;
+  font-size: 12px !important;
 }
 
 .labeling-setup-form {
@@ -355,7 +355,7 @@
   margin: 0;
   padding: 9px 12px 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -391,7 +391,7 @@
   height: 32px;
   padding: 5px 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   color: var(--text);
   background: var(--surface);
   font: inherit;
@@ -414,7 +414,7 @@
   min-width: 0;
   margin: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .labeling-setup-status.busy,
@@ -447,8 +447,8 @@
   margin-bottom: 12px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--tone-portfolio) 42%, var(--border));
-  border-radius: 12px;
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--card);
 }
 
 .portfolio-setup-panel[hidden] {
@@ -477,8 +477,8 @@
 .portfolio-setup-head span,
 .portfolio-setup-form label > span {
   color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .portfolio-setup-head strong {
@@ -493,7 +493,7 @@
   border-radius: 999px;
   color: var(--tone-portfolio) !important;
   background: color-mix(in srgb, var(--tone-portfolio) 9%, var(--surface));
-  font-size: 10px !important;
+  font-size: 12px !important;
 }
 
 .portfolio-setup-form {
@@ -504,7 +504,7 @@
   margin: 0;
   padding: 9px 12px 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -527,7 +527,7 @@
   height: 32px;
   padding: 5px 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   color: var(--text);
   background: var(--surface);
   font: inherit;
@@ -543,15 +543,15 @@
 .portfolio-trend-contract {
   margin: 0 12px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--surface-soft);
 }
 
 .portfolio-trend-contract summary {
   padding: 7px 9px;
   color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
 }
 
@@ -564,7 +564,7 @@
   display: block;
   padding: 0 12px 9px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .portfolio-setup-footer {
@@ -575,7 +575,7 @@
   min-width: 0;
   margin: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .portfolio-setup-status.busy {
@@ -597,9 +597,9 @@
 }
 
 /* Model monitoring uses the existing plan overview as its execution gate. */
-.model-monitoring-panel { margin: 12px 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 14px 16px; }
+.model-monitoring-panel { margin: 12px 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--card); padding: 14px 16px; }
 .model-monitoring-panel[hidden] { display: none; }
-.model-monitoring-panel summary { cursor: pointer; font-weight: 650; }
+.model-monitoring-panel summary { cursor: pointer; font-weight: 600; }
 .model-monitoring-panel summary span { margin-left: 10px; color: var(--text-muted); font-size: 12px; font-weight: 400; }
 .model-monitoring-panel form { margin-top: 16px; }
 .model-monitoring-tools, .model-monitoring-panel footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -607,7 +607,7 @@
 .model-monitoring-tools input { max-width: 250px; }
 .model-monitoring-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
 .model-monitoring-fields label { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
-.model-monitoring-fields select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 7px; padding: 8px; background: var(--surface); color: var(--text); }
+.model-monitoring-fields select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-control); padding: 8px; background: var(--surface); color: var(--text); }
 .model-monitoring-limits, .model-monitoring-status, .model-monitoring-panel small { font-size: 12px; line-height: 1.6; color: var(--text-muted); overflow-wrap: anywhere; }
 .model-monitoring-panel footer { margin-top: 10px; }
 .model-monitoring-status { flex: 1; margin: 0; min-width: 200px; }

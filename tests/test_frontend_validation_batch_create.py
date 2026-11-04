@@ -261,11 +261,7 @@ assert.equal(rows[1].uploadCache, null);
 
 
 def test_batch_create_dialog_and_welcome_card_are_wired_as_an_independent_flow():
-    index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
-    task_types = _read_static("js/task-types.js")
-    create_js = _read_static("js/validation-batch-create.js")
-
+    index_html = _read_static('index.html')
     assert 'id="welcomeValidationBatchCard"' not in index_html
     assert 'data-task-kind="validation_batch"' not in index_html
     assert '<strong>批量模型验证</strong>' not in index_html
@@ -275,29 +271,6 @@ def test_batch_create_dialog_and_welcome_card_are_wired_as_an_independent_flow()
     assert 'id="validationBatchRows"' in index_html
     assert 'id="addValidationBatchRowButton"' in index_html
     assert 'static/css/validation-batch-create.css' in index_html
-
-    assert 'validation_batch: {' in task_types
-    batch_definition = task_types.split('validation_batch: {', 1)[1].split('},', 1)[0]
-    assert 'available: true' in batch_definition
-
-    assert 'from "./js/validation-batch-create.js"' in app_js
-    assert 'createValidationBatchCreateController({' in app_js
-    assert 'validationBatchCreateController.open()' not in app_js
-    assert 'validationBatchCreateController.bind()' in app_js
-    assert 'validationBatchCreateController.close()' in app_js
-    assert 'payload.batch.parent_task_id' in app_js
-    assert 'await refreshTasks()' in app_js
-    assert 'selectTask(parentTask)' in app_js
-
-    assert '"/api/validation-batches/material-uploads"' in create_js
-    assert 'upload_token' in create_js
-    assert 'method: "DELETE"' in create_js
-    assert '"/api/validation-batches"' in create_js
-    assert "body: JSON.stringify(payload)" in create_js
-    assert '"/start"' not in create_js
-    assert 'api/validation-batches/${' not in create_js
-    assert "/api/validation-batches" in _read_static("js/create-task-dialog.js")
-    assert "function addValidationModelRow" in _read_static("js/create-task-dialog.js")
 
 
 def test_classify_validation_batch_files_maps_roles_without_reusing_the_same_file():
@@ -336,25 +309,8 @@ assert.deepEqual(byPath.rowErrors, {});
     )
 
 
-def test_multi_model_create_uses_classified_primary_files_not_first_extra_row():
-    create_js = _read_static("js/create-task-dialog.js")
-    assert "classifyValidationBatchFiles(" in create_js
-    assert "files: rows[0].files" not in create_js
-    assert "collectPrimaryValidationModel" in create_js
-    assert "classifiedFilesFromSelection" in create_js
 
 
 def test_batch_create_dialog_declares_four_explicit_file_roles_and_limits():
-    create_js = _read_static("js/validation-batch-create.js")
-    create_css = _read_static("css/validation-batch-create.css")
-
-    for role in ("notebook", "sample", "pmml", "dictionary"):
-        assert f'fileInputMarkup("{role}")' in create_js
-    assert 'data-batch-file-role="${role}"' in create_js
-    assert 'accept: ".ipynb"' in create_js
-    assert 'accept: ".pmml"' in create_js
-    assert ".csv,.parquet,.feather,.xlsx,.xls" in create_js
-    assert ".csv,.parquet,.xlsx,.xls" in create_js
-    assert "MAX_VALIDATION_BATCH_ROWS = 10" in create_js
-    assert "MIN_VALIDATION_BATCH_ROWS = 2" in create_js
-    assert ".validation-batch-create" in create_css
+    create_css = _read_static('css/validation-batch-create.css')
+    assert '.validation-batch-create' in create_css

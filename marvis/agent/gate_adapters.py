@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from marvis.agent.presenters.display_labels import recipe_label
 from marvis.agent.gate_payloads import (
     build_dedup_payload,
     build_feature_binning_payload,
@@ -61,6 +62,7 @@ def render_gate_dependencies(
         tuple[str, list[dict]],
     ]
     | None = None,
+    load_dataset: Callable[[str], Any] | None = None,
 ) -> GateRenderResult:
     result = GateRenderResult()
     confirm_join_o: dict | None = None
@@ -181,6 +183,8 @@ def render_gate_dependencies(
             split_output=split_o,
             split_step=split_step,
             refined_output=effective_refined_output,
+            split_source_role=_split_source_role(split_step, load_dataset),
+            oot_requirement=_oot_requirement(plan),
         )
         _rewrite_modeling_spec_feature_count(
             result.tables,
@@ -223,6 +227,52 @@ def render_gate_dependencies(
     ]
     result.red_flags = render_risk_evidence(result.red_flag_evidence)
     return result
+
+
+def _split_source_role(
+    split_step: PlanStep | None,
+    load_dataset: Callable[[str], Any] | None,
+) -> str | None:
+    """Registry role of the dataset the split step read, when knowable."""
+    if split_step is None:
+        return None
+    dataset_id = (split_step.inputs or {}).get("dataset_id")
+    if not isinstance(dataset_id, str) or not dataset_id.strip():
+        return None
+    if dataset_id.startswith("$ref:"):
+        # Produced inside this plan (e.g. the join result), never an upload.
+        return "derived"
+    if load_dataset is None:
+        return None
+    try:
+        role = getattr(load_dataset(dataset_id), "role", None)
+    except Exception:  # presentation only: an unknown origin keeps neutral copy
+        return None
+    return str(role) if role else None
+
+
+def _oot_requirement(plan: Plan) -> str | None:
+    """The task's own OOT success criterion, e.g. ``"OOT KS ≥ 0.3"``.
+
+    Covers the legacy ``oot_ks_min`` criterion and business-objective criteria
+    on any OOT metric; the platform never invents one.
+    """
+    for item in getattr(plan, "success_criteria", None) or []:
+        if not isinstance(item, dict):
+            continue
+        nested = [entry for entry in (item.get("criteria") or []) if isinstance(entry, dict)]
+        for criterion in (item, *nested):
+            metric = str(criterion.get("metric") or "").strip()
+            if "oot" not in metric.lower():
+                continue
+            label = str(criterion.get("label") or "").strip() or metric.replace("_", " ").upper()
+            for keys, symbol in ((("min", "minimum"), "≥"), (("max", "maximum"), "≤")):
+                for key in keys:
+                    value = criterion.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        return f"{label} {symbol} {value:g}"
+            return label
+    return None
 
 
 def _effective_modeling_spec(
@@ -285,7 +335,7 @@ def _with_pending_tuning_budget(output: dict, gate: PlanStep | None) -> dict:
     primary = str(output.get("recipe") or recipes[0])
     scalar_budget = budgets.get(primary, next(iter(budgets.values())))
     budget_note = "、".join(
-        f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets
+        f"{recipe_label(recipe)} {budgets[recipe]} 轮" for recipe in recipes if recipe in budgets
     )
     total = sum(budgets.get(recipe, 0) for recipe in recipes)
     return {
@@ -320,7 +370,7 @@ def _with_completed_tuning_budget(output: dict, tune_output: dict | None) -> dic
     scalar_budget = budgets.get(primary, next(iter(budgets.values())))
     total = sum(budgets.get(recipe, 0) for recipe in recipes)
     budget_note = "、".join(
-        f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets
+        f"{recipe_label(recipe)} {budgets[recipe]} 轮" for recipe in recipes if recipe in budgets
     )
     return {
         **output,
@@ -365,7 +415,7 @@ def _rewrite_pending_tuning_budget(
     ordered = [(recipe, budgets[recipe]) for recipe in recipes if recipe in budgets]
     if not ordered:
         ordered = [(str(recipe), count) for recipe, count in budgets.items()]
-    display = "、".join(f"{recipe}={count}" for recipe, count in ordered)
+    display = "、".join(f"{recipe_label(recipe)} {count} 轮" for recipe, count in ordered)
     display += f"（总计 {sum(int(count) for _, count in ordered)} 轮）"
     for table in tables:
         if table.get("title") != "建模规格":

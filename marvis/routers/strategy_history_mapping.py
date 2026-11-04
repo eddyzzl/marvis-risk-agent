@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from marvis.api_task_helpers import get_task_or_404
 from marvis.packs.strategy.history_mapping import HistoryMappingError
-from marvis.repositories.strategy_history_mapping import StrategyHistoryMappingRepository
+from marvis.repositories.strategy_history_mapping import HISTORY_TASK_TYPES, StrategyHistoryMappingRepository
 from marvis.repositories.tasks import TaskRepository
 
 
@@ -27,6 +27,11 @@ class Proposal(BaseModel):
     source_id: StrictStr | None = Field(default=None, max_length=128)
 
 
+class RegisterSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    filename: StrictStr = Field(min_length=1, max_length=512)
+
+
 class Confirm(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     proposal_token: StrictStr = Field(min_length=1, max_length=65536)
@@ -35,8 +40,8 @@ class Confirm(BaseModel):
 def _runtime(request, task_id):
     settings = request.app.state.settings
     task = get_task_or_404(TaskRepository(settings.db_path), task_id)
-    if task.task_type != "strategy":
-        raise unprocessable({"code": "history_strategy_task_required", "message": "请在策略任务中确认历史材料映射。"})
+    if task.task_type not in HISTORY_TASK_TYPES:
+        raise unprocessable({"code": "history_strategy_task_required", "message": "请在策略任务或数据处理任务中确认历史材料映射。"})
     actor = getattr(getattr(request.state, "local_principal", None), "id", None)
     if not getattr(request.state, "private_client_authenticated", False) or not actor:
         raise forbidden({"code": "history_private_principal_required", "message": "请在已认证的本地会话中读取和确认历史材料。"})
@@ -64,6 +69,26 @@ def sources(task_id: str, request: Request):
     repository, _ = _runtime(request, task_id)
     try:
         return {"sources": repository.sources(task_id), "external_requests": 0}
+    except Exception as exc:
+        raise _failure(exc) from None
+
+
+@router.get("/sources/candidates")
+def source_candidates(task_id: str, request: Request):
+    """Data processing tasks: task materials that can be registered as history."""
+    repository, _ = _runtime(request, task_id)
+    try:
+        return {"filenames": repository.source_candidates(task_id)}
+    except Exception as exc:
+        raise _failure(exc) from None
+
+
+@router.post("/sources")
+def register_source(task_id: str, payload: RegisterSource, request: Request):
+    """Data processing tasks: register one task material as a history source."""
+    repository, _ = _runtime(request, task_id)
+    try:
+        return repository.register_source(task_id, payload.filename)
     except Exception as exc:
         raise _failure(exc) from None
 

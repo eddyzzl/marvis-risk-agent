@@ -104,6 +104,9 @@ def _run_driver_turn(
                         "expected_plan_fingerprint": expected_plan_fingerprint,
                         "expected_step_fingerprint": expected_step_fingerprint,
                         "_trusted_ui_action": True,
+                        # The setup form's single 「确认方案，开始执行」 click
+                        # both applies its edits and confirms the setup gate.
+                        "_continue_after_adjust": ui_action == "apply_modeling_setup",
                     }
                 )
             turn = driver.resume(

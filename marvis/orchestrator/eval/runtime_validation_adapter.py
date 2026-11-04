@@ -25,6 +25,10 @@ def start_agent(journey, action):
         raise RuntimeJourneyError("validation_agent_start_not_declared")
     if journey.plans():
         raise RuntimeJourneyError("validation_agent_must_not_use_plan")
+    if action.fault is not None:
+        from .runtime_validation_timeout import dispatch_validation_timeout
+        dispatch_validation_timeout(journey, action)
+        return
     journey.record_human_action(action)
     response = journey.json_request(
         "POST", f"/api/tasks/{journey.task_id}/agent/start", label="agent_initial_turn",
@@ -61,13 +65,41 @@ def confirm_current_report(journey, action):
         "draft_message_id": draft["message_id"], "draft_edit_revision": draft["draft_edit_revision"],
         "revision": draft["report_revision"], "values_sha256": digest(draft["values"]),
     }
-    journey.json_request(
+    body = {"draft_message_id": draft["message_id"], "draft_edit_revision": draft["draft_edit_revision"],
+            "revision": draft["report_revision"], "text_values": draft["values"]}
+    if action.fault is not None:
+        if action.fault.kind == "stale_report_revision_once":
+            from .runtime_validation_boundary import reject_stale_report_confirmation
+            reject_stale_report_confirmation(journey, action, body)
+            return
+        from .runtime_validation_fault import discard_report_confirmation
+        discard_report_confirmation(journey, action, body)
+        return
+    confirmed = journey.json_request(
         "POST", f"/api/tasks/{journey.task_id}/agent/report-draft/confirm",
         label="human_validation_report_confirmation",
-        json={"draft_message_id": draft["message_id"], "draft_edit_revision": draft["draft_edit_revision"],
-              "revision": draft["report_revision"], "text_values": draft["values"]},
+        json=body,
     )
+    if hasattr(journey, "capture_stale_confirmation"):
+        from .runtime_validation_fault import _capture
+        journey.capture_stale_confirmation = {"request": body, "response": confirmed,
+            "http_ordinal": journey.count, "after_response": _capture(journey)}
+    timeout_fault = next((f for f in getattr(journey, "validation_faults", [])
+                          if f.get("schema") == "marvis.validation-timeout-arm.v1"), None)
+    if timeout_fault is not None:
+        timeout_fault["confirmation"] = {"action_index": journey.current_action_index,
+            "action_sha256": digest(action.model_dump()), "request": body, "response": confirmed,
+            "http_ordinal": journey.count}
     journey.wait_idle()
+    download_reports(journey)
+    if timeout_fault is not None:
+        from .runtime_validation_timeout import capture_validation_timeout_final
+        capture_validation_timeout_final(journey, timeout_fault)
+
+
+def download_reports(journey):
+    from .runtime_runner import RuntimeJourneyError
+
     journey.validation_downloads = []
     for kind, route in (("word", "report"), ("excel", "analysis")):
         downloaded = journey.request(
@@ -76,7 +108,9 @@ def confirm_current_report(journey, action):
         )
         if downloaded.status_code != 200 or not (0 < len(downloaded.content) <= 32_000_000):
             raise RuntimeJourneyError("validation_report_download_failed")
-        journey.validation_downloads.append({"kind": kind, "sha256": digest(downloaded.content)})
+        sha = digest(downloaded.content)
+        journey.events[-1]["sha256"] = sha
+        journey.validation_downloads.append({"kind": kind, "sha256": sha})
 
 
 def _bounded_file(root, relative, *, maximum=32_000_000):
@@ -96,7 +130,7 @@ def pipeline_receipt(workspace, task_id, case, messages, *, confirmation=None, d
     from marvis.repositories.validation_contracts import ValidationContractRepository
     from marvis.settings import Settings
     from marvis.validation.input_contracts import input_contract_to_dict
-    from marvis.validation.pmml_score_artifacts import (
+    from marvis.validation_services.pmml_score_artifacts import (
         build_pmml_scoring_identity, validate_pmml_score_artifact,
     )
     from marvis.validation.results import (

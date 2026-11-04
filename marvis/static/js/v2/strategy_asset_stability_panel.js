@@ -1,4 +1,5 @@
 /** Exact source selection, immutable freeze, and independent evidence display. */
+import { api as apiRequest } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 
 const panels = new WeakMap();
@@ -17,13 +18,21 @@ export function mountStrategyAssetStabilityPanel(root, taskId) {
   const body = root.querySelector("[data-asset-stability-body]");
   const api = async (suffix = "", payload) => {
     const revision = state.revision;
-    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/strategy-asset-stability${suffix}`, {
-      ...(payload ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) } : {}),
-      signal: abort.signal,
-    });
-    const result = await response.json();
+    // The shared client adds the token and UI-locale headers and keeps the
+    // mounted application prefix.
+    let result;
+    let failure = null;
+    try {
+      result = await apiRequest(`/api/tasks/${encodeURIComponent(taskId)}/strategy-asset-stability${suffix}`, {
+        ...(payload ? { method: "POST", body: JSON.stringify(payload) } : {}),
+        signal: abort.signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      failure = error;
+    }
     if (panels.get(root) !== state || state.revision !== revision) throw new DOMException("Selection changed", "AbortError");
-    if (!response.ok) throw new Error(result.detail?.message || result.detail || "来源核验或测量失败");
+    if (failure) throw new Error(failure.detail?.message || failure.message || "来源核验或测量失败");
     return result;
   };
   const render = () => {

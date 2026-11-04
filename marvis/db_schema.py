@@ -228,7 +228,7 @@ _MIGRATION_TABLES = frozenset({
 # _migration_034_validation_batch_source_gc adds a narrowly typed cleanup target
 # for platform-owned validation-batch material trees.  The old migration remains
 # immutable; SQLite requires a table rebuild to extend its CHECK constraint.
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -4682,6 +4682,22 @@ def _migration_045_operations_evidence(conn: sqlite3.Connection) -> None:
     create_operations_extensions_schema(conn)
 
 
+def _migration_046_time_facts(conn: sqlite3.Connection) -> None:
+    # Time-contract facts (label availability, historical parameters, candidate
+    # provenance) are append-only records; absence means unknown.
+    conn.execute("""CREATE TABLE time_facts (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+      subject_kind TEXT NOT NULL CHECK(subject_kind IN ('task','dataset','blind_cohort')),
+      subject_id TEXT NOT NULL,
+      fact TEXT NOT NULL CHECK(fact IN ('label_available_at','historical_parameters','candidate_provenance')),
+      value TEXT NOT NULL, source TEXT NOT NULL, actor TEXT NOT NULL, basis TEXT,
+      recorded_at REAL NOT NULL, UNIQUE(subject_kind, subject_id, fact))""")
+    conn.execute('CREATE INDEX idx_time_facts_task ON time_facts(task_id)')
+    for operation in ('UPDATE', 'DELETE'):
+        conn.execute(f"""CREATE TRIGGER time_facts_no_{operation.lower()} BEFORE {operation}
+          ON time_facts BEGIN SELECT RAISE(ABORT,'time facts are append-only'); END""")
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_baseline),
     (2, _migration_002_strategy_versioning),
@@ -4728,6 +4744,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (43, _migration_043_governed_capability_versions),
     (44, _migration_044_institution_identity_and_sync),
     (45, _migration_045_operations_evidence),
+    (46, _migration_046_time_facts),
 ]
 
 

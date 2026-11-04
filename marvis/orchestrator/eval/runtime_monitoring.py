@@ -146,6 +146,10 @@ def confirm_monitoring(journey, action):
     plan = journey.json_request("GET", f"/api/plans/{submission['plan_id']}", label="read_monitoring_plan")["plan"]
     if plan["status"] != "validated" or plan["task_id"] != journey.task_id:
         raise RuntimeJourneyError("monitoring_proposal_is_stale")
+    if action.fault is not None:
+        from .runtime_monitoring_fault import dispatch_monitoring_fault
+        dispatch_monitoring_fault(journey, action, plan)
+        return
     journey.record_human_action(action)
     # Agent tasks reject the generic /plan/confirm bypass even if a human
     # created the workflow through /plans. Both entries use its existing gate.

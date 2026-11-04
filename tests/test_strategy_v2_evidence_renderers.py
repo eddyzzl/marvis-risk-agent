@@ -46,19 +46,20 @@ def test_sample_v2_renderer_surfaces_only_authenticated_design_facts(
     output = strategy_v2_outputs["sample"]
     text, tables = render_tool_output(SAMPLE_TOOL, output)
 
-    assert "策略样本设计 V2 已固化" in text
-    assert "范围 `strategy_development`" in text
-    assert "人群关系 `nested_same_cohort`" in text
-    assert "风险样本成熟度：`confirmed_matured`" in text
-    assert "历史评分：`available / legacy_score / higher_is_riskier`" in text
+    # Batch 3b (2026-10-14 redesign): prose uses business wording; raw codes and hashes stay in the evidence tables.
+    assert "策略样本设计已固化" in text
+    assert "用于策略开发" in text
+    assert "风险人群嵌套在审批人群里" in text
+    assert "风险样本成熟度：已确认成熟" in text
+    assert "历史评分：可用（字段 legacy_score，分数越高风险越高）" in text
     assert "未创建策略、未采纳、未部署" in text
     assert "group_coverage_gap: warn" in text
-    assert output["artifacts"]["bundle"]["filename"] in text
-    assert output["artifacts"]["bundle"]["content_hash"] in text
-    assert output["artifacts"]["membership"]["filename"] in text
-    assert output["membership_content_hash"] in text
+    for internal in ("strategy_development", "nested_same_cohort", "confirmed_matured", "Tool v2 envelope", "canonical content hash"):
+        assert internal not in text
+    assert output["artifacts"]["bundle"]["content_hash"] not in text
+    assert output["membership_content_hash"] not in text
     assert "统一产物栏" in text
-    assert "不会自行拼接链接" in text
+    assert "不会自行拼接下载链接" in text
     assert "/api/tasks/" not in text
     assert "download?" not in text
     assert "](" not in text
@@ -81,6 +82,11 @@ def test_sample_v2_renderer_surfaces_only_authenticated_design_facts(
     }
     membership_row = next(row for row in artifacts["rows"] if row[0] == "membership")
     assert membership_row[3] == f"semantic:{output['membership_content_hash']}"
+    bundle_row = next(row for row in artifacts["rows"] if row[0] == "sample-design bundle")
+    assert bundle_row[2] == output["artifacts"]["bundle"]["filename"]
+    assert bundle_row[3] == output["artifacts"]["bundle"]["content_hash"]
+    contract = next(table for table in tables if table["title"] == "样本设计口径")
+    assert ["双人群关系", "nested_same_cohort", "风险人群嵌套在审批人群里（同一批客户）"] in contract["rows"]
 
 
 def test_native_sample_v2_renderer_validates_and_surfaces_native_source(
@@ -90,9 +96,9 @@ def test_native_sample_v2_renderer_validates_and_surfaces_native_source(
 
     text, tables = render_tool_output(NATIVE_SAMPLE_TOOL, output)
 
-    assert "策略样本设计 V2 已固化" in text
-    assert "原生活动数据集" in text
-    assert "`native_active_dataset`" in text
+    assert "策略样本设计已固化" in text
+    assert "平台登记的原生数据集" in text
+    assert "native_active_dataset" not in text
     assert "未创建策略、未采纳、未部署" in text
     assert "legacy anchor" not in text.lower()
     assert any(table["title"] == "双人群样本分区" for table in tables)
@@ -114,15 +120,36 @@ def test_native_sample_v2_renderer_fails_closed_on_forged_output(
 def test_model_evidence_v2_renderer_is_univariate_only_and_never_builds_a_link(
     strategy_v2_outputs: dict,
 ) -> None:
-    text, tables = render_tool_output(MODEL_TOOL, strategy_v2_outputs["model"])
+    output = strategy_v2_outputs["model"]
+    text, tables = render_tool_output(MODEL_TOOL, output)
 
-    assert "策略分析证据 V2 已固化" in text
+    assert "策略分析证据已固化" in text
     assert "已认证 **2** 条单变量证据" in text
-    assert "`risk/development`" in text
-    assert "univariate-only" in text
+    assert "证据范围为风险人群的开发集" in text
+    assert "只有单变量证据" in text
     assert "未创建模型、未进行模型比较、未采纳、未部署" in text
     assert "统一产物栏" in text
-    assert "不会自行拼接链接" in text
+    assert "不会自行拼接下载链接" in text
+    # Envelope internals, hashes and scope codes stay in 「证据产物摘要」.
+    for internal in (
+        "risk/development",
+        "univariate-only",
+        "Tool v3 envelope",
+        "registry artifact id",
+        "content hash",
+        output["artifact"]["filename"],
+        output["artifact"]["content_hash"],
+    ):
+        assert internal not in text
+    summary = next(table for table in tables if table["title"] == "证据产物摘要")
+    summary_rows = {row[0]: row[1] for row in summary["rows"]}
+    assert summary_rows == {
+        "证据范围": "risk/development",
+        "证据类型": "univariate-only",
+        "文件": output["artifact"]["filename"],
+        "产物类型": output["artifact"]["kind"],
+        "content hash": output["artifact"]["content_hash"],
+    }
     assert "/api/tasks/" not in text
     assert "download?" not in text
     assert "](" not in text

@@ -94,23 +94,46 @@ def feature_reference(values, target, *, feature, selected=("iv", "ks", "auc", "
 
 
 def feature_recommendation_reference(metric):
-    """Check the default no-PSI policy separately from feature arithmetic."""
+    """Check recommendation policy from independently recomputed metrics."""
+    stability = ("psi", "psi_month_first", "psi_month_last", "psi_month_previous", "psi_split")
     evidence = [{"metric": key, "value": metric[key]} for key in
-                ("iv", "ks", "auc", "missing_rate", "mode_rate", "zero_rate", "unique_count") if key in metric]
-    if "coverage" in metric and metric["valid_count"] == 0:
+                ("iv", "ks", "auc", "missing_rate", "mode_rate", "zero_rate", "unique_count", *stability, "meaning_consistency")
+                if key in metric and metric[key] is not None]
+    psis = [float(metric[key]) for key in stability if metric.get(key) is not None]
+    psi = max(psis) if psis else None
+    if metric.get("meaning_consistency") == "不一致":
+        label, reason = "不推荐", "业务预期方向与实际数据方向不一致，需先核对口径或数据质量。"
+    elif "coverage" in metric and metric["valid_count"] == 0:
         label, reason = "不推荐", "没有有效数值，无法用于分析。"
     elif "coverage" in metric and metric["missing_rate"] >= .8:
         label, reason = "不推荐", f"缺失率 {metric['missing_rate']:.1%} 过高。"
     elif "coverage" in metric and (metric["unique_count"] <= 1 or metric["mode_rate"] >= .95):
-        label, reason = "不推荐", f"单一值率 {metric['mode_rate']:.1%}，变量几乎没有区分信息。"
-    elif not ({"iv", "ks", "auc"} & metric.keys()):
+        label, reason = "不推荐", f"最常见值占比 {metric['mode_rate']:.1%}，变量几乎没有区分信息。"
+    elif not any(metric.get(key) is not None for key in ("iv", "ks", "auc")):
         label, reason = "待评估", "本次未选择 IV、KS 或 AUC，无法判断单变量区分力。"
-    elif not any(metric.get(key, -1) >= threshold for key, threshold in (("iv", .1), ("ks", .1), ("auc", .6))):
+    elif not any(metric.get(key) is not None and metric[key] >= threshold
+                 for key, threshold in (("iv", .1), ("ks", .1), ("auc", .6))):
         label, reason = "暂不推荐", "本次所选区分力指标未显示出足够信号。"
+    elif metric.get("ks") is not None and metric["ks"] >= .40:
+        # The modeling screen's leakage bar, written out independently.
+        label, reason = "谨慎", (
+            f"单变量 KS {metric['ks']:.3f} ≥ 0.40，区分度异常高，"
+            "疑似目标泄漏或本身就是模型分；建模筛选会把它剔除，请先核对来源。"
+        )
+        if psi is not None and psi >= .25:
+            label, reason = "不推荐", f"最大 PSI={psi:.3f}，稳定性风险较高；{reason}"
     else:
         prefix = "样本量偏小，建议扩大样本复核；" if metric.get("valid_count", 0) < 100 else ""
-        label, reason = "候选", prefix + "有区分力；本次没有可用 PSI 结果，需另行验证稳定性。"
-    confidence = "none" if label == "待评估" else "medium" if ({"iv", "ks", "auc"} & metric.keys() or label in {"不推荐", "暂不推荐"}) else "low"
+        if psi is None:
+            label, reason = "候选", prefix + "有区分力；本次没有可用 PSI 结果，需另行验证稳定性。"
+        elif psi >= .25:
+            label, reason = "不推荐", f"最大 PSI={psi:.3f}，稳定性风险较高。"
+        elif psi >= .10:
+            label, reason = "谨慎", f"{prefix}有区分力，但最大 PSI={psi:.3f} 需要关注。"
+        else:
+            label, reason = "推荐", f"{prefix}区分力与已提供的稳定性结果均通过基础规则。"
+    signal = any(metric.get(key) is not None for key in ("iv", "ks", "auc"))
+    confidence = "none" if label == "待评估" else "high" if signal and psis else "medium" if (signal or label in {"不推荐", "暂不推荐"}) else "low"
     return {"recommendation": label, "recommendation_reason": reason,
-            "recommendation_state": {"候选": "candidate", "待评估": "unevaluated", "不推荐": "not_recommended", "暂不推荐": "not_recommended"}[label],
+            "recommendation_state": {"推荐": "recommended", "候选": "candidate", "待评估": "unevaluated", "不推荐": "not_recommended", "暂不推荐": "not_recommended", "谨慎": "caution"}[label],
             "recommendation_evidence": evidence, "recommendation_confidence": confidence}

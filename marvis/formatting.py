@@ -11,7 +11,30 @@ three, so importing it changes no rendered number or string.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+# Delivery tasks created before V3 stored the internal artifact id as their
+# version (e.g. ``artifact_<hex>`` / ``artifact_<hex>-challenger-backtest``).
+_ARTIFACT_MODEL_VERSION = re.compile(
+    r"^artifact_[0-9a-f]{8,}(?P<challenger>-challenger-backtest)?$",
+    re.IGNORECASE,
+)
+
+
+def model_version_display(value: Any) -> str:
+    """Business-readable model version for report titles and overview rows.
+
+    Display only: the stored version is unchanged.  A legacy artifact-id version
+    reads as nothing (or 「挑战者回测」 for a challenger backtest task); the id
+    itself stays in the task's source directory, audit record and report values.
+    """
+    text = str(value or "").strip()
+    match = _ARTIFACT_MODEL_VERSION.match(text)
+    if match is None:
+        return text
+    return "挑战者回测" if match.group("challenger") else ""
 
 
 def compact_number(value: Any) -> str:

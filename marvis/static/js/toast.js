@@ -20,7 +20,7 @@ export function createComingSoonToastController({
     return toast;
   }
 
-  function showComingSoonToast(message) {
+  function showComingSoonToast(message, { durationMs = visibleDurationMs } = {}) {
     const toast = ensureToast();
     toast.textContent = message;
     toast.classList.add("is-visible");
@@ -28,7 +28,7 @@ export function createComingSoonToastController({
     visibleTimer = setTimeoutFn(() => {
       toast.classList.remove("is-visible");
       visibleTimer = null;
-    }, visibleDurationMs);
+    }, durationMs);
   }
 
   return {

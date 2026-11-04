@@ -12,78 +12,83 @@
   text-align: center;
 }
 
+/* Batch 5 (D7): one 700px reading column, as in the mockup's home screen. */
 .workspace-welcome-inner {
-  display: grid;
-  width: min(1040px, 100%);
-  justify-items: center;
-  transform: translateY(-2vh);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+.home-hero {
+  padding: 26px 24px 24px;
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  text-align: center;
 }
 
 .workspace-brand-logo {
-  width: 76px;
-  height: 76px;
-  margin: 0 0 16px;
+  display: block;
+  width: 116px;
+  height: 116px;
+  margin: 0 auto;
   object-fit: contain;
+  filter: drop-shadow(0 10px 10px rgba(0, 0, 0, 0.16));
 }
 
 .workspace-welcome h2 {
   max-width: none;
-  margin: 0;
+  margin: 12px 0 0;
   color: var(--text);
-  font-size: 28px;
-  line-height: 1.18;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
   letter-spacing: 0;
   white-space: nowrap;
   word-break: keep-all;
+}
+
+.home-hero-sub {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-base);
+  line-height: 1.5;
 }
 
 .workspace-greeting-nowrap {
   white-space: nowrap;
 }
 
+/* D7: the seven work types are one row of icons on a grey card; a click
+   only fills the composer (js/home-composer.js). */
 .welcome-task-cards {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   width: 100%;
-  max-width: 1040px;
-  gap: 12px;
-  margin-top: clamp(24px, 4vh, 36px);
+  padding: 18px 8px 14px;
+  border-radius: var(--radius);
+  background: var(--card);
 }
 
 .welcome-task-card {
   position: relative;
   isolation: isolate;
-  overflow: hidden;
-  display: grid;
-  align-content: start;
-  gap: 12px;
-  padding: 18px 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  background: var(--surface);
-  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 2px;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  background: transparent;
+  box-shadow: none;
+  text-align: center;
   cursor: pointer;
-  transition:
-    border-color 180ms ease,
-    box-shadow 220ms ease,
-    transform 220ms ease;
-}
-
-/* tone-keyed corner glow, echoing the status hero's glass state */
-.welcome-task-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  opacity: 0;
-  background: radial-gradient(
-    82% 130% at 100% -12%,
-    color-mix(in srgb, var(--tone, var(--accent)) 22%, transparent),
-    transparent 60%
-  );
-  transition: opacity 240ms ease;
+  transition: color 160ms ease;
 }
 
 .welcome-task-card > * {
@@ -99,21 +104,18 @@
 .welcome-task-card[data-task-kind="vintage"] { --tone: var(--tone-vintage); }
 .welcome-task-card[data-task-kind="portfolio"] { --tone: var(--tone-portfolio); }
 
+/* D2/D4 (2026-10-14): flat grey content card; hover is a neutral fill change,
+   no tone border, glow or corner wash. The icon keeps its grow + sheen. */
 .welcome-task-card.available:hover {
-  border-color: color-mix(in srgb, var(--tone, var(--accent)) 26%, var(--border));
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--tone, var(--accent)) 12%, rgba(0, 0, 0, 0.05));
+  color: var(--text);
+  background: transparent;
+  box-shadow: none;
   transform: none;
-}
-
-/* card-level tone glow in the corner on hover (this is the card glow the user
-   wants kept — only the under-icon glow was removed) */
-.welcome-task-card.available:hover::before {
-  opacity: 0.65;
 }
 
 .welcome-task-card:disabled {
   color: var(--text-muted);
-  background: color-mix(in srgb, var(--surface-soft) 78%, var(--surface));
+  background: transparent;
   box-shadow: none;
   cursor: not-allowed;
 }
@@ -317,7 +319,7 @@
    lower-right (斜后方扎实灰色, like the shield's old back layer); the sheen
    flashes across once. */
 .welcome-task-card.available:hover .welcome-task-icon {
-  transform: translateY(-3px) scale(1.22);
+  transform: translateY(-3px) scale(1.16);
 }
 
 .welcome-task-card.available:hover .welcome-task-icon svg {
@@ -337,24 +339,38 @@
    tile's display:inline-flex (the icon is a <span>) and break glyph centering. */
 .welcome-task-card strong {
   display: block;
-  font-size: 15px;
-}
-
-.welcome-task-card span:not(.welcome-task-icon):not(.welcome-task-sheen) {
-  display: block;
   max-width: 100%;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
+:root[lang="en"] .welcome-task-card strong {
+  width: min-content;
+  min-height: 2.6em;
+  overflow-wrap: normal;
+}
+
+/* The one-line descriptions stay in the markup for screen readers only; the
+   row shows icon + name like the mockup's app row. */
+.welcome-task-card span:not(.welcome-task-icon):not(.welcome-task-sheen) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A fixed 700px track: the column keeps its width whatever it holds. */
 .validation-workspace.is-empty .workspace-welcome {
   display: grid;
-  place-content: center;
-  justify-items: center;
+  grid-template-columns: minmax(0, 700px);
+  align-content: safe center;
+  justify-content: center;
+  overflow-y: auto;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -374,7 +390,17 @@
 
 @media (max-width: 760px) {
   .welcome-task-cards {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    row-gap: 14px;
+  }
+
+  :root[lang="en"] .welcome-task-cards {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workspace-welcome h2 {
+    white-space: normal;
+    word-break: normal;
   }
 }
 
@@ -385,12 +411,12 @@
 .welcome-task-card.unavailable::after {
   content: "敬请期待";
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: -12px;
+  right: 0;
   z-index: 2;
   padding: 2px 9px;
   border-radius: var(--radius-pill);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.03em;
   color: var(--action-on-solid);
@@ -406,12 +432,12 @@
   z-index: 400;
   max-width: min(88vw, 420px);
   padding: 11px 20px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   font-size: 14px;
   font-weight: 500;
-  color: var(--toast-text);
-  background: var(--toast-bg);
-  box-shadow: var(--toast-shadow);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
   opacity: 0;
   pointer-events: none;
   transition:
@@ -421,4 +447,644 @@
 .coming-soon-toast.is-visible {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* ---------- batch 5 home: composer, examples, 接着做, creation card ---------- */
+
+.home-composer {
+  padding: 12px 10px 8px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow:
+    0 0 0 1px var(--sep),
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 8px 24px rgba(0, 0, 0, 0.07);
+  transition: box-shadow 160ms ease;
+}
+
+.home-composer:focus-within,
+.home-composer[data-dragging="true"] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--text) 22%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 8px 24px rgba(0, 0, 0, 0.07);
+}
+
+body[data-theme="dark"] .home-composer {
+  box-shadow:
+    0 0 0 1px var(--sep),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.home-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  max-height: 180px;
+  padding: 6px 8px 10px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-lg);
+  line-height: 1.5;
+  field-sizing: content;
+}
+
+.home-composer textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.home-composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.home-composer-hint {
+  margin-right: auto;
+  padding-left: 8px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.home-composer-attach {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.home-composer-attach:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.home-composer-attach:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.home-composer-attach svg {
+  width: 18px;
+  height: 18px;
+}
+
+.home-composer-send {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--button-primary-text);
+  background: var(--button-primary-bg);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  transition: background 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.home-composer-send:hover:not(:disabled) {
+  background: var(--button-primary-bg-hover);
+}
+
+.home-composer-send:active:not(:disabled) {
+  background: var(--button-primary-bg-active);
+  transform: scale(0.92);
+}
+
+.home-composer-send:disabled {
+  color: color-mix(in srgb, var(--text-muted) 80%, #ffffff);
+  background: color-mix(in srgb, var(--text-muted) 34%, transparent);
+  box-shadow: none;
+  cursor: default;
+}
+
+.home-composer-send svg {
+  width: 18px;
+  height: 18px;
+}
+
+.home-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 4px 6px;
+}
+
+.home-file-chips[hidden] {
+  display: none;
+}
+
+.home-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 9px;
+  background: var(--fill);
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+.home-file-chip svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--text-secondary);
+}
+
+.home-file-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.home-file-chip-size {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.home-file-chip-remove {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -3px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.home-file-chip-remove:hover {
+  background: var(--fill-2);
+  color: var(--text);
+}
+
+.home-examples {
+  display: flex;
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scroll-padding-inline: 10px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  gap: 8px;
+  margin-top: -6px;
+  /* The scrolling viewport also clips shadows and keyboard focus rings. */
+  padding: 10px 10px 16px;
+  --examples-fade-start: 0px;
+  --examples-fade-end: 0px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--examples-fade-start), #000 calc(100% - var(--examples-fade-end)), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 var(--examples-fade-start), #000 calc(100% - var(--examples-fade-end)), transparent);
+}
+
+.home-examples[data-scroll-left="true"] {
+  --examples-fade-start: 20px;
+}
+
+.home-examples[data-scroll-right="true"] {
+  --examples-fade-end: 20px;
+}
+
+.home-examples::-webkit-scrollbar {
+  display: none;
+}
+
+.home-example {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  scroll-snap-align: start;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.home-example:hover {
+  background: var(--fill-2);
+}
+
+.home-example:focus-visible,
+.home-continue-row:focus-visible,
+.home-draft-chip:focus-visible,
+.home-draft-back:focus-visible,
+.home-file-chip-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.home-section-title {
+  margin: 0 14px 7px;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+
+/* The work-type title sits on the card below it, not a full flex gap away. */
+.workspace-welcome-inner > .home-section-title {
+  margin-bottom: -11px;
+}
+
+.home-continue[hidden] {
+  display: none;
+}
+
+.home-continue-list {
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.home-continue-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 50px;
+  padding: 9px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.home-continue-row + .home-continue-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 52px;
+  height: 1px;
+  background: var(--sep);
+}
+
+.home-continue-row:hover {
+  background: var(--fill);
+}
+
+.home-continue-row .task-kind-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+}
+
+.home-continue-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.home-continue-status {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 55%;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+}
+
+.home-continue-progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.home-continue-status[data-dot="wait"] {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.home-continue-status[data-dot="bad"] {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.home-continue-chevron {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+
+/* Creation card: the home column turns into the start of a conversation. */
+.workspace-welcome[data-home-mode="draft"] .workspace-welcome-inner > :not(.home-draft) {
+  display: none;
+}
+
+.home-draft[hidden] {
+  display: none;
+}
+
+.home-draft-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.home-draft-user {
+  align-self: flex-end;
+  max-width: 76%;
+  padding: 9px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--fill);
+}
+
+.home-draft-user p {
+  margin: 0;
+  font-size: var(--fs-read);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.home-draft-user .home-file-chips {
+  justify-content: flex-end;
+  padding: 0 0 6px;
+}
+
+.home-draft-agent {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.home-draft-lead {
+  margin: 4px 0 10px;
+  font-size: var(--fs-read);
+  line-height: 1.6;
+}
+
+.home-draft-card {
+  padding: 4px 16px 14px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.home-draft-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  padding: 8px 0;
+}
+
+.home-draft-row + .home-draft-row {
+  border-top: 1px solid var(--sep);
+}
+
+.home-draft-label {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+.home-draft-row input[type="text"],
+.home-draft-limit input {
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--sep);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-base);
+}
+
+body[data-theme="dark"] .home-draft-row input[type="text"],
+body[data-theme="dark"] .home-draft-limit input {
+  background: var(--fill);
+}
+
+.home-draft-row input[type="text"] {
+  width: min(360px, 100%);
+}
+
+.home-draft-row input:focus-visible,
+.home-draft-limit input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.home-draft-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.home-draft-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.home-draft-chip:hover:not(:disabled) {
+  background: var(--fill-2);
+}
+
+.home-draft-chip[aria-pressed="true"] {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  font-weight: 600;
+}
+
+.home-draft-chip:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.home-draft-files,
+.home-draft-limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.home-draft-files .home-file-chips {
+  padding: 0;
+}
+
+.home-draft-files small,
+.home-draft-limits small {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+
+.home-draft-add {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.home-draft-add:hover {
+  background: var(--fill-2);
+}
+
+.home-draft-add:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.home-draft-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+}
+
+.home-draft-limit input {
+  width: 76px;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-draft-note,
+.home-draft-error {
+  margin: 10px 0 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.home-draft-note {
+  color: var(--text-secondary);
+}
+
+.home-draft-error {
+  color: var(--danger);
+}
+
+.home-draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.home-draft-link {
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+.home-draft-link:hover {
+  text-decoration: underline;
+}
+
+.home-draft-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.home-draft-back {
+  margin-left: auto;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+.home-draft-back:hover {
+  color: var(--text);
+}
+
+@media (max-width: 760px) {
+  .home-composer-hint {
+    display: none;
+  }
+
+  .home-composer-bar {
+    justify-content: flex-end;
+  }
+
+  .home-draft-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .home-draft-user {
+    max-width: 90%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-brand-logo {
+    animation: none;
+  }
 }

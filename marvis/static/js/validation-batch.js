@@ -1,4 +1,10 @@
+import { resolveBatchItemStatus, resolveBatchStatus, statusPresentation } from "./task-status.js";
+
 export const validationBatchTaskType = "validation_batch";
+
+const STATUS_WORDS = Object.fromEntries(
+  ["running", "awaiting_confirm", "needs_review", "done", "failed"].map((key) => [key, statusPresentation(key).label]),
+);
 
 const terminalBatchStatuses = new Set([
   "completed",
@@ -6,29 +12,18 @@ const terminalBatchStatuses = new Set([
   "cancelled",
 ]);
 
-const statusLabels = {
-  created: "待启动",
-  queued: "排队中",
-  running: "运行中",
-  awaiting_confirmation: "待确认",
-  review_required: "需人工复核",
-  succeeded: "已通过",
-  completed: "已完成",
-  partial_failure: "部分失败",
-  failed: "失败",
-  cancelled: "已取消",
-};
-
 const stressLabels = {
   low: "低风险",
   medium: "中风险",
   high: "高风险",
 };
 
+// Stage suffix for the chip ("执行中 · PMML打分"); the status word itself comes
+// from js/task-status.js.
 const stageLabels = {
   queued: "排队中",
-  created: "待启动",
-  batch_created: "待启动",
+  created: "待开始",
+  batch_created: "待开始",
   scan: "材料扫描",
   input_confirmation: "确认字段",
   reproducibility: "可复现性",
@@ -88,27 +83,20 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function statusBucket(item) {
-  const status = item.status;
-  const outcome = item.outcome;
-  if (["failed", "cancelled"].includes(status) || ["fail", "failed"].includes(outcome)) {
-    return "failed";
-  }
-  if (["review_required", "awaiting_confirmation"].includes(status) || outcome === "manual_review") {
-    return "awaitingConfirmation";
-  }
-  if (["succeeded", "completed"].includes(status) || outcome === "pass") return "succeeded";
-  if (status === "running") return "running";
-  return "queued";
+// D16 (2026-10-14 redesign, batch 4): a batch item's word and tone come from
+// the shared resolver. The overview counters keep their buckets; a cancelled
+// item still counts in the 失败 column as before, while its chip is neutral.
+function itemStatus(item, batchStatus = "") {
+  return statusPresentation(resolveBatchItemStatus(item, { batchStatus }));
 }
 
-function itemTone(item) {
-  const bucket = statusBucket(item);
-  if (bucket === "succeeded") return "success";
-  if (bucket === "failed") return "danger";
-  if (bucket === "running") return "running";
-  if (bucket === "awaitingConfirmation") return "warning";
-  return "neutral";
+function statusBucket(item) {
+  const { key } = itemStatus(item);
+  if (["failed", "partial_failure", "needs_reconciliation", "cancelled"].includes(key)) return "failed";
+  if (["awaiting_confirm", "awaiting_next", "needs_review"].includes(key)) return "awaitingConfirmation";
+  if (key === "done") return "succeeded";
+  if (key === "running") return "running";
+  return "queued";
 }
 
 function normalizeBatchItem(rawItem, parentTaskId, fallbackOrdinal) {
@@ -170,8 +158,30 @@ function normalizeBatchItem(rawItem, parentTaskId, fallbackOrdinal) {
       item.analysisDownloadUrl,
     )),
     pendingReportDraft: booleanValue(item.pending_report_draft ?? item.pendingReportDraft),
+    repairRecords: (Array.isArray(item.repair_records) ? item.repair_records : [])
+      .map(objectValue)
+      .map((record) => ({
+        finding: textValue(record.finding),
+        action: textValue(record.action),
+        verified: record.verified === true,
+        undone: record.undone === true,
+      })),
+    repairCount: Number.isInteger(Number(item.repair_count)) ? Number(item.repair_count) : 0,
     manualReviewUrl,
   };
+}
+
+// B-line extension (2026-10-23 spec §5.4): one line per child with what the
+// platform handled, from the child's repair reports (never free text).
+export function batchItemRepairHtml(item) {
+  const records = Array.isArray(item?.repairRecords) ? item.repairRecords : [];
+  if (!records.length) return "";
+  const latest = records[records.length - 1];
+  const state = latest.undone ? "已撤销" : latest.verified ? "已处理" : "处理没成功，已还原";
+  const count = Number(item.repairCount) > 1 ? ` ${Number(item.repairCount)} 项` : "";
+  const text = latest.verified && !latest.undone ? latest.action : latest.finding;
+  return `<small class="validation-batch-repair" data-repair-state="${latest.undone ? "undone" : latest.verified ? "verified" : "rolled_back"}">`
+    + `${escapeHtml(state + count)}：${escapeHtml(text)}</small>`;
 }
 
 export function parseTaskDeepLink(search = "") {
@@ -322,8 +332,8 @@ export function normalizeValidationBatchPayload(rawPayload = {}, fallbackParentT
   };
 }
 
-function batchStatusLabel(status) {
-  return statusLabels[status] || status || "状态未知";
+function batchStatus(batch) {
+  return statusPresentation(resolveBatchStatus(batch));
 }
 
 function metricText(value, { percent = false } = {}) {
@@ -331,22 +341,20 @@ function metricText(value, { percent = false } = {}) {
   return percent ? `${(value * 100).toFixed(1)}%` : value.toFixed(4);
 }
 
-function itemStatusLabel(item) {
-  return statusLabels[item.status] || statusLabels[item.outcome] || item.status || "状态未知";
-}
 
-function itemStageLabel(item) {
+
+// Stages that name a status rather than a step; as a suffix they would put a
+// second status word on the chip ("需复核 · 已完成", batch 4 review U1).
+const STATUS_WORD_STAGES = new Set(["queued", "created", "batch_created", "completed", "failure"]);
+
+// One status word per chip; the step suffix only says where a running or
+// waiting model is ("执行中 · PMML打分", "待确认 · 确认字段").
+function itemProgressLabel(item, batchStatusValue = "") {
+  const status = itemStatus(item, batchStatusValue);
   const stage = firstText(item?.stage);
-  if (!stage) return "";
-  return stageLabels[stage] || stage;
-}
-
-function itemProgressLabel(item) {
-  const status = itemStatusLabel(item);
-  const stage = itemStageLabel(item);
-  const terminal = ["succeeded", "completed", "failed", "cancelled"].includes(item.status);
-  if (!stage || terminal || stage === status || item.stage === item.status) return status;
-  return `${status} · ${stage}`;
+  const stepStage = stage && !STATUS_WORD_STAGES.has(stage) && stageLabels[stage] ? stageLabels[stage] : "";
+  if (!stepStage || !["running", "awaiting_confirm"].includes(status.key)) return status.label;
+  return `${status.label} · ${stepStage}`;
 }
 
 export function validationBatchItemNeedsContractConfirmation(item) {
@@ -448,10 +456,11 @@ function itemLinksHtml(item, confirmedContractTaskIds = new Set()) {
   return links.length ? links.join("") : '<span class="validation-batch-muted">—</span>';
 }
 
-function itemRowHtml(item, requestedItemId, confirmedContractTaskIds) {
+function itemRowHtml(item, requestedItemId, confirmedContractTaskIds, batchStatusValue = "") {
   const highlighted = requestedItemId
     && [item.childTaskId, item.id].includes(requestedItemId);
   const modelLabel = [item.modelName, item.modelVersion].filter(Boolean).join(" · ");
+  const status = itemStatus(item, batchStatusValue);
   const statusDetail = item.stage && item.stage !== item.status
     ? `<small>${escapeHtml(item.stage)}</small>`
     : "";
@@ -463,7 +472,7 @@ function itemRowHtml(item, requestedItemId, confirmedContractTaskIds) {
     ` data-batch-item-id="${escapeHtml(item.id)}"`,
     ` data-batch-child-task-id="${escapeHtml(item.childTaskId)}">`,
     `<td><strong>${escapeHtml(modelLabel)}</strong>${failure}</td>`,
-    `<td><span class="validation-batch-status ${itemTone(item)}">${escapeHtml(itemStatusLabel(item))}</span>${statusDetail}</td>`,
+    `<td><span class="validation-batch-status ${status.tone}">${escapeHtml(status.label)}</span>${statusDetail}${batchItemRepairHtml(item)}</td>`,
     `<td class="numeric">${escapeHtml(metricText(item.ootKs, { percent: true }))}</td>`,
     `<td class="numeric">${escapeHtml(metricText(item.ootPsi))}</td>`,
     `<td>${escapeHtml(pmmlLabel(item.pmmlStatus))}</td>`,
@@ -490,15 +499,18 @@ export function validationBatchConfirmAllAction(
   );
   const failed = items.filter((item) => item.status === "failed").length;
   const cancelled = items.filter((item) => item.status === "cancelled").length;
-  const scope = [`${pending.length} 份待确认`, failed ? `${failed} 个失败` : "", cancelled ? `${cancelled} 个已取消` : "", notReady.length ? `${notReady.length} 个未就绪` : ""].filter(Boolean).join(" · ");
+  const scopeParts = [`${pending.length} 份待确认`, failed ? `${failed} 个失败` : "", cancelled ? `${cancelled} 个已取消` : "", notReady.length ? `${notReady.length} 个未就绪` : ""].filter(Boolean);
+  const scope = scopeParts.join(" · ");
   if (inFlight) {
-    return { visible: true, disabled: true, label: "正在生成全部报告…", scope };
+    return { visible: true, disabled: true, label: "正在生成全部报告…", scope, scopeParts, pendingCount: pending.length };
   }
   return {
     visible: true,
     disabled: pending.length === 0 || notReady.length > 0,
     label: "全部确认",
     scope,
+    scopeParts,
+    pendingCount: pending.length,
     title: notReady.length > 0
       ? "还有模型尚未完成报告结论草稿"
       : pending.length === 0
@@ -517,13 +529,14 @@ export function renderValidationBatchSwitcher(
   const selected = textValue(selectedChildTaskId) || batch.items[0]?.childTaskId || "";
   const buttons = (batch.items || []).map((item) => {
     const isSelected = item.childTaskId === selected;
-    const tone = itemTone(item);
-    const progress = itemProgressLabel(item);
+    const tone = itemStatus(item, batch.status).tone;
+    const progress = itemProgressLabel(item, batch.status);
     const version = item.modelVersion ? ` · ${item.modelVersion}` : "";
     return [
       `<button type="button" class="validation-batch-switcher-item${isSelected ? " is-selected" : ""}"`,
       ` data-tone="${escapeHtml(tone)}"`,
       ` data-batch-switch-child="${escapeHtml(item.childTaskId)}"`,
+      ` title="${escapeHtml(`${item.modelName || `模型 ${item.ordinal}`}${version}：${progress}`)}"`,
       ` role="radio" aria-checked="${isSelected ? "true" : "false"}" tabindex="${isSelected ? "0" : "-1"}">`,
       `<span class="validation-batch-switcher-name">${escapeHtml(item.modelName || `模型 ${item.ordinal}`)}${escapeHtml(version)}</span>`,
       `<small class="validation-batch-switcher-progress">${escapeHtml(progress)}</small>`,
@@ -537,8 +550,13 @@ export function renderValidationBatchSwitcher(
       `<button type="button" class="button compact primary" data-batch-confirm-all="true"`,
       confirmAll.disabled ? ' disabled aria-disabled="true"' : "",
       confirmAll.title ? ` title="${escapeHtml(confirmAll.title)}"` : "",
-      `>${escapeHtml(confirmAll.label)}</button>`,
-      `<span class="validation-batch-confirm-scope" role="status">${escapeHtml(confirmAll.scope || "")}</span>`,
+      `>${escapeHtml(confirmAll.label)}`,
+      // The header capsule shows only the pending count (mockup "全部确认 1");
+      // the full scope stays in the status line below for assistive tech.
+      confirmAll.pendingCount ? `<span class="validation-batch-confirm-count" aria-hidden="true">${escapeHtml(String(confirmAll.pendingCount))}</span>` : "",
+      "</button>",
+      // Separate platform phrases so each can translate and restore on its own.
+      `<span class="validation-batch-confirm-scope" role="status">${(confirmAll.scopeParts || []).map((part) => `<span>${escapeHtml(part)}</span>`).join(" · ")}</span>`,
     ].join("")
     : "";
   const summaryAction = !showSummary
@@ -591,12 +609,13 @@ export function renderValidationBatchOverview(
     : '<span class="validation-batch-summary-pending" aria-disabled="true">汇总待生成</span>';
   const rows = batch.items.length
     ? batch.items
-      .map((item) => itemRowHtml(item, requestedItemId, confirmedContractTaskIds))
+      .map((item) => itemRowHtml(item, requestedItemId, confirmedContractTaskIds, batch.status))
       .join("")
     : '<tr><td class="validation-batch-empty" colspan="8">批次项正在准备，点击刷新查看最新状态。</td></tr>';
   const batchError = batch.errorMessage
     ? `<p class="validation-batch-banner-error" role="alert">${escapeHtml(batch.errorMessage)}</p>`
     : "";
+  const headStatus = batchStatus(batch);
   const contractGuidance = batch.status === "awaiting_confirmation"
     ? [
       '<p class="validation-batch-contract-guidance">',
@@ -610,7 +629,7 @@ export function renderValidationBatchOverview(
     '<header class="validation-batch-head">',
     '<div><p class="validation-batch-eyebrow">MODEL VALIDATION BATCH</p>',
     '<div class="validation-batch-title-line"><h3>批次总览</h3>',
-    `<span class="validation-batch-status ${escapeHtml(batch.status)}">${escapeHtml(batchStatusLabel(batch.status))}</span></div>`,
+    `<span class="validation-batch-status ${headStatus.tone}">${escapeHtml(headStatus.label)}</span></div>`,
     `<p>${escapeHtml(batch.counts.total)} 个模型 · 独立执行，单项失败不阻塞其余模型</p></div>`,
     '<div class="validation-batch-head-actions">',
     '<button type="button" class="button compact secondary" data-batch-refresh="true">刷新批次</button>',
@@ -621,10 +640,10 @@ export function renderValidationBatchOverview(
     contractGuidance,
     '<div class="validation-batch-stats" aria-label="批次状态汇总">',
     `<div><strong>${escapeHtml(batch.counts.total)}</strong><span>总模型</span></div>`,
-    `<div><strong>${escapeHtml(batch.counts.running)}</strong><span>运行中</span></div>`,
-    `<div><strong>${escapeHtml(batch.counts.awaitingConfirmation)}</strong><span>待确认 / 人工复核</span></div>`,
-    `<div><strong>${escapeHtml(batch.counts.succeeded)}</strong><span>已通过</span></div>`,
-    `<div><strong>${escapeHtml(batch.counts.failed)}</strong><span>失败</span></div>`,
+    `<div><strong>${escapeHtml(batch.counts.running)}</strong><span>${STATUS_WORDS.running}</span></div>`,
+    `<div><strong>${escapeHtml(batch.counts.awaitingConfirmation)}</strong><span>${STATUS_WORDS.awaiting_confirm} / ${STATUS_WORDS.needs_review}</span></div>`,
+    `<div><strong>${escapeHtml(batch.counts.succeeded)}</strong><span>${STATUS_WORDS.done}</span></div>`,
+    `<div><strong>${escapeHtml(batch.counts.failed)}</strong><span>${STATUS_WORDS.failed}</span></div>`,
     "</div>",
     '<div class="validation-batch-table-wrap"><table class="validation-batch-table">',
     '<thead><tr><th>模型</th><th>状态 / 阶段</th><th>OOT KS</th><th>OOT PSI</th><th>PMML</th><th>压力风险</th><th>报告</th><th>操作</th></tr></thead>',
@@ -667,10 +686,15 @@ export function createValidationBatchPanelController({
   onProjectedChildChange = () => {},
   onLayoutChange = () => {},
   onBatchMeta = () => {},
+  onBatchStatus = () => {},
   confirmAllReportDrafts = async () => {},
   schedulePoll = (callback, delay) => setTimeout(callback, delay),
   cancelPoll = (handle) => clearTimeout(handle),
   pollIntervalMs = 1500,
+  // Every unfinished model is waiting on the user (fields, drafts): polling
+  // slows down; the user's own action refreshes at once (eval S5: ~49
+  // requests per 10 s while idle).
+  idlePollIntervalMs = 5000,
 }) {
   let activeTaskId = "";
   let currentPayload = null;
@@ -685,6 +709,7 @@ export function createValidationBatchPanelController({
   const initialItemId = textValue(deepLink.itemId);
   let selectedChildTaskId = initialItemId;
   let lastNotifiedItemCount;
+  let lastNotifiedStatus = "";
 
   function panelElement() {
     return getElementById("batchOverviewPanel");
@@ -705,6 +730,20 @@ export function createValidationBatchPanelController({
       onLayoutChange();
     } catch (_) {
       // Layout sync is presentational.
+    }
+  }
+
+  // The parent's aggregated status feeds the sidebar row and the title pill
+  // (D16); tell the app when it changes so both repaint from the same payload.
+  function notifyBatchStatus() {
+    if (!currentPayload) return;
+    const signature = `${activeTaskId}:${resolveBatchStatus(currentPayload)}`;
+    if (lastNotifiedStatus === signature) return;
+    lastNotifiedStatus = signature;
+    try {
+      onBatchStatus({ parentTaskId: activeTaskId });
+    } catch (_) {
+      // Status repaint is presentational.
     }
   }
 
@@ -778,6 +817,7 @@ export function createValidationBatchPanelController({
         panel.innerHTML = html;
       }
       notifyBatchMeta();
+      notifyBatchStatus();
       notifyLayout();
       return;
     }
@@ -789,6 +829,7 @@ export function createValidationBatchPanelController({
       confirmedContractTaskIds,
     });
     notifyBatchMeta();
+    notifyBatchStatus();
     notifyLayout();
   }
 
@@ -843,6 +884,8 @@ export function createValidationBatchPanelController({
       return;
     }
     const taskId = activeTaskId;
+    const active = items.some((item) => ["queued", "running"].includes(item.status));
+    const interval = !workbench || active ? pollIntervalMs : Math.max(pollIntervalMs, idlePollIntervalMs);
     pollHandle = schedulePoll(async () => {
       pollHandle = null;
       if (!activeTaskId || activeTaskId !== taskId) return;
@@ -861,7 +904,7 @@ export function createValidationBatchPanelController({
       ) {
         scheduleParentRefreshRetry(taskId);
       }
-    }, pollIntervalMs);
+    }, interval);
   }
 
   async function selectTask(task, { force = false } = {}) {
@@ -1050,6 +1093,7 @@ export function createValidationBatchPanelController({
     detailLoadErrorMessage = "";
     selectedChildTaskId = initialItemId;
     lastNotifiedItemCount = undefined;
+    lastNotifiedStatus = "";
     confirmedContractTaskIds.clear();
     const panel = panelElement();
     const switcher = switcherHost();
@@ -1147,6 +1191,9 @@ export function createValidationBatchPanelController({
   bindHost(switcherHost());
 
   return {
+    // The loaded payload for the selected batch parent, so the sidebar row and
+    // the title can aggregate the items instead of reading task.status alone.
+    batchPayload: (taskId) => (taskId && taskId === activeTaskId ? currentPayload : null),
     clear,
     focusRequestedItem,
     markContractConfirmed,

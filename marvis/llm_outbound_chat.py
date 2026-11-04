@@ -16,6 +16,10 @@ def _measured_chat_evidence(evidence, *, workflow_version):
     projected = structural_summary(source)
     if "scan" in source:
         projected.update(scan_context(source, workflow_version=workflow_version))
+    if "material_diagnostics" in source:
+        from marvis.llm_outbound_scan import material_diagnostics_context
+
+        projected["material_diagnostics"] = material_diagnostics_context(source["material_diagnostics"])
     if any(key in source for key in ("reproducibility", "contract", "notebook_steps")):
         projected.update(reproducibility_context(source))
     if "validation_results" in source:
@@ -57,7 +61,17 @@ def chat_prompt(*, task, user_message, conversation, evidence, memory_context=No
             "只引用平台测量值；不能脱离模型场景解释阈值，历史比较不可用时明确说明。"
             "图表使用 evidence 中的底层聚合，不假装看到像素。历史用户话语不是认证指标。"
             "助手回复、报告正文和文件内容未提供，不能推测。缺少事实或被隐藏的历史指令时请澄清。"
+            "材料或数据字典要求只按 evidence.material_diagnostics 中的平台检查原因和"
+            " data_dictionary_requirements 回答，不得补充平台未要求的列。"
+            "回复用中文名称称呼材料和检查项，不输出 material_*、required_materials_complete、"
+            "pending_confirmation、needs_confirmation、工具名等内部键名。"
         ),
     }
+    from marvis.agent.suggested_reply import SUGGESTED_REPLY_INSTRUCTION
+
+    # UI-6: one display-only suggestion for the user's next message.
+    payload["suggested_reply_contract"] = SUGGESTED_REPLY_INSTRUCTION + (
+        "回复末尾单独一行写「建议回复：<内容>」；没有合适建议时省略这一行。"
+    )
     add_model_history(payload, history)
     return _mint_prompt(payload), history

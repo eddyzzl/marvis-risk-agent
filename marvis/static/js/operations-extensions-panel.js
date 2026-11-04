@@ -40,7 +40,7 @@ export function createOperationsExtensionsPanel({ getElement, getTask, captureVi
     if (!current(owner)) return;
     Object.assign(owner, { schemas, datasets: sources.datasets, principal, schedules: schedules.schedules.filter((s) => taskOf(s.contract) === owner.taskId) });
     owner.listing.replaceChildren(element(owner.document, "h4", "已登记状态"), facts(owner.document, { schedules: owner.schedules.map((s) => `${s.contract.schedule_id} · 版本 ${s.contract.revision} · ${s.contract.enabled ? "启用" : "停止"}`), feedback_packages: feedback.packages.map((p) => `${p.package_hash} · ${p.recorded_count} 条结果`) }));
-    renderEditor(owner); status(owner, "来源与身份已读取。自然语言仅支持明确间隔和含时区起点，信息不足会要求补充。");
+    renderEditor(owner); status(owner, "来源与身份已读取。也可以在对话里说要监控什么、多久一次，由 Agent 填表。");
   }
   function schemaForm(owner, schema, initial, title, onSubmit, edit) {
     const choices = { dataset_id: owner.datasets.map((d) => ({ value: d.id, label: `${d.id} · ${d.row_count} 行` })), monitoring_ref: ["analysis.portfolio_run", "analysis.decision_ledger_feedback", "modeling.monitor_run", "strategy.run_strategy_monitoring"].map((value) => ({ value, label: { "analysis.portfolio_run": "组合分析", "analysis.decision_ledger_feedback": "在线决策反馈", "modeling.monitor_run": "模型监控", "strategy.run_strategy_monitoring": "策略监控" }[value] })) };
@@ -68,8 +68,12 @@ export function createOperationsExtensionsPanel({ getElement, getTask, captureVi
     proposalForm(owner, initial, monthly, edit);
   }
   function proposalForm(owner, initial, monthly, edit) {
-    initial = { ...initial, instruction: initial.instruction || undefined };
+    initial = { ...initial };
+    delete initial.instruction;
     const schema = JSON.parse(JSON.stringify(owner.schemas.proposal_schema));
+    // D-8: natural-language scheduling moved to the conversation form; this
+    // panel keeps only the raw contract fields (the advanced path).
+    delete schema.properties?.instruction;
     // Both branches are installed contracts. The explicit operation selects its
     // calendar form and never rewrites the server validation contract.
     schema.$defs.SchedulePayload.properties.calendar = { $ref: monthly ? "#/$defs/MonthlyCalendarPayload" : "#/$defs/CalendarPayload" };

@@ -139,3 +139,32 @@ def test_confirmation_service_rejects_candidates_changed_during_material_validat
     current = repository.get(task_id)
     assert current.revision == initial_revision + 1
     assert current.status == "pending_confirmation"
+
+
+def test_the_same_value_from_two_evidence_sources_is_not_ambiguous():
+    # Eval S5: the Notebook and the PMML both named probability_1, so the
+    # contract carried it twice and 自动审查 stopped the batch at field
+    # confirmation.
+    other = FieldEvidence("pmml_output", 0, "PMML", 1.0)
+    contract = _unique_contract(
+        pmml_output_field=(
+            FieldCandidate("probability_1", (_evidence(),)),
+            FieldCandidate("probability_1", (other,)),
+        ),
+        model_params=(
+            FieldCandidate({"intercept": 0}, (_evidence(),)),
+            FieldCandidate({"intercept": 0}, (other,)),
+        ),
+    )
+    confirmation = suggested_confirmation_from_contract(contract)
+    assert confirmation is not None
+    assert confirmation.pmml_output_field == "probability_1"
+    assert confirmation.model_params == {"intercept": 0}
+    # Different values still ask.
+    split = _unique_contract(
+        pmml_output_field=(
+            FieldCandidate("probability_1", (_evidence(),)),
+            FieldCandidate("probability_0", (other,)),
+        ),
+    )
+    assert suggested_confirmation_from_contract(split) is None

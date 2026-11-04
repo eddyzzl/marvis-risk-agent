@@ -19,6 +19,7 @@ from marvis.db import PluginRepository
 from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.repositories.strategy import StrategyRepository
 from tests.strategy_sample_design_support import (
+    confirm_strategy_score_direction,
     materialize_mature_strategy_sample_design,
 )
 
@@ -76,6 +77,7 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
     assert created.status_code == 200, created.text
     task = created.json()
     task_id = task["id"]
+    confirm_strategy_score_direction(client, task_id, direction="lower_is_riskier")
     sample_design_ref = materialize_mature_strategy_sample_design(
         client,
         task_id,

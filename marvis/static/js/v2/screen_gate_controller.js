@@ -1,4 +1,5 @@
 import { escapeHtml } from "../ui-utils.js";
+import { t } from "../i18n.js";
 import { columnFractions } from "../render-metrics.js";
 import {
   confirmationSnapshotAttributes,
@@ -107,7 +108,18 @@ function stateForWrap(wrap, messageId) {
 
 function buildRows(screen, interactive) {
   const dictionary = screen.dictionary && typeof screen.dictionary === "object" ? screen.dictionary : {};
+  // V3 5.7: confirmed workspace business names (display only; the checkbox
+  // value and every selection stay the physical code).
+  const fieldLabels = screen.field_labels && typeof screen.field_labels === "object" ? screen.field_labels : {};
+  const labelOf = (name) => {
+    const value = Object.prototype.hasOwnProperty.call(dictionary, name) ? dictionary[name] : "";
+    if (value) return value;
+    const label = Object.prototype.hasOwnProperty.call(fieldLabels, name) ? fieldLabels[name] : "";
+    return typeof label === "string" ? label : "";
+  };
   const scores = screen.scores && typeof screen.scores === "object" ? screen.scores : {};
+  // Backend-owned Chinese reading of each reason (raw reason kept as fallback).
+  const reasonLabels = screen.reason_labels && typeof screen.reason_labels === "object" ? screen.reason_labels : {};
   const selectedSet = new Set((screen.selected || []).map((value) => String(value)));
   const watchSet = new Set();
   for (const key of ["leakage_watch", "ks_decay_watch", "psi_watch", "split_shift"]) {
@@ -151,8 +163,8 @@ function buildRows(screen, interactive) {
       disabled: category === "unusable" || !interactive, // constant/sparse: no signal to select; also disabled when read-only
       isWatch: watchSet.has(name),
       isCategorical: categoricalSet.has(name),
-      businessName: dictionary[name] || "",
-      reason: String(reason || ""),
+      businessName: labelOf(name),
+      reason: String(reasonLabels[name] || reason || ""),
     });
   };
   for (const feature of screen.selected || []) pushRow(feature, undefined, "keep");
@@ -169,7 +181,7 @@ const CHIP_DEFS = [
   { key: "all", label: "全部" },
   { key: "selected", label: "已选" },
   { key: "leakage", label: "泄漏嫌疑" },
-  { key: "watch", label: "watch" },
+  { key: "watch", label: "需关注" },
   { key: "low_coverage", label: "低覆盖" },
   { key: "categorical", label: "类别列" },
 ];
@@ -287,11 +299,11 @@ function renderRow(row, fractions, index, hasDictionary) {
   const ksTip = `KS ${screenNum(row.ks)}`;
   const ivTip = ivTooltipText(row.iv);
   const businessNameCell = hasDictionary
-    ? `<td class="screen-meaning" title="${escapeHtml(row.businessName)}">${row.businessName ? escapeHtml(row.businessName) : '<span class="screen-meaning-empty">-</span>'}</td>`
+    ? `<td class="screen-meaning" translate="no" title="${escapeHtml(row.businessName)}">${row.businessName ? escapeHtml(row.businessName) : '<span class="screen-meaning-empty">-</span>'}</td>`
     : "";
   return `<tr class="${rowClasses.join(" ")}" data-screen-feature="${escapeHtml(row.name)}">
       <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" value="${escapeHtml(row.name)}"${row.checked ? " checked" : ""}${row.disabled ? " disabled" : ""} /></td>
-      <td class="screen-feat">${escapeHtml(row.name)}</td>
+      <td class="screen-feat" translate="no">${escapeHtml(row.name)}</td>
       ${businessNameCell}
       <td class="screen-num">${databarCell(row.ks, fractions.ks.get(index), ksTip)}</td>
       <td class="screen-num">${databarCell(row.iv, fractions.iv.get(index), ivTip)}${ivTierBadge(row.iv)}</td>
@@ -300,7 +312,7 @@ function renderRow(row, fractions, index, hasDictionary) {
       <td class="screen-num">${escapeHtml(screenNum(row.ksDecay))}</td>
       <td class="screen-num">${escapeHtml(screenNum(row.psiSplit))}</td>
       <td class="screen-recommendation">${recommendationBadge(row)}</td>
-      <td>${badges[row.category] || ""}${row.isWatch ? '<span class="screen-badge watch">watch</span>' : ""}</td>
+      <td>${badges[row.category] || ""}${row.isWatch ? '<span class="screen-badge watch">需关注</span>' : ""}</td>
       <td class="screen-exclusion-reason" title="${escapeHtml(row.reason)}">${row.reason ? escapeHtml(row.reason) : "—"}</td>
     </tr>`;
 }
@@ -645,7 +657,7 @@ export function handleScreenBulkClick(event, context = {}) {
   if (action === "select_visible") {
     const hasLeakage = Array.from(wrap.querySelectorAll(".screen-row.screen-leakage, .screen-row.screen-suspected")).length > 0;
     if (hasLeakage && typeof window !== "undefined" && typeof window.confirm === "function") {
-      const proceed = window.confirm("当前可见范围包含泄漏/疑似列，全选将把它们一并选中，是否继续？");
+      const proceed = window.confirm(t("当前可见范围包含泄漏/疑似列，全选将把它们一并选中，是否继续？"));
       if (!proceed) return true;
     }
   }

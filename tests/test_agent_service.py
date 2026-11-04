@@ -8,7 +8,6 @@ from marvis.agent.service import (
     agent_conclusions_confirmed,
     generate_word_conclusions,
     summarize_stage,
-    _stage_prompt,
     _strip_agent_response_preamble,
 )
 from marvis.domain import TaskRecord, TaskStatus
@@ -156,28 +155,6 @@ def test_word_conclusion_seeds_training_description_from_hyperparameters(monkeyp
     assert "max_depth=1" in description
     assert "num_boost_round=90" in description
     assert "直方图分裂、叶子优先生长和特征并行" not in description
-
-
-def test_word_conclusion_prompt_includes_hyperparameters():
-    prompt = json.loads(
-        _stage_prompt(
-            task=replace(_task(), validation_workflow_version=2),
-            stage="word_conclusion_draft",
-            evidence={
-                "validation_results": {
-                    "algorithm": "lgb",
-                    "basic_info": {
-                        "hyperparameters": {"max_depth": 1, "learning_rate": 0.02},
-                    },
-                }
-            },
-        )
-    )
-
-    hyperparameters = prompt["evidence"]["validation_results"]["basic_info"]["hyperparameters"]
-    assert hyperparameters["max_depth"] == 1
-    assert "TEXT:model_training_description" in prompt["instructions"]
-    assert "置 -9999" in prompt["instructions"]
 
 
 def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monkeypatch):
@@ -417,58 +394,6 @@ def test_metrics_summary_uses_complete_sectioned_fallback_after_failed_repair(mo
     assert metadata["summary_repair_failed"] is True
 
 
-def test_metrics_stage_prompt_stays_within_common_32k_context_window():
-    from marvis.agent.service import AGENT_SYSTEM_PROMPT, _stage_prompt
-    from marvis.llm_client import estimate_tokens
-
-    huge_curve = [{"x": index, "y": index / 1000} for index in range(2_000)]
-    evidence = {
-        "scan": {"checks": []},
-        "validation_results": {
-            "model_name": "A卡",
-            "basic_info": {
-                "feature_importance": [
-                    {"feature": f"feature_{index}", "importance": index}
-                    for index in range(1_000)
-                ],
-            },
-            "effectiveness": {
-                "overall": [{"split": "oot", "ks": 0.34, "auc": 0.72}],
-                "monthly_ks": [
-                    {"month": f"2025{month:02d}", "ks": 0.3}
-                    for month in range(1, 13)
-                ],
-                "bin_tables": {"oot": huge_curve},
-                "roc_ks_curves": {"oot": {"roc": huge_curve, "ks": huge_curve}},
-            },
-            "stress_test": {
-                "baseline": {"ks": 0.34, "bin_table": huge_curve},
-                "per_category": [
-                    {
-                        "category": "人行",
-                        "ks_after": 0.28,
-                        "dropped_features": [
-                            f"feature_{index}" for index in range(1_000)
-                        ],
-                        "bin_table": huge_curve,
-                    }
-                ],
-            },
-        },
-    }
-
-    prompt = _stage_prompt(
-        task=_task(),
-        stage="metrics",
-        evidence=evidence,
-    )
-
-    estimated = estimate_tokens(AGENT_SYSTEM_PROMPT) + estimate_tokens(prompt)
-    assert estimated + 4_096 < 32_768
-    assert "roc_ks_curves" not in prompt
-    assert "feature_999" not in prompt
-
-
 def test_summarize_stage_fallback_does_not_claim_memory_use(monkeypatch):
     class FailingClient:
         def complete(self, **_kwargs):
@@ -490,6 +415,24 @@ def test_summarize_stage_fallback_does_not_claim_memory_use(monkeypatch):
 
     assert metadata["fallback"] is True
     assert "memory_references" not in metadata
+
+
+def test_summarize_stage_without_typed_adapter_falls_back_before_any_client(monkeypatch):
+    def no_client(_profile):
+        raise AssertionError("a stage without a structural adapter must not build a client")
+
+    monkeypatch.setattr("marvis.agent.service._client", no_client)
+
+    content, metadata = summarize_stage(
+        task=_task(),
+        stage="report",
+        evidence={"validation_results": {"basic_info": {"n_samples": 17}}},
+        model_profile={"model_id": "m1"},
+        fallback="报告阶段已完成。",
+    )
+
+    assert content == "报告阶段已完成。"
+    assert metadata == {"llm_error": "此调用尚未提供已批准的结构摘要，未发送模型请求。", "fallback": True}
 
 
 def test_v2_pmml_scoring_summary_rejects_legacy_reproducibility_language(monkeypatch):

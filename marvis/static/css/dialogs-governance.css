@@ -4,16 +4,15 @@
   border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
   background: var(--surface);
   box-shadow:
-    0 16px 38px rgba(0, 0, 0, 0.18),
-    var(--glass-edge);
+    var(--shadow-pop);
 }
 
 /* Stronger, glassier scrim than the default task-dialog backdrop — the confirm
    is a hero moment and the content behind it should fall away. */
 .platform-confirm-dialog::backdrop {
   background: var(--scrim-bg);
-  -webkit-backdrop-filter: blur(9px) saturate(1.25);
-  backdrop-filter: blur(9px) saturate(1.25);
+  -webkit-backdrop-filter: var(--scrim-blur);
+  backdrop-filter: var(--scrim-blur);
 }
 
 .platform-confirm-panel {
@@ -134,13 +133,13 @@
 .platform-confirm-panel p {
   margin: 7px 0 0;
   color: var(--text-secondary);
-  font-size: 13.5px;
+  font-size: 13px;
   line-height: 1.62;
 }
 
 .platform-confirm-panel p strong {
   color: var(--text);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .platform-confirm-purge {
@@ -375,15 +374,15 @@ dialog.governance-settings-dialog,
   width: min(1180px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28), var(--glass-edge);
+  box-shadow: var(--shadow-pop);
 }
 
 /* Stronger, glassier scrim than the default task-dialog backdrop — this panel
    nearly fills the screen, so the background needs real separation. */
 .governance-settings-dialog::backdrop {
   background: rgba(0, 0, 0, 0.5);
-  -webkit-backdrop-filter: blur(12px) saturate(1.3);
-  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: var(--scrim-blur);
+  backdrop-filter: var(--scrim-blur);
 }
 
 .governance-settings-dialog[open] {
@@ -504,7 +503,7 @@ dialog.governance-settings-dialog,
 .governance-nav-group > span {
   padding: 0 10px 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
@@ -553,7 +552,7 @@ dialog.governance-settings-dialog,
   text-overflow: ellipsis;
   white-space: nowrap;
   color: inherit;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 20px;
 }
@@ -695,7 +694,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 }
 
 .governance-settings-head h2 {
-  font-size: 19px;
+  font-size: 20px;
 }
 
 .governance-settings-head p,
@@ -736,13 +735,13 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 .governance-panel .settings-group {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  background: var(--surface);
+  background: var(--card);
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  box-shadow: none;
 }
 
 body[data-theme="dark"] .governance-panel .settings-group {
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
+  box-shadow: none;
 }
 
 /* Empty status lines otherwise reserve min-height + margin and leave a blank
@@ -778,7 +777,7 @@ body[data-theme="dark"] .governance-panel .settings-group {
   height: 28px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: color-mix(in srgb, var(--text) 6.5%, transparent);
   color: var(--text-secondary);
 }
@@ -846,14 +845,21 @@ body[data-theme="dark"] .governance-panel .settings-group {
   color: var(--text-muted);
 }
 
+/* D15 (batch 6b): the environments are one grouped list (one rounded white
+   group, hairline rows, a checkmark on the current one), not a stack of boxes. */
 .exec-env-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
+  margin-top: 12px;
   border: 0;
-  border-radius: 0;
-  background: transparent;
-  overflow: visible;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+body[data-theme="dark"] .exec-env-list {
+  background: var(--fill);
 }
 
 .exec-env-list.is-saving {
@@ -867,23 +873,22 @@ body[data-theme="dark"] .governance-panel .settings-group {
   gap: 10px;
   align-items: center;
   width: 100%;
-  padding: 11px 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface-soft);
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   text-align: left;
   font: inherit;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: background 0.15s ease;
 }
 
 .exec-env-row + .exec-env-row {
-  border-top: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 var(--sep);
 }
 
 .exec-env-row:hover {
-  border-color: var(--option-hover);
   background: var(--option-hover);
 }
 
@@ -898,14 +903,15 @@ body[data-theme="dark"] .governance-panel .settings-group {
 }
 
 .exec-env-row:disabled:hover {
-  border-color: var(--border);
-  background: var(--surface-soft);
+  background: transparent;
 }
 
 .exec-env-row.selected {
-  border-color: var(--option-selected);
-  background: var(--option-selected);
-  box-shadow: none;
+  background: transparent;
+}
+
+.exec-env-row.selected:hover {
+  background: var(--option-hover);
 }
 
 .exec-env-check {
@@ -1058,7 +1064,7 @@ body[data-theme="dark"] .governance-panel .settings-group {
 
 .governance-page-lead h3,
 .governance-page-head h3 {
-  font-size: 18px;
+  font-size: 17px;
 }
 
 .governance-page-head {
@@ -1369,7 +1375,7 @@ dialog.agent-memory-dialog,
 
 .agent-memory-view-hint strong {
   color: var(--text);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .agent-memory-toolbar {
@@ -1521,7 +1527,7 @@ dialog.agent-memory-dialog,
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--card);
 }
 
 .agent-memory-item.merged {
@@ -1595,9 +1601,7 @@ dialog.agent-memory-dialog,
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--surface) 76%, transparent), transparent 42%),
-    var(--surface-soft);
+  background: var(--card);
 }
 
 .agent-memory-detail-header {
@@ -1615,7 +1619,7 @@ dialog.agent-memory-dialog,
 
 .agent-memory-detail-eyebrow {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -1623,7 +1627,7 @@ dialog.agent-memory-dialog,
 .agent-memory-title-block h3 {
   margin: 0;
   color: var(--text);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   text-wrap: pretty;
@@ -1674,7 +1678,7 @@ dialog.agent-memory-dialog,
   margin: 0;
   color: var(--text);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.35;
 }
 
@@ -1733,7 +1737,7 @@ dialog.agent-memory-dialog,
   min-width: 0;
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -1767,7 +1771,7 @@ dialog.agent-memory-dialog,
 
 .agent-memory-source-list li span {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
@@ -1925,7 +1929,7 @@ dialog.agent-memory-dialog,
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .material-source-tab:hover {
@@ -2365,7 +2369,7 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 
 .run-mode-copy strong {
   color: var(--text);
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.2;
 }
 
@@ -2522,7 +2526,7 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 #taskDialog .run-mode-card input { position: static; opacity: 1; width: 16px; height: 16px; clip-path: none; }
 #taskDialog .run-mode-copy strong { font-size: 13px; }
 #taskDialog .run-mode-copy small { font-size: 12px; line-height: 1.5; }
-#taskDialog .validation-create-model-card { display: block; border: 1px solid var(--border); border-radius: 12px; padding: 0; background: var(--surface); }
+#taskDialog .validation-create-model-card { display: block; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0; background: var(--card); }
 #taskDialog .validation-create-model-head { display: flex; align-items: center; gap: 12px; cursor: pointer; padding: 14px 16px; }
 #taskDialog .validation-create-model-head h3 { margin: 0; font-size: 14px; }
 #taskDialog .validation-create-model-head [data-extra-model-summary], #primaryModelSummary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }

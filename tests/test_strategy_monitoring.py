@@ -1074,7 +1074,10 @@ def test_red_monitoring_gate_rejects_plain_confirm_without_complete_disposition(
     def load_red(step_id):
         return red_output if step_id == run.id else None
 
-    assert "不能只回复" in monitoring_plain_confirm_error(plan, gate, load_red)
+    # Batch 3b (2026-10-14 redesign): the guard copy covers click and typing alike.
+    red_error = monitoring_plain_confirm_error(plan, gate, load_red)
+    assert "只确认不会执行" in red_error
+    assert "「观察」「调阈值」或「起新版本」" in red_error
     gate.inputs["disposition"] = "adjust_threshold"
     assert "还没有具体" in monitoring_plain_confirm_error(plan, gate, load_red)
     gate.inputs["threshold_patch"] = {"approval_rate": {"warn": 0.6}}

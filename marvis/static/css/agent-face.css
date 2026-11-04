@@ -1,0 +1,208 @@
+/* D6 (2026-10-14 redesign): the Agent avatar is the mascot's own head, real
+   logo pixels in two layers (head, eyes). The element paints the head; ::after
+   paints the eyes, pivoting on the eye centre. Expression comes from
+   data-face (idle | busy | wait | done | fail), set from the face field of
+   js/task-status.js; only the eye layer (::after) animates. Ported from the 2026-10-14 workbench mockup. */
+.agent-face {
+  --agent-face-size: 30px;
+  position: relative;
+  flex: none;
+  display: block;
+  width: var(--agent-face-size);
+  height: var(--agent-face-size);
+  background: url("../brand/marvis-face-base.png") center / 100% 100% no-repeat;
+}
+
+.agent-face[hidden] {
+  display: none;
+}
+
+.agent-face::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: url("../brand/marvis-face-eyes.png") center / 100% 100% no-repeat;
+  transform-origin: 51.4% 64%;
+  animation: agent-face-blink 5.2s infinite;
+}
+
+.agent-face[data-size="sm"] {
+  --agent-face-size: 22px;
+}
+
+.agent-face[data-size="lg"] {
+  --agent-face-size: 132px;
+}
+
+/* idle: the base blink */
+@keyframes agent-face-blink {
+  0%, 91%, 100% { transform: scaleY(1); }
+  94.5% { transform: scaleY(0.08); }
+}
+
+/* Expressions change the face only (2026-10-19 user feedback): the head
+   never nods, tilts, hops or shakes; only the eye layer changes. */
+
+/* working: the eyes scan side to side */
+.agent-face[data-face="busy"]::after {
+  animation: agent-face-scan 2.6s ease-in-out infinite;
+}
+
+@keyframes agent-face-scan {
+  0%, 100% { transform: translateX(-4.5%); }
+  46% { transform: translateX(4.5%); }
+  52% { transform: translateX(4.5%) scaleY(0.08); }
+  58% { transform: translateX(4.5%); }
+}
+
+/* waiting on you: the eyes go wide */
+.agent-face[data-face="wait"]::after {
+  animation: agent-face-wide 2.8s ease-in-out infinite;
+}
+
+@keyframes agent-face-wide {
+  0%, 100% { transform: scale(1.16); }
+  50% { transform: scale(1.08); }
+}
+
+/* done: happy eyes */
+.agent-face[data-face="done"]::after {
+  animation: none;
+  clip-path: inset(0 0 35.5% 0);
+  transform: translateY(4.5%) scale(1.12);
+}
+
+/* failed: flat red eyes */
+.agent-face[data-face="fail"]::after {
+  animation: none;
+  transform: scaleY(0.16);
+  filter: hue-rotate(172deg) saturate(1.5);
+}
+
+/* Agent message: the first message of each consecutive Agent run carries the
+   avatar in a 30px gutter (mockup .ai: 30px column + 11px gap); every Agent
+   message keeps the gutter so the bodies of one run stay aligned. */
+:root {
+  --agent-gutter: 41px;
+}
+
+.agent-message.assistant {
+  position: relative;
+  padding-left: var(--agent-gutter);
+}
+
+/* Agent-owned cards placed between messages (activity / confirm cards, retry
+   panel, the validation stage sections) sit in the same column as the Agent's
+   prose, so an Agent conversation keeps one left edge (batch 4 review U2).
+   Manual mode has no avatars, so its layout is untouched. */
+#resultScrollContent:has(.agent-message.assistant > .agent-face) > :is(#planDriverActions, #planRetryPanel, #scanSection, #notebookSection, #metricSection, #reportSection) {
+  margin-left: var(--agent-gutter);
+}
+
+.agent-message.assistant:has(> .agent-face) {
+  min-height: 30px;
+}
+
+.agent-message.assistant > .agent-face {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* Only the first message of a run shows its face; under 只看结果 every visible
+   result keeps one, since its run-start may be filtered out (review U4). */
+.agent-message.assistant:not([data-run-start]) > .agent-face {
+  display: none;
+}
+
+#resultWorkspace[data-thread-filter="results"] .agent-message.assistant[data-agent-result="true"] > .agent-face {
+  display: block;
+}
+
+/* Rail: the 22px face takes the 18px step-marker slot of a waiting step. */
+.step-head > .agent-face {
+  margin: -2px;
+}
+
+/* Title status: the live face is the status mark, so the pill drops its own
+   dot (one animated status mark per surface). */
+.task-hero-top-right > .agent-face:not([hidden]) + .task-pill::before {
+  display: none;
+}
+
+
+/* Chosen pet (2026-10-19 user feedback): the Agent avatar becomes that pet's
+   head, one still image per expression cropped from its spritesheet
+   (pets/<id>/faces/<face>.webp). Only the picture changes with the state;
+   nothing moves. No pet keeps the MARVIS head above.
+   V3 UI-18 (2026-10-28): the face images are cut along the head outline
+   (.omc/eval-tools/make_pet_heads.py), so no round frame or fill behind. */
+:root[data-agent-pet] .agent-face {
+  background-color: transparent;
+  background-size: contain;
+}
+
+:root[data-agent-pet] .agent-face::after {
+  display: none;
+}
+
+:root[data-agent-pet="naitang"] .agent-face { background-image: url("../pets/naitang/faces/idle.webp"); }
+:root[data-agent-pet="naitang"] .agent-face[data-face="busy"] { background-image: url("../pets/naitang/faces/busy.webp"); }
+:root[data-agent-pet="naitang"] .agent-face[data-face="wait"] { background-image: url("../pets/naitang/faces/wait.webp"); }
+:root[data-agent-pet="naitang"] .agent-face[data-face="done"] { background-image: url("../pets/naitang/faces/done.webp"); }
+:root[data-agent-pet="naitang"] .agent-face[data-face="fail"] { background-image: url("../pets/naitang/faces/fail.webp"); }
+:root[data-agent-pet="xiaojiu"] .agent-face { background-image: url("../pets/xiaojiu/faces/idle.webp"); }
+:root[data-agent-pet="xiaojiu"] .agent-face[data-face="busy"] { background-image: url("../pets/xiaojiu/faces/busy.webp"); }
+:root[data-agent-pet="xiaojiu"] .agent-face[data-face="wait"] { background-image: url("../pets/xiaojiu/faces/wait.webp"); }
+:root[data-agent-pet="xiaojiu"] .agent-face[data-face="done"] { background-image: url("../pets/xiaojiu/faces/done.webp"); }
+:root[data-agent-pet="xiaojiu"] .agent-face[data-face="fail"] { background-image: url("../pets/xiaojiu/faces/fail.webp"); }
+:root[data-agent-pet="auditbot"] .agent-face { background-image: url("../pets/auditbot/faces/idle.webp"); }
+:root[data-agent-pet="auditbot"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot/faces/busy.webp"); }
+:root[data-agent-pet="auditbot"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot/faces/wait.webp"); }
+:root[data-agent-pet="auditbot"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot/faces/done.webp"); }
+:root[data-agent-pet="auditbot"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot/faces/fail.webp"); }
+:root[data-agent-pet="auditbot-pro"] .agent-face { background-image: url("../pets/auditbot-pro/faces/idle.webp"); }
+:root[data-agent-pet="auditbot-pro"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot-pro/faces/busy.webp"); }
+:root[data-agent-pet="auditbot-pro"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot-pro/faces/wait.webp"); }
+:root[data-agent-pet="auditbot-pro"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot-pro/faces/done.webp"); }
+:root[data-agent-pet="auditbot-pro"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot-pro/faces/fail.webp"); }
+:root[data-agent-pet="auditbot-poly"] .agent-face { background-image: url("../pets/auditbot-poly/faces/idle.webp"); }
+:root[data-agent-pet="auditbot-poly"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot-poly/faces/busy.webp"); }
+:root[data-agent-pet="auditbot-poly"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot-poly/faces/wait.webp"); }
+:root[data-agent-pet="auditbot-poly"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot-poly/faces/done.webp"); }
+:root[data-agent-pet="auditbot-poly"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot-poly/faces/fail.webp"); }
+:root[data-agent-pet="auditbot-ink"] .agent-face { background-image: url("../pets/auditbot-ink/faces/idle.webp"); }
+:root[data-agent-pet="auditbot-ink"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot-ink/faces/busy.webp"); }
+:root[data-agent-pet="auditbot-ink"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot-ink/faces/wait.webp"); }
+:root[data-agent-pet="auditbot-ink"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot-ink/faces/done.webp"); }
+:root[data-agent-pet="auditbot-ink"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot-ink/faces/fail.webp"); }
+:root[data-agent-pet="auditbot-clay"] .agent-face { background-image: url("../pets/auditbot-clay/faces/idle.webp"); }
+:root[data-agent-pet="auditbot-clay"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot-clay/faces/busy.webp"); }
+:root[data-agent-pet="auditbot-clay"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot-clay/faces/wait.webp"); }
+:root[data-agent-pet="auditbot-clay"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot-clay/faces/done.webp"); }
+:root[data-agent-pet="auditbot-clay"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot-clay/faces/fail.webp"); }
+:root[data-agent-pet="auditbot-comic"] .agent-face { background-image: url("../pets/auditbot-comic/faces/idle.webp"); }
+:root[data-agent-pet="auditbot-comic"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot-comic/faces/busy.webp"); }
+:root[data-agent-pet="auditbot-comic"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot-comic/faces/wait.webp"); }
+:root[data-agent-pet="auditbot-comic"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot-comic/faces/done.webp"); }
+:root[data-agent-pet="auditbot-comic"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot-comic/faces/fail.webp"); }
+:root[data-agent-pet="auditbot-pixel"] .agent-face { background-image: url("../pets/auditbot-pixel/faces/idle.webp"); }
+:root[data-agent-pet="auditbot-pixel"] .agent-face[data-face="busy"] { background-image: url("../pets/auditbot-pixel/faces/busy.webp"); }
+:root[data-agent-pet="auditbot-pixel"] .agent-face[data-face="wait"] { background-image: url("../pets/auditbot-pixel/faces/wait.webp"); }
+:root[data-agent-pet="auditbot-pixel"] .agent-face[data-face="done"] { background-image: url("../pets/auditbot-pixel/faces/done.webp"); }
+:root[data-agent-pet="auditbot-pixel"] .agent-face[data-face="fail"] { background-image: url("../pets/auditbot-pixel/faces/fail.webp"); }
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-face,
+  .agent-face[data-face],
+  .agent-face::after,
+  .agent-face[data-face]::after {
+    animation: none;
+  }
+
+  /* Still, waiting keeps its wide eyes so it reads apart from idle; done and
+     fail keep their static eye shapes from the rules above. */
+  .agent-face[data-face="wait"]::after {
+    transform: scale(1.12);
+  }
+}

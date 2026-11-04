@@ -89,7 +89,7 @@ export function renderJoinC1Form(message, options = {}) {
   const rows = c1.files
     .map(
       (file) => `<tr>
-      <td class="c1-file"><button type="button" class="c1-file-preview" data-c1-preview-dataset="${escapeHtml(file.dataset_id || "")}" data-c1-preview-name="${escapeHtml(file.name || "")}" title="预览前 10 行">${escapeHtml(file.name || "")}</button></td>
+      <td class="c1-file"><button type="button" class="c1-file-preview" data-gate-passive-control data-c1-preview-dataset="${escapeHtml(file.dataset_id || "")}" data-c1-preview-name="${escapeHtml(file.name || "")}" title="预览前 10 行">${escapeHtml(file.name || "")}</button></td>
       <td>${escapeHtml(String(file.row_count ?? ""))}</td>
       <td>${escapeHtml(String(file.n_cols ?? ""))}</td>
       <td>${file.has_target ? "✓" : ""}</td>
@@ -314,31 +314,44 @@ export function renderJoinKeyPicker(message, options = {}) {
   const cards = payload.features.map((feature) => {
     const featureId = String(feature.feature_id || "");
     const featureName = String(feature.feature_name || featureId);
-    const selected = new Set((feature.selected_anchor_cols || []).map(String));
-    const currentKeys = (feature.current_keys || []).map((pair) => {
+    // An option submits its `value`: the anchor column, or "anchor=feature" when one
+    // anchor column has several feature-column candidates. Older payloads carry only
+    // anchor columns.
+    const selected = new Set((feature.selected_values || feature.selected_anchor_cols || []).map(String));
+    // key_options = every data-resolved candidate (current key checked); older payloads
+    // only carry current_keys.
+    const keyOptions = Array.isArray(feature.key_options) ? feature.key_options : (feature.current_keys || []);
+    const currentKeys = keyOptions.map((pair) => {
       const anchorCol = String(pair.anchor_col || "");
       const featureCol = String(pair.feature_col || "");
+      const value = String(pair.value || anchorCol);
+      const rate = pair.match_rate === undefined || pair.match_rate === null
+        ? ""
+        : `<small>命中 ${escapeHtml(joinKeyRate(pair.match_rate))}</small>`;
       return `<label class="join-key-option">
-        <input type="checkbox" data-join-key-feature="${escapeHtml(featureId)}" value="${escapeHtml(anchorCol)}"${selected.has(anchorCol) ? " checked" : ""}${disabledAttr}>
-        <span><code>${escapeHtml(anchorCol)}</code><span aria-hidden="true"> = </span><code>${escapeHtml(featureCol)}</code></span>
+        <input type="checkbox" data-join-key-feature="${escapeHtml(featureId)}" data-join-key-anchor="${escapeHtml(anchorCol)}" value="${escapeHtml(value)}"${selected.has(value) ? " checked" : ""}${disabledAttr}>
+        <span><code>${escapeHtml(anchorCol)}</code><span aria-hidden="true"> = </span><code>${escapeHtml(featureCol)}</code></span>${rate}
       </label>`;
     }).join("");
     const alternatives = (feature.alternatives || []).map((alternative) => {
       const anchorCols = (alternative.anchor_cols || []).map(String);
+      const optionValues = (Array.isArray(alternative.values) ? alternative.values : anchorCols).map(String);
       const pairLabel = (alternative.key_pairs || []).map((pair) => `${pair[0]}=${pair[1]}`).join(" + ");
       const risks = [
         alternative.feature_key_unique ? "键唯一" : "键不唯一",
         alternative.fan_out_detected ? "会膨胀" : "不膨胀",
       ].join(" · ");
+      const action = alternative.kind === "switch" ? "改用 " : "";
       return `<button type="button" class="join-key-suggestion${alternative.fan_out_detected ? " is-risk" : ""}"
         data-join-key-suggestion="${escapeHtml(featureId)}"
-        data-join-key-columns="${escapeHtml(JSON.stringify(anchorCols))}"${disabledAttr}>
-        <span>${escapeHtml(pairLabel || anchorCols.join(" + "))}</span>
+        data-join-key-columns="${escapeHtml(JSON.stringify(optionValues))}"${disabledAttr}>
+        <span>${escapeHtml(action)}${escapeHtml(pairLabel || anchorCols.join(" + "))}</span>
         <small>命中 ${escapeHtml(joinKeyRate(alternative.match_rate))} · ${escapeHtml(risks)}</small>
       </button>`;
     }).join("");
-    return `<article class="join-key-card" data-join-key-card="${escapeHtml(featureId)}">
-      <header><div><strong>${escapeHtml(featureName)}</strong>${featureName !== featureId ? `<small>${escapeHtml(featureId)}</small>` : ""}</div>
+    const currentCols = JSON.stringify([...selected].sort());
+    return `<article class="join-key-card" data-join-key-card="${escapeHtml(featureId)}" data-join-key-current="${escapeHtml(currentCols)}">
+      <header><div><strong${featureName !== featureId ? ` title="${escapeHtml(featureId)}"` : ""}>${escapeHtml(featureName)}</strong></div>
         <span>当前命中 ${escapeHtml(joinKeyRate(feature.current_match_rate))}</span></header>
       <div class="join-key-options" role="group" aria-label="${escapeHtml(featureName)} 拼接键">${currentKeys}</div>
       ${alternatives ? `<div class="join-key-alternatives"><span>Agent 候选方案（点击即可选中）</span>${alternatives}</div>` : ""}
@@ -416,6 +429,59 @@ export async function submitJoinKeySelection(button, rawContext = {}) {
   }
 }
 
+// A ticked key that is not applied yet: the gate's own 「确认并执行拼接」 would
+// run the diagnosed key instead, so it waits until the change is applied or
+// undone (review M1).
+export function joinKeySelectionPending(form) {
+  if (!form) return false;
+  for (const card of form.querySelectorAll("[data-join-key-card]")) {
+    let current = [];
+    try { current = JSON.parse(card.getAttribute("data-join-key-current") || "[]"); } catch { current = []; }
+    const checked = [...card.querySelectorAll("[data-join-key-feature]:checked")].map((input) => input.value).sort();
+    if (JSON.stringify(checked) !== JSON.stringify([...current].map(String).sort())) return true;
+  }
+  return false;
+}
+
+export function syncJoinKeyConfirmState(form) {
+  if (!form) return false;
+  const pending = joinKeySelectionPending(form);
+  form.dataset.joinKeyPending = pending ? "true" : "false";
+  const gate = form.closest("article, .driver-analysis-section") || form.parentElement;
+  for (const button of gate?.querySelectorAll?.("[data-driver-confirm]") || []) {
+    if (pending) {
+      if (!button.disabled) button.dataset.joinKeyHeld = "true";
+      button.disabled = true;
+      button.title = "请先点「应用拼接键并重新诊断」，或撤回勾选的改动";
+    } else if (button.dataset.joinKeyHeld === "true") {
+      delete button.dataset.joinKeyHeld;
+      button.disabled = false;
+      button.removeAttribute("title");
+    }
+  }
+  return pending;
+}
+
+export function handleJoinKeyOptionChange(event) {
+  const input = event.target?.closest?.("[data-join-key-feature]");
+  if (!input) return false;
+  // One anchor column joins on one feature column: checking another candidate of the
+  // same anchor column replaces the previous one.
+  const anchorCol = input.getAttribute?.("data-join-key-anchor");
+  if (input.checked && anchorCol) {
+    const featureId = input.getAttribute("data-join-key-feature");
+    for (const other of input.closest(".join-key-picker")?.querySelectorAll?.("[data-join-key-feature]") || []) {
+      if (other !== input
+        && other.getAttribute("data-join-key-feature") === featureId
+        && other.getAttribute("data-join-key-anchor") === anchorCol) {
+        other.checked = false;
+      }
+    }
+  }
+  syncJoinKeyConfirmState(input.closest(".join-key-picker"));
+  return true;
+}
+
 export function handleJoinKeyConfirmClick(event, context = {}) {
   const suggestion = event.target?.closest?.("[data-join-key-suggestion]");
   if (suggestion) {
@@ -430,6 +496,7 @@ export function handleJoinKeyConfirmClick(event, context = {}) {
         input.checked = selected.includes(input.value);
       }
     }
+    syncJoinKeyConfirmState(form);
     return true;
   }
   const button = event.target?.closest?.("[data-join-key-confirm]");

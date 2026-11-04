@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 import textwrap
 
@@ -351,10 +352,40 @@ def test_workflow_cards_use_border_first_responsive_theme_styles() -> None:
     end = styles.index("/* Historical input-confirmation", start)
     card_styles = styles[start:end]
 
-    assert "border-radius: 8px" in card_styles
-    assert "border-left: 3px solid var(--danger)" in card_styles
-    assert "border-left: 3px solid var(--warning)" in card_styles
+    # D4/D14 (batch 6b): flat cards like every other result; no coloured
+    # stripe or tint, only the small status mark carries colour. Dark mode
+    # follows the shared tokens.
+    assert "border-radius: var(--radius)" in card_styles
+    assert "background: var(--card);" in card_styles
+    assert "border-left" not in card_styles
+    assert "color-mix(in srgb, var(--danger)" not in card_styles
+    assert "color-mix(in srgb, var(--warning)" not in card_styles
     assert "box-shadow: none" in card_styles
-    assert 'body[data-theme="dark"] .workflow-error-card' in card_styles
-    assert 'body[data-theme="dark"] .workflow-ingest-notice' in card_styles
+    assert "background: var(--danger);" in card_styles
     assert "@media (max-width: 640px)" in card_styles
+    assert ".workflow-error-card__chain > div" in card_styles
+
+
+def test_failure_card_reads_as_a_chain_and_promotes_the_first_actionable_option() -> None:
+    script = """
+        import { workflowErrorDiagnosticHtml } from "./marvis/static/js/v2/workflow_error_card.js";
+        const html = workflowErrorDiagnosticHtml({
+          title: "切分样本需要重新执行", summary: "列裁剪中断", cause: "空列名", location: "切分样本",
+          evidence: [{ label: "规范列名", value: "C0" }], impact: "后续建模步骤尚未执行。",
+          agent_prompt: "是否重试？",
+          recovery_actions: [{ label: "无命令" }, { label: "由 Agent 重试", command: "请帮我解决并重试" }, { label: "跳过", command: "跳过", consequence: "报告注明未复现" }],
+          actions: ["无需重新上传材料。"], retryable: true,
+        });
+        process.stdout.write(JSON.stringify(html));
+    """
+    result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    html = json.loads(result.stdout)
+    order = [html.index(label) for label in ("<dt>报错</dt>", "<dt>问题原因</dt>", "<dt>我查了</dt>", "<dt>影响</dt>")]
+    assert order == sorted(order)
+    assert "后续建模步骤尚未执行。" in html
+    # The first action with a command is the primary one; a consequence shows only when given.
+    assert 'class="button compact primary" data-workflow-recovery-command="请帮我解决并重试"' in html
+    assert 'class="button compact" data-workflow-recovery-command="跳过"' in html
+    assert "<small>报告注明未复现</small>" in html and html.count("<small>") == 1
+    assert "无命令" not in html

@@ -126,7 +126,9 @@ def test_changed_selection_stops_refit_and_model_card_delivery(tmp_path):
     assert refit.ok, refit.error
     assert not refit.output['refit']['applied']
     assert refit.output['artifact_id'] == trained.output['artifact_id']
-    assert 'selection evidence content changed' in refit.output['refit']['reason']
+    failure = refit.output['refit']['failure_detail']
+    assert failure['error_type'] == 'FeatureError'
+    assert 'selection evidence content changed' in failure['message']
     delivered = runner.invoke(ToolRef('modeling', 'post_training_action'), {
         'experiment_id': trained.output['experiment_id'],
         'sample_dataset_id': dataset.id, 'actions': ['export_pmml'],

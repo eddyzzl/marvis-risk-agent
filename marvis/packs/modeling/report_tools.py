@@ -256,7 +256,7 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         score_bands = diagnostic_rows(score_bands, refit_scope)
         oot_bin = diagnostic_rows(oot_bin, refit_scope)
         statuses.append(ReportSectionStatus(section="development_refit_scope", available=True,
-            reason="最终 development 拟合诊断；父候选留出选择证据独立引用，原 test 已参与最终拟合。"))
+            reason="交付模型用 train+test 重新拟合；选择依据仍是所选实验的留出集，原 test 已参与最终拟合。"))
     structured_summary = _report_structured_summary(
         project_meta=project_meta,
         dataset_split=dataset_split,
@@ -273,14 +273,18 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         stress_low_pricing=low_pricing,
         section_status=statuses,
     )
+    display_labels: dict = {}
     if refit_scope is not None:
-        from marvis.packs.modeling.development_refit_reporting import model_narrative
+        from marvis.packs.modeling.development_refit_reporting import model_narrative, report_display_labels
 
         # The ordinary report DTO labels train/test partitions. It does not
         # authenticate this producer's changed final-fit scope; retain exact
         # native narrative until a dedicated generative contract exists.
         narratives = _fallback_report_narratives()
-        narratives["model"] = model_narrative()
+        narratives["model"] = model_narrative(refit_scope)
+        # The workbook shows the refit split/purpose codes in business Chinese;
+        # the structured output keeps the codes.
+        display_labels = report_display_labels()
     else:
         narratives = _guard_no_invented_numbers(
             _draft_report_narratives(
@@ -310,6 +314,7 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
                 stress_low_pricing=low_pricing,
                 narratives=narratives,
                 section_status=statuses,
+                display_labels=display_labels,
             ),
             staged_report.path,
         )

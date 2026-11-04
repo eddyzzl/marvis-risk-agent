@@ -12,7 +12,7 @@ from marvis.packs.modeling._runtime import (
     _task_artifact,
     _task_experiment,
 )
-from marvis.packs.modeling.delivery_tools import _artifact_capabilities
+from marvis.packs.modeling.delivery_tools import _artifact_capabilities, refit_train_oot_overfit_flag
 from marvis.packs.modeling.report_tools import _scorecard_table_rows
 from marvis.packs.modeling.train_tools import _binary_selection_score_and_metric, _overfit_penalized_test_ks, _refit_champion_on_train_plus_test, _resolve_scenario_eval_metric
 
@@ -110,12 +110,27 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         selected = next((row for row in rows if row.get("id") == selected_id), None)
         if selected is None:
             raise ModelingError(f"selected_experiment_id is not in candidates: {selected_id}")
-        selection_metric = str(inputs.get("selection_metric") or "manual")
-        selection_reason = "用户指定实验。"
         policy_decision = _selection_policy_decision(selected, selection_policy, explicit=True)
         if policy_decision["status"] == "blocked":
             raise ModelingError(_selection_policy_block_message(selected_id, policy_decision))
+        # The selection gate always submits an explicit id, including when the
+        # user simply confirms the pre-checked platform recommendation. Only a
+        # changed pick is a user override.
+        recommended_id, recommended_metric = _platform_recommendation(
+            rows, target_type=target_type, policy=selection_policy, eval_metric=eval_metric
+        )
+        if recommended_id == selected_id:
+            selection_origin = "platform_recommended_user_confirmed"
+            selection_metric = str(inputs.get("selection_metric") or recommended_metric)
+            selection_reason = f"平台推荐候选（按 {recommended_metric} 选优），用户已确认。"
+        else:
+            selection_origin = "user_override"
+            selection_metric = str(inputs.get("selection_metric") or "manual")
+            selection_reason = (
+                f"用户指定实验（平台推荐为 `{recommended_id}`）。" if recommended_id else "用户指定实验。"
+            )
     else:
+        selection_origin = "platform_auto"
         selected, selection_metric, policy_decision = _pick_best_comparison_row_with_policy(
             rows,
             target_type=target_type,
@@ -193,8 +208,19 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     ks_ci_note = _ks_ci_overlap_note(selected, rows, target_type=target_type)
     if ks_ci_note:
         selection_reason = f"{selection_reason} {ks_ci_note}"
+    evaluation_evidence = _selection_evaluation_evidence(
+        selected_id=selected_id,
+        artifact_id=artifact_id,
+        final_experiment_id=final_experiment_id,
+        final_artifact_id=final_artifact_id,
+        pre_refit_metrics=pre_refit_metrics,
+        final_metrics=final_metrics,
+        refit_info=refit_info,
+    )
     return {
         "selected_experiment_id": final_experiment_id,
+        "selection_origin": selection_origin,
+        "evaluation_evidence": evaluation_evidence,
         **({"business_measurement": business_measurement} if business_measurement is not None else {}),
         "report_experiment_ids": report_experiment_ids,
         "artifact_id": final_artifact_id,
@@ -218,6 +244,73 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "experiments": rows,
         "refit": refit_info,
         "ks_ci_note": ks_ci_note,
+    }
+
+
+def _platform_recommendation(
+    rows: list[dict], *, target_type: str, policy: dict, eval_metric: str
+) -> tuple[str, str]:
+    """The candidate automatic selection would pick, so an explicit pick can be
+    labelled as a confirmed recommendation or a user override. Works on row
+    copies: the pre-filter annotates rows it excludes."""
+    try:
+        best, metric, _decision = _pick_best_comparison_row_with_policy(
+            [dict(row) for row in rows],
+            target_type=target_type,
+            policy=policy,
+            eval_metric=eval_metric,
+        )
+    except ModelingError:
+        return "", ""
+    return str(best.get("id") or ""), metric
+
+
+def _selection_evaluation_evidence(
+    *,
+    selected_id: str,
+    artifact_id: str,
+    final_experiment_id: str,
+    final_artifact_id: str,
+    pre_refit_metrics: dict,
+    final_metrics: dict,
+    refit_info: dict,
+) -> dict:
+    """Name the metrics that evaluate the final choice.
+
+    A champion refit trains on train+test, so the delivered model has no
+    independent test evaluation (the native development refit has no OOT
+    evaluation either). The selected experiment's held-out metrics stay the
+    evaluation evidence and are labelled as such for every consumer.
+    """
+    refit_applied = bool(refit_info.get("applied")) and final_experiment_id != selected_id
+    if not refit_applied:
+        return {
+            "basis": "selected_experiment",
+            "experiment_id": selected_id,
+            "artifact_id": artifact_id,
+            "delivered_experiment_id": final_experiment_id,
+            "delivered_artifact_id": final_artifact_id,
+            "refit_applied": False,
+            "metrics": {k: v for k, v in final_metrics.items() if v is not None},
+            "note": "",
+        }
+    oot_note = (
+        "交付模型未再做 OOT 评估"
+        if refit_info.get("oot_evaluation") == "not_performed"
+        else "交付模型的 OOT 指标单独列示"
+    )
+    return {
+        "basis": "pre_refit_heldout",
+        "experiment_id": selected_id,
+        "artifact_id": artifact_id,
+        "delivered_experiment_id": final_experiment_id,
+        "delivered_artifact_id": final_artifact_id,
+        "refit_applied": True,
+        "metrics": dict(pre_refit_metrics),
+        "note": (
+            f"评估指标来自所选实验 `{selected_id}` 的留出集；交付模型 `{final_experiment_id}` "
+            f"用相同超参在 train+test 上重新拟合，原 test 已并入训练、没有独立 test 评估，{oot_note}。"
+        ),
     }
 
 
@@ -271,13 +364,39 @@ def _ks_ci_overlap_note(selected: dict, rows: list[dict], *, target_type: str) -
 #: non-empty-test contract (train_tools._refit_champion_on_train_plus_test); that
 #: slice is in-distribution with the training data, so any test_*/weighted_test_*
 #: KS/AUC/lift and the test-vs-train PSIs on it are near-meaningless. train_*,
-#: oot_*, weighted_train/oot_*, psi_oot_vs_train and overfit_flag stay honest
-#: (refit trained on train+test, OOT untouched) and are left intact.
+#: oot_*, weighted_train/oot_* and psi_oot_vs_train stay honest (refit trained on
+#: train+test, OOT untouched) and are left intact. The stored overfit_flag mixed
+#: in the holdout train/test gap, so it is dropped here and recomputed from
+#: train/OOT only (delivery_tools.refit_train_oot_overfit_flag).
 def _is_refit_holdout_tainted_key(key: str) -> bool:
+    # The stored overfit flag and train/test gap were computed against the same
+    # in-distribution slice, so they go with the test metrics (review M3).
     return (
         key in ("psi_test_vs_train", "weighted_psi_test_vs_train")
+        or key in ("overfit_flag", "overfit_train_test_gap", "overfit_gap_tt")
         or key.startswith(("test_", "weighted_test_"))
     )
+
+
+_REFIT_FAILURE_CAUSES = (
+    (MemoryError, "内存不足"),
+    (TimeoutError, "运行超时"),
+)
+
+
+def _refit_failure(exc: Exception) -> dict:
+    """A failed champion refit, explained in business Chinese.
+
+    The card shows ``reason``; the raw exception goes to ``failure_detail`` for
+    troubleshooting and is never shown as the reason (eval: the card read
+    「未重新拟合：全量重训失败…<traceback text>」)."""
+    cause = next((label for kind, label in _REFIT_FAILURE_CAUSES if isinstance(exc, kind)), "训练过程出错")
+    return {
+        "applied": False,
+        "requested": True,
+        "reason": f"用 train+test 全量重训时{cause}，没有生成新模型；已保留原候选模型，后续报告和交付都使用它。",
+        "failure_detail": {"error_type": type(exc).__name__, "message": str(exc)[:2000]},
+    }
 
 
 def _apply_champion_refit(
@@ -324,7 +443,7 @@ def _apply_champion_refit(
             runtime, task_id=experiment.task_id, experiment=experiment, recipe=recipe,
         )
     except Exception as exc:  # noqa: BLE001 - refit is an enhancement, never a hard blocker
-        return {"applied": False, "requested": True, "reason": f"全量重训失败,已保留原候选:{exc}"}
+        return _refit_failure(exc)
     if refit is None:
         return {"applied": False, "requested": True, "reason": "候选实验缺少可全量重训的切分信息,已保留原候选。"}
     refit_config, result = refit
@@ -359,6 +478,15 @@ def _apply_champion_refit(
         for k, v in refit_row.items()
         if _is_metric_key(k) and v is not None and _is_refit_holdout_tainted_key(k)
     }
+    # The train/OOT overfit trigger stays honest after the refit; consumers of
+    # metrics.overfit_flag must not see None just because the stored flag mixed
+    # in the holdout gap. Without OOT the champion's pre-refit flag is carried.
+    overfit_flag = refit_train_oot_overfit_flag(post_metrics)
+    overfit_basis = "refit_train_oot"
+    if overfit_flag is None and isinstance(pre_refit_metrics.get("overfit_flag"), bool):
+        overfit_flag, overfit_basis = pre_refit_metrics["overfit_flag"], "pre_refit_heldout"
+    if overfit_flag is not None:
+        post_metrics["overfit_flag"] = overfit_flag
     return {
         "applied": True,
         "requested": True,
@@ -375,6 +503,7 @@ def _apply_champion_refit(
         "refit_holdout_metrics": refit_holdout_metrics,
         "oot_ks_before_refit": pre_refit_metrics.get("oot_ks"),
         "oot_ks_after_refit": post_metrics.get("oot_ks"),
+        "overfit_flag_basis": overfit_basis if overfit_flag is not None else None,
     }
 
 

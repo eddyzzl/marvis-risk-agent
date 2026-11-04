@@ -6,7 +6,9 @@ import subprocess
 import sys
 
 from marvis.files import write_json_atomic
+from marvis.process_timing import timed
 from marvis.local_execution import (
+    SETTINGS_UNREADABLE, SETTINGS_UNREADABLE_MESSAGE, SETTINGS_UNREADABLE_NEXT_ACTION,
     LocalExecutionIsolationError, execution_capability, execution_command,
 )
 
@@ -70,13 +72,20 @@ def load_execution_environment(workspace: Path) -> ExecutionEnvironmentSettings:
         if not raw.strip():
             raise json.JSONDecodeError("empty file", raw, 0)
         payload = json.loads(raw)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        if not isinstance(payload, dict):
+            raise ValueError("settings payload is not an object")
+    except (ValueError, OSError, UnicodeDecodeError) as exc:
+        # The file exists, so a choice was made but cannot be known. Never
+        # reset the Notebook network mode to trusted_local: carry a refusing
+        # sentinel so every Notebook start fails closed until the user
+        # re-saves the settings. Worker tools fail closed independently in
+        # plugins.native_isolation.configured_mode.
         logger.warning(
-            "execution_environment: failed to read %s (%s); falling back to defaults",
+            "execution_environment: failed to read %s (%s); Notebook execution fails closed",
             path,
-            exc,
+            type(exc).__name__,
         )
-        return ExecutionEnvironmentSettings()
+        return ExecutionEnvironmentSettings(notebook_network_mode=SETTINGS_UNREADABLE)
     return ExecutionEnvironmentSettings(
         execution_mode=str(payload.get("execution_mode") or "jupyter_kernel"),
         kernel_name=str(payload.get("kernel_name") or "python3"),
@@ -93,10 +102,16 @@ def load_execution_environment(workspace: Path) -> ExecutionEnvironmentSettings:
     )
 
 
+def execution_settings_unreadable(settings: ExecutionEnvironmentSettings) -> bool:
+    return settings.notebook_network_mode == SETTINGS_UNREADABLE
+
+
 def save_execution_environment(
     workspace: Path,
     settings: ExecutionEnvironmentSettings,
 ) -> ExecutionEnvironmentSettings:
+    if execution_settings_unreadable(settings):
+        raise ValueError("an unreadable-settings placeholder must not be persisted")
     path = _settings_path(workspace)
     write_json_atomic(path, asdict(settings), ensure_ascii=False, indent=2)
     return settings
@@ -175,6 +190,18 @@ def validate_execution_environment(
     settings: ExecutionEnvironmentSettings,
 ) -> ExecutionEnvironmentValidation:
     from marvis.plugins.native_isolation import NativeIsolationError, capability as worker_capability
+    if execution_settings_unreadable(settings):
+        # The configured kernel/interpreter is unknown too; report no kernel
+        # rather than the placeholder default.
+        return ExecutionEnvironmentValidation(
+            ok=False, message=SETTINGS_UNREADABLE_MESSAGE, kernel_name="",
+            network_capability={
+                "mode": SETTINGS_UNREADABLE, "platform": sys.platform, "backend": "none",
+                "available": False, "status": SETTINGS_UNREADABLE, "network_restricted": False,
+                "startup_checked": False, "message": "", "next_action": SETTINGS_UNREADABLE_NEXT_ACTION,
+            },
+            worker_capability={"available": False, "status": SETTINGS_UNREADABLE},
+        )
     try:
         worker = worker_capability(settings.worker_isolation_mode, probe=True,
             python_executable=settings.python_executable or sys.executable)
@@ -265,6 +292,7 @@ def _validate_interpreter(
     )
 
 
+@timed("subprocess", "version_check")
 def _run_version_check(
     command: list[str],
     *,

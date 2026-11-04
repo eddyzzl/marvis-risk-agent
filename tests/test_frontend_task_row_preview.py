@@ -81,19 +81,7 @@ assert.equal(card.style.top, "96px");
 
 
 def test_app_wires_single_line_task_rows_to_preview_card():
-    app_js = _read_static("app.js")
-    row_html = app_js.split("function taskRowInnerHtml", 1)[1].split(
-        "function createTaskRowShell",
-        1,
-    )[0]
-    assert "task-row-name" in row_html
-    assert "task-row-meta" not in row_html
-    assert "task-row-date" not in row_html
-    assert "bindTaskRowPreview" in app_js
-    assert "pointerdown" in _read_static("js/task-row-preview.js")
-    assert "suppressedShell" in _read_static("js/task-row-preview.js")
-    assert "function dismiss(shell)" in _read_static("js/task-row-preview.js")
-    assert 'id="taskRowPreview"' in _read_static("index.html")
-    css = _read_static("css/task-shell.css")
-    assert "text-overflow: ellipsis" in css
-    assert "white-space: nowrap" in css.split(".task-row-name {", 1)[1].split("}", 1)[0]
+    assert 'id="taskRowPreview"' in _read_static('index.html')
+    css = _read_static('css/task-shell.css')
+    assert 'text-overflow: ellipsis' in css
+    assert 'white-space: nowrap' in css.split('.task-row-name {', 1)[1].split('}', 1)[0]

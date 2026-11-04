@@ -111,14 +111,32 @@ def test_sample_design_renderer_uses_strict_bundle_metrics_and_no_lifecycle_clai
         _output(_bundle()),
     )
 
+    output = _output(_bundle())
     assert "策略样本设计已固化" in text
     assert "活动样本 **6** 行" in text
-    assert "provided / 90 天" in text
-    assert "development / unvalidated" in text
+    assert "表现期 90 天" in text
+    assert "当前处于开发阶段、尚未验证" in text
     assert "坏样本值 `1`，好样本值 `0`" in text
     assert "未创建或修改策略" in text
     assert "未建模、未建树、未入池、未采纳、未部署" in text
     assert f"{'c' * 64}/download?expected_content_hash=" in text
+    # Raw lifecycle/status codes, the design ID and its content hash live in the
+    # 「样本设计口径」 table, not in the sentence the user reads.
+    prose = text.split("**样本设计证据**")[0]
+    for internal in (
+        "provided",
+        "development / unvalidated",
+        "content hash",
+        output["sample_design_id"],
+        output["content_hash"],
+    ):
+        assert internal not in prose
+    contract = next(table for table in tables if table["title"] == "样本设计口径")
+    contract_rows = {row[0]: row[1:] for row in contract["rows"]}
+    assert contract_rows["样本设计 ID"][0] == output["sample_design_id"]
+    assert contract_rows["content hash"][0] == output["content_hash"]
+    assert contract_rows["表现期"] == ["provided", "90 天"]
+    assert contract_rows["生命周期"] == ["development / unvalidated", "开发阶段、尚未验证"]
     overall = next(
         table for table in tables if table["title"] == "策略样本设计 Overall 指标"
     )
@@ -148,10 +166,19 @@ def test_sample_design_renderer_surfaces_exploration_unavailable_and_red_flags()
         _output(_bundle(exploration=True, split=False)),
     )
 
-    assert "表现窗 `unavailable`" in text
-    assert "观察窗 `unavailable`" in text
-    assert "`exploration-only`" in text
-    assert "切分 unavailable" in text
+    assert "表现期 未提供" in text
+    assert "观察期 未提供" in text
+    assert "当前仅用于探索分析" in text
+    assert "开发/验证/OOT 切分未提供" in text
+    # Tool warnings are appended verbatim under 「样本设计提示」; the summary
+    # prose above them carries no status codes.
+    summary = text.split("**样本设计提示**")[0]
+    for internal in ("unavailable", "exploration-only", "exploration_only"):
+        assert internal not in summary
+    contract = next(table for table in tables if table["title"] == "样本设计口径")
+    contract_rows = {row[0]: row[1:] for row in contract["rows"]}
+    assert contract_rows["样本用途"] == ["exploration_only", "仅探索分析"]
+    assert contract_rows["开发/验证/OOT 切分"] == ["unavailable", "未提供"]
     flags = next(table for table in tables if table["title"] == "策略样本设计红旗")
     codes = {row[1] for row in flags["rows"]}
     assert "performance_window_unavailable" in codes
@@ -182,8 +209,11 @@ def test_sample_design_renderer_marks_not_matured_scope_as_exploration_only() ->
         _output(_bundle(maturity="not_matured")),
     )
 
-    assert "成熟度 `not_matured`" in text
-    assert "`exploration-only`" in text
+    assert "风险样本成熟度：未成熟" in text
+    assert "当前仅用于探索分析" in text
+    assert "not_matured" not in text.split("**样本设计提示**")[0]
+    contract = next(table for table in tables if table["title"] == "样本设计口径")
+    assert ["风险样本成熟度", "not_matured", "未成熟"] in contract["rows"]
     flags = next(table for table in tables if table["title"] == "策略样本设计红旗")
     assert "sample_not_matured" in {row[1] for row in flags["rows"]}
 

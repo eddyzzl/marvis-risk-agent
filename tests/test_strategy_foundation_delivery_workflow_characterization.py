@@ -698,3 +698,58 @@ def test_prepared_slots_are_frozen_and_do_not_alias_callback_objects() -> None:
     assert deep_thaw(prepared.slots)["univariate_sources"] == [
         {"artifact_id": "candidate-1"}
     ]
+
+
+def test_sample_v2_month_only_bounds_cover_whole_months() -> None:
+    """D-2 按月口径: YYYY-MM window and range bounds enter as whole months."""
+
+    validator = _specs_by_id()["strategy_sample_design_v2"].validator
+    assert validator is not None
+    inputs = _sample_v2_inputs()
+    inputs["field_bindings"]["time_field"] = "apply_month"
+    inputs["observation_window"] = {
+        "status": "provided",
+        "start": "2026-01",
+        "end": "2026-02",
+    }
+    inputs["partitioning"] = {
+        "method": "time_ranges",
+        "column": "apply_month",
+        "ranges": {
+            "development": {"start": "2025-11", "end": "2025-12"},
+            "validation": {"start": "2026-01", "end": "2026-01"},
+            "oot": {"start": "2026-02", "end": None},
+        },
+    }
+
+    normalized = validator(inputs, _RESOLUTION_CONTEXT)
+
+    assert normalized["observation_window"] == {
+        "status": "provided",
+        "start": "2026-01-01",
+        "end": "2026-02-28",
+    }
+    assert normalized["partitioning"]["ranges"] == {
+        "development": {"start": "2025-11-01", "end": "2025-12-31"},
+        "validation": {"start": "2026-01-01", "end": "2026-01-31"},
+        "oot": {"start": "2026-02-01", "end": None},
+    }
+    # Day bounds are untouched.
+    assert validator(_sample_v2_inputs(), _RESOLUTION_CONTEXT)["observation_window"] == {
+        "status": "provided",
+        "start": "2026-01-01",
+        "end": "2026-04-30",
+    }
+
+
+@pytest.mark.parametrize("bad", ["2026-13", "2026-1", "202601", "2026-02-30", 202601])
+def test_sample_v2_bounds_reject_malformed_months_in_business_chinese(bad) -> None:
+    validator = _specs_by_id()["strategy_sample_design_v2"].validator
+    assert validator is not None
+    inputs = _sample_v2_inputs()
+    inputs["observation_window"]["end"] = bad
+
+    with pytest.raises(StrategyWorkflowValidationError) as raised:
+        validator(inputs, _RESOLUTION_CONTEXT)
+
+    assert "YYYY-MM-DD 日期或 YYYY-MM 月份" in str(raised.value)

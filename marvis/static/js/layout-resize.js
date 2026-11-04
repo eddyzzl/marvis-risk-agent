@@ -1,5 +1,8 @@
-export const SIDEBAR_WIDTH_MIN = 240;
-export const SIDEBAR_WIDTH_MAX = 520;
+// 2026-10-14 redesign (D10): the sidebar drags between 200 and 380px and
+// double-click returns it to 248px.
+export const SIDEBAR_WIDTH_MIN = 200;
+export const SIDEBAR_WIDTH_MAX = 380;
+export const SIDEBAR_WIDTH_DEFAULT = 248;
 export const PROGRESS_WIDTH_MIN = 240;
 export const PROGRESS_WIDTH_MAX = 560;
 
@@ -40,7 +43,7 @@ export function createLayoutResizeController({
         setCssNumber(
           "--sidebar-width",
           clamp(
-            stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar,
+            stored.sidebar === 320 ? SIDEBAR_WIDTH_DEFAULT : stored.sidebar,
             SIDEBAR_WIDTH_MIN,
             SIDEBAR_WIDTH_MAX,
           ),
@@ -96,8 +99,14 @@ export function createLayoutResizeController({
     saveLayoutWidths();
   }
 
+  function resetSidebarWidth() {
+    setCssNumber("--sidebar-width", SIDEBAR_WIDTH_DEFAULT);
+    saveLayoutWidths();
+  }
+
   return {
     handleResizeKey,
+    resetSidebarWidth,
     restoreLayoutWidths,
     saveLayoutWidths,
     setCssNumber,

@@ -375,7 +375,12 @@ def test_initial_v1_word_report_uses_measured_context_and_local_business_definit
     values, metadata = generate_word_conclusions(task=task, evidence=evidence,
                                                  memory_context={"summary": PRIVATE}, model_profile={})
     assert metadata == {"fallback": False, "history_comparison_available": False}
-    assert all(values[key] == value for key, value in _v1_report_reply().items())
+    reply = _v1_report_reply()
+    final = reply.pop("TEXT:final_validation_conclusion")
+    assert all(values[key] == value for key, value in reply.items())
+    # The model's conclusion is kept verbatim; the platform appends the measured
+    # high-risk stress finding it omitted (local text, never sent outbound).
+    assert values["TEXT:final_validation_conclusion"].startswith(final + "\n\n平台确定性检查提示：!!压力测试显示")
     seeds = narrative_report_values(PRIVATE)
     assert values["TEXT:model_scope"] == seeds["TEXT:model_scope"]
     assert values["TEXT:bad_sample_definition"] == seeds["TEXT:bad_sample_definition"]
@@ -504,7 +509,11 @@ def test_fresh_v2_report_service_keeps_native_tail_and_local_definitions(monkeyp
         "C": .25, "solver": "lbfgs"}
     assert contexts["training"]["requested_fields"] == ["TEXT:model_training_description"]
     assert contexts["ranking"]["evidence"]["validation_results"]["effectiveness"]["lift_ranking_assessment"] == raw["effectiveness"]["lift_ranking_assessment"]
-    assert len(values["TEXT:final_validation_conclusion"].split("\n\n")) == 4
+    paragraphs = values["TEXT:final_validation_conclusion"].split("\n\n")
+    # Four topic paragraphs, plus the platform's measured-risk appendix when
+    # the generated text never names the high-risk stress / overfitting result.
+    assert len(paragraphs) in {4, 5}
+    assert len(paragraphs) == 4 or paragraphs[-1].startswith("平台确定性检查提示：")
 
 
 def test_fresh_report_invalid_last_topic_does_not_publish_partial_values(monkeypatch):

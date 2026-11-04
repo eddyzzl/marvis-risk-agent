@@ -24,6 +24,20 @@ const errors = {
   holdout_freeze_binding_failed: "模型冻结版本已变化。请刷新状态后继续。",
   holdout_result_integrity_failed: "结果完整性检查失败。请保留现场并联系保管人员；不可重新读取封存数据。",
 };
+const factNames = { label_available_at: "标签可得时间", historical_parameters: "历史参数", candidate_provenance: "候选来源" };
+const factValues = { existed: "存在", absent: "不存在", pre_registered: "预先登记", development_data_only: "仅来自开发集", holdout_informed: "参考过封存集" };
+const conclusionNames = { blind_oot_acceptance: "盲 OOT 结果", historical_period_comparison: "历史同期对比" };
+function factText(fact, state) {
+  if (!state || state.state === "unknown") return "未知";
+  if (state.state === "recorded_after_read") return "读取后登记，不计入";
+  return factValues[state.value] || state.value;
+}
+export function timeFactsHtml(facts, conclusions) {
+  if (!facts && !conclusions) return "";
+  const rows = Object.keys(factNames).map(f => `<tr><th>${factNames[f]}</th><td>${esc(factText(f, facts?.[f]))}</td></tr>`).join("");
+  const gated = Object.entries(conclusions || {}).filter(([, c]) => c.status === "blocked").map(([name, c]) => `<p class="production-error blind-oot-blocked">${esc(conclusionNames[name] || name)}：${esc(c.label)}</p>`).join("");
+  return `<table class="blind-oot-metrics blind-oot-facts"><tbody>${rows}</tbody></table>${gated}`;
+}
 export function holdoutError(error) {
   return errors[error?.detail?.code] || "操作未完成。请刷新状态，检查当前身份、材料契约及可用动作后继续。";
 }
@@ -34,22 +48,23 @@ export function blindOotHtml({ summary, principal, participants = [], candidates
   if (!principal) body = '<p class="production-note">先绑定工作区身份，再由保管人员指定开发和复核人员。</p><button type="button" data-blind-action="identity" class="button compact secondary">绑定工作区身份</button>';
   else if (!summary && role === "custody") {
     const options = (r) => participants.filter(p => p.role === r).map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join("");
-    body = `<p class="production-note">仅适用于尚未注册材料、训练或生成计划的空白建模任务。独立 OOT 先封存，开发人员随后只上传 train/test。</p><form data-blind-form="seal"><div class="production-grid"><label>独立批次标识<input name="data_identity" required maxlength="160" pattern="[A-Za-z0-9_.:-]+" placeholder="机构已授权的批次标识" /></label><label>独立 OOT 文件<input name="file" type="file" required accept=".parquet" /></label><label>开发人员<select name="developer_id" required>${options("maker")}</select></label><label>复核人员<select name="evaluator_id" required>${options("checker")}</select></label><label>目标字段<input name="target_col" required value="y" /></label><label>开发集切分字段<input name="split_col" required value="split" /></label><label>目标类型<select name="target_type"><option value="binary">二分类</option><option value="continuous">回归</option><option value="multiclass">多分类</option></select></label><label>授权依据<input name="authority_basis" required maxlength="2000" placeholder="记录材料来源及授权依据" /></label></div><button class="button compact primary"${disabled}>封存独立 OOT</button></form>`;
+    body = `<p class="production-note">仅适用于尚未注册材料、训练或生成计划的空白建模任务。独立 OOT 先封存，开发人员随后只上传 train/test。</p><form data-blind-form="seal"><div class="production-grid"><label>独立批次标识<input name="data_identity" required maxlength="160" pattern="[A-Za-z0-9_.:-]+" placeholder="机构已授权的批次标识" /></label><label>独立 OOT 文件<input name="file" type="file" required accept=".parquet" /></label><label>开发人员<select name="developer_id" required>${options("maker")}</select></label><label>复核人员<select name="evaluator_id" required>${options("checker")}</select></label><label>目标字段<input name="target_col" required value="y" /></label><label>开发集切分字段<input name="split_col" required value="split" /></label><label>目标类型<select name="target_type"><option value="binary">二分类</option><option value="continuous">回归</option><option value="multiclass">多分类</option></select></label><label>授权依据<input name="authority_basis" required maxlength="2000" placeholder="记录材料来源及授权依据" /></label><label>标签可得时间<input name="label_available_at" type="date" /></label></div><button class="button compact primary"${disabled}>封存独立 OOT</button></form>`;
   } else if (!summary) body = '<p class="production-note">该任务尚未启用盲 OOT。由保管人员在开发前封存新材料并绑定人员；现有建模流程保持可用。</p>';
   else if (role === "develop" && summary.state === "sealed") {
     const options = candidates.map(c => `<option value="${esc(c.artifact_id)}">${esc(c.algorithm)} · ${esc(String(c.created_at).slice(0, 19))}</option>`).join("");
-    body = `<div class="production-grid"><section><h4>1. 只上传开发集</h4><form data-blind-form="development"><label>开发材料（train/test）<input name="file" type="file" accept=".parquet" required /></label><button class="button compact secondary"${disabled}>登记开发集</button></form><p class="production-note">登记后在当前任务与 Agent 完成特征选择、训练和调参。内置工具只使用开发集。</p></section><section><h4>2. 冻结最终模型</h4><form data-blind-form="freeze"><label>本任务原生训练模型<select name="artifact_id" required>${options || '<option value="">尚无可冻结模型</option>'}</select></label><p class="production-note">冻结将固定模型、参数、特征和预处理依赖；之后不可替换模型或继续训练。</p><button class="button compact primary"${disabled || (!options ? " disabled" : "")}>冻结最终模型</button></form></section></div>`;
+    body = `<div class="production-grid"><section><h4>1. 只上传开发集</h4><form data-blind-form="development"><label>开发材料（train/test）<input name="file" type="file" accept=".parquet" required /></label><label>历史参数<select name="historical_parameters"><option value="">未知</option><option value="existed">存在</option><option value="absent">不存在</option></select></label><label>候选来源<select name="candidate_provenance"><option value="">未知</option><option value="pre_registered">预先登记</option><option value="development_data_only">仅来自开发集</option><option value="holdout_informed">参考过封存集</option></select></label><button class="button compact secondary"${disabled}>登记开发集</button></form><p class="production-note">登记后在当前任务与 Agent 完成特征选择、训练和调参。内置工具只使用开发集。</p></section><section><h4>2. 冻结最终模型</h4><form data-blind-form="freeze"><label>本任务原生训练模型<select name="artifact_id" required>${options || '<option value="">尚无可冻结模型</option>'}</select></label><p class="production-note">冻结将固定模型、参数、特征和预处理依赖；之后不可替换模型或继续训练。</p><button class="button compact primary"${disabled || (!options ? " disabled" : "")}>冻结最终模型</button></form></section></div>`;
   } else if (role === "evaluate") {
     if (summary.state === "frozen" || summary.recovery_id) body = `<p class="production-note">按冻结版本评估一次。重复请求只返回同一份结果。</p><button type="button" data-blind-action="evaluate" class="button compact primary"${disabled}>${summary.recovery_id ? "执行已批准的安全恢复" : "评估封存集一次"}</button>`;
     else if (summary.state === "sealed") body = '<p class="production-note">等待开发人员冻结最终模型，冻结前封存样本不会读取。</p>';
     else if (summary.state !== "committed") body = '<p class="production-note">请刷新状态。评估中断需保管人员审批；已读取的封存样本不可重新评估。</p>';
-    if (result) body += `<h4>独立评估结果</h4><table class="blind-oot-metrics"><tbody>${Object.entries(result.metrics).map(([key, value]) => `<tr><th>${esc({rows:"样本量",ks:"KS",auc:"AUC",rmse:"RMSE",mae:"MAE",r2:"R²",logloss:"Logloss",macro_auc:"Macro AUC"}[key] || key)}</th><td>${esc(typeof value === "number" ? (key === "rows" ? value : value.toFixed(6)) : value)}</td></tr>`).join("")}</tbody></table><p class="production-note">这是确定性技术评估；历史可用性与标签成熟度未知，机构授权依据仅为保管人员声明。</p>`;
+    if (result) body += `<h4>独立评估结果</h4><table class="blind-oot-metrics"><tbody>${Object.entries(result.metrics).map(([key, value]) => `<tr><th>${esc({rows:"样本量",ks:"KS",auc:"AUC",rmse:"RMSE",mae:"MAE",r2:"R²",logloss:"Logloss",macro_auc:"Macro AUC"}[key] || key)}</th><td>${esc(typeof value === "number" ? (key === "rows" ? value : value.toFixed(6)) : value)}</td></tr>`).join("")}</tbody></table>${timeFactsHtml(result.time_facts, result.conclusions)}`;
   } else if (role === "custody" && ["prepared", "reading", "uncertain"].includes(summary.state)) {
     const options = summary.recovery_options || [];
     body = options.length ? `<form data-blind-form="recover"><label>安全恢复方式<select name="mode">${options.map(m => `<option value="${m}">${m === "resume_before_read" ? "在尚未读取样本时继续" : "发布已签名保存的结果"}</option>`).join("")}</select></label><label>处理依据<input name="reason" required maxlength="2000" /></label><button class="button compact secondary"${disabled}>批准安全恢复</button></form><p class="production-note">审批有效期 15 分钟，随后由绑定复核人员执行；不能增加评估次数。</p>` : '<p class="production-note">没有安全恢复动作。封存数据已读取且未保存可验证结果时，本批次保持中断，不能再次评估。</p>';
   } else body = `<p class="production-note">${summary.state === "committed" ? "复核人员已完成单次评估。开发人员和 Agent 不接收封存样本或指标。" : summary.state === "frozen" ? "等待绑定复核人员完成独立评估。" : "等待开发人员完成开发并冻结最终模型。"}</p>`;
   const evidence = summary?.model_evidence ? `<p class="production-note">冻结证据：${esc(summary.model_evidence.algorithm)} · ${summary.model_evidence.feature_count} 个特征 · 原生训练凭据已验证 · 模型依赖已固定</p><details><summary>查看冻结指纹</summary><code>${esc(summary.freeze_hash)}</code></details>` : "";
-  return `<header class="blind-oot-header"><div><strong>盲 OOT</strong><p class="production-state">${esc(summary ? states[summary.state] || summary.state : "可选 · 开发前启用")}</p></div><button type="button" data-blind-action="refresh" class="button compact secondary"${disabled}>刷新状态</button></header><p class="production-error" role="alert">${esc(error)}</p>${evidence}${body}<p class="production-boundary">保管入口仅为防重复封存核对材料身份，样本不进入 Agent、普通数据登记或 Notebook；每个独立批次只允许一次评估。本模式依赖可信本机账号；不能隔离同一系统账号直接访问磁盘。历史可用性、标签成熟度及外部身份核验仍未知。当前封存支持 64 MiB 文件、128 MiB 解码大小、100 万行、128 列。</p>`;
+  const facts = summary?.time_contract && !result ? timeFactsHtml(summary.time_contract.facts) : "";
+  return `<header class="blind-oot-header"><div><strong>盲 OOT</strong><p class="production-state">${esc(summary ? states[summary.state] || summary.state : "可选 · 开发前启用")}</p></div><button type="button" data-blind-action="refresh" class="button compact secondary"${disabled}>刷新状态</button></header><p class="production-error" role="alert">${esc(error)}</p>${evidence}${body}${facts}<p class="production-boundary">保管入口仅为防重复封存核对材料身份，样本不进入 Agent、普通数据登记或 Notebook；每个独立批次只允许一次评估。macOS 上封存文件只在系统隔离的评估进程内读取，仅本机网络 Notebook 和隔离插件被拒绝读取封存目录；其他系统由平台服务进程读取。可信本地运行的 Notebook、插件及同一系统账号的其他进程仍能直接读取磁盘上的封存文件。历史可用性及外部身份核验仍未知。当前封存支持 64 MiB 文件、128 MiB 解码大小、100 万行、128 列。</p>`;
 }
 export function createBlindOotController({ root, getTask, openIdentity, onStateChange = async () => {} }) {
   let epoch = 0, data = {}, busy = false, taskId = "", refreshedAt = 0;
@@ -103,7 +118,7 @@ export function createBlindOotController({ root, getTask, openIdentity, onStateC
     const values = new FormData(form), type = form.dataset.blindForm;
     const path = endpoint(type === "seal" ? "/cohort" : type === "recover" ? "/recoveries" : `/${type}`);
     if (type === "seal") {
-      const payload = Object.fromEntries([...values.entries()].filter(([key]) => key !== "file"));
+      const payload = Object.fromEntries([...values.entries()].filter(([key, value]) => key !== "file" && !(key === "label_available_at" && !value)));
       values.set("contract", JSON.stringify(payload));
       [...values.keys()].filter(key => !["file", "contract"].includes(key)).forEach(key => values.delete(key));
     }

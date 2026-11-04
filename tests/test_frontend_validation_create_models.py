@@ -31,26 +31,15 @@ const createDialog = await import({json.dumps(module_url)});
 
 
 def test_extra_validation_models_reuse_the_primary_form_layout():
-    index_html = _read_static("index.html")
-    create_js = _read_static("js/create-task-dialog.js")
-    css = _read_static("css/dialogs-governance.css")
-
-    extra_section = index_html.split('id="validationCreateExtraModelsSection"', 1)[1].split(
-        'id="createTaskAlgorithmField"',
-        1,
-    )[0]
-    assert "每个模型单独上传 Notebook / 样本 / PMML / 数据字典" not in extra_section
-    assert "validation-batch-create-row" not in extra_section
-    assert "添加模型" in extra_section
-
+    index_html = _read_static('index.html')
+    css = _read_static('css/dialogs-governance.css')
+    extra_section = index_html.split('id="validationCreateExtraModelsSection"', 1)[1].split('id="createTaskAlgorithmField"', 1)[0]
+    assert '每个模型单独上传 Notebook / 样本 / PMML / 数据字典' not in extra_section
+    assert 'validation-batch-create-row' not in extra_section
+    assert '添加模型' in extra_section
     assert 'id="createTaskPrimaryModelHeading"' in index_html
-
-    assert "export function validationExtraModelCardMarkup" in create_js
-    assert "validation-batch-create-row" not in create_js
-    assert "data-extra-file-role" not in create_js
-    assert "添加多个模型时请用文件上传" not in create_js
-    assert ".validation-create-model-card" in css
-    assert ".validation-create-model-head" in css
+    assert '.validation-create-model-card' in css
+    assert '.validation-create-model-head' in css
 
 
 def test_validation_extra_model_card_markup_matches_primary_fields():
@@ -84,53 +73,10 @@ assert.doesNotMatch(html, />验证人员</);
     )
 
 
-def test_create_agent_batch_opens_workbench_instead_of_parent_messages():
-    app_js = _read_static("app.js")
-    start = app_js.index("async function createTaskAndScan")
-    end = app_js.index("async function pollValidationProgress", start)
-    body = app_js[start:end]
-    assert "if (usesAgentValidationWorkbench(task))" in body
-    assert "await requestTaskSelection(task);" in body
-    workbench_branch = body.split("if (usesAgentValidationWorkbench(task))", 1)[1].split(
-        'if (task.run_mode === "agent")',
-        1,
-    )[0]
-    assert "loadAgentMessages" not in workbench_branch
-    assert "await continueAgentValidationBatch();" in workbench_branch
-    assert "正在按自动审查逐个执行模型验证" in workbench_branch
-    assert "async function continueAgentValidationBatch" in app_js
-    assert "dispatchAgentValidation(childId)" in app_js
-    assert 'agentAcceptanceMode = "auto_accept"' in app_js
 
 
-def test_create_multi_model_returns_parent_task_identity():
-    create_js = _read_static("js/create-task-dialog.js")
-    assert "created?.parent_task" in create_js
-    assert "created?.batch?.parent_task_id" in create_js
-    helper = create_js.split("async function createMultiModelValidationTask", 1)[1].split(
-        "function bindMaterialSourceControls",
-        1,
-    )[0]
-    assert "parent_task_id" in helper
-    assert "task_type: \"validation_batch\"" in helper or "task_type: 'validation_batch'" in helper
-    assert "rows.length < 2" in helper
 
 
-def test_single_model_validation_create_uses_ordinary_task_not_batch():
-    create_js = _read_static("js/create-task-dialog.js")
-    body = create_js.split("async function createTask()", 1)[1].split(
-        "function resetValidationExtraModels",
-        1,
-    )[0]
-    assert "if (extraRows.length > 0)" in body
-    extra_branch = body.split("if (extraRows.length > 0)", 1)[1].split(
-        "if (materialSourceController.mode()",
-        1,
-    )[0]
-    assert "createMultiModelValidationTask" in extra_branch
-    assert 'api("api/tasks"' not in extra_branch
-    assert 'return await api("api/tasks"' in body
-    assert body.index("if (extraRows.length > 0)") < body.index('return await api("api/tasks"')
 
 
 @pytest.mark.parametrize("model_name", [

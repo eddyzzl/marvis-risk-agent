@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import marvis.validation.pmml_analysis as pmml_analysis
+import marvis.validation_services.pmml_analysis as pmml_analysis
 from marvis.validation_services import metrics as metrics_service
 from marvis.validation.binning import compute_ks
 from marvis.validation.config import ValidationConfig
@@ -20,7 +20,7 @@ from marvis.validation.input_contracts import (
     MetadataCoverage,
     TransformationSpec,
 )
-from marvis.validation.pmml_score_artifacts import run_pmml_scoring
+from marvis.validation_services.pmml_score_artifacts import run_pmml_scoring
 from marvis.validation.results import StressBaseline, StressTestResult
 from marvis.validation.sample_schema import inspect_sample_schema
 from marvis.validation.sample_stats import run_basic_info

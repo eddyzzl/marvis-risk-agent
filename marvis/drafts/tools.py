@@ -6,7 +6,7 @@ import sys
 from marvis.repositories.drafts import DraftRepository
 from marvis.repositories.plugins import PluginRepository
 from marvis.drafts.authoring import draft_script
-from marvis.drafts.errors import DraftError, DraftNotFound, OfflineError
+from marvis.drafts.errors import DraftError, DraftNotFound, OfflineError, OutboundQueryError
 from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
@@ -27,6 +27,9 @@ def tool_web_search(inputs: dict, ctx) -> dict:
         )
     except OfflineError as exc:
         return {"results": [], "offline": True, "guidance": str(exc)}
+    except OutboundQueryError as exc:
+        # Refused before any network request; a governed result, not a crash.
+        return {"results": [], "refused": True, "guidance": str(exc)}
     return {"results": results, "offline": False, "guidance": ""}
 
 

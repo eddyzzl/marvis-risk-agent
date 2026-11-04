@@ -366,6 +366,31 @@ def _publish_label_result(
                 raise LabelingContractError(
                     "registered labeled dataset hash does not match the published file"
                 )
+            # Labels are built only from source rows up to as_of_date, so they
+            # are observable from that date on. Recorded with the dataset.
+            from marvis.time_facts import (
+                LABEL_AVAILABLE_AT,
+                TimeFactError,
+                record_fact_on_connection,
+            )
+
+            try:
+                # Idempotent for an equal existing value.
+                record_fact_on_connection(
+                    conn,
+                    task_id=task_id,
+                    subject_kind="dataset",
+                    subject_id=registered.id,
+                    fact=LABEL_AVAILABLE_AT,
+                    value=request.as_of_date,
+                    source="label_construction",
+                    actor="agent:labeling",
+                    basis="source_rows_at_or_before_as_of_date",
+                )
+            except TimeFactError as exc:
+                raise LabelingContractError(
+                    f"label availability time could not be recorded: {exc.code}"
+                ) from exc
             quality = _quality_payload(result)
             lineage = {
                 "parent_dataset_id": source_dataset.id,

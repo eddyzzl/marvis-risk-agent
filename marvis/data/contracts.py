@@ -87,6 +87,15 @@ class KeyPair:
     dtype_divergent: bool = False
 
 
+# A C2 join-key choice names an anchor column, or — when that anchor column has several
+# feature-column candidates — one candidate pair written "anchor_col=feature_col".
+KEY_SELECTION_SEPARATOR = "="
+
+
+def key_selection_token(anchor_col: str, feature_col: str) -> str:
+    return f"{anchor_col}{KEY_SELECTION_SEPARATOR}{feature_col}"
+
+
 @dataclass(frozen=True)
 class ConflictReport:
     """Result of a two-level dedup (spec §6). Level-1 removes whole-row duplicates
@@ -127,15 +136,18 @@ class KeyDtypeDivergence:
 
 @dataclass(frozen=True)
 class KeyAlternative:
-    """A relaxed join-key candidate (spec §4/§5 动态择键): drop one identity element to
-    raise the match rate. SURFACED as a proposal only — the engine never silently swaps the
-    key; the user confirms a relaxation at C2, and fan-out is re-checked for the reduced key."""
+    """A join-key candidate the user may pick at C2 (spec §4/§5 动态择键). ``kind`` is
+    "relaxation" (drop one identity element of a poorly matching composite key) or "switch"
+    (a different data-resolved identity key, e.g. mobile=mobile_md5 instead of the preferred
+    cust_id). SURFACED as a proposal only — the engine never silently swaps the key; the user
+    picks it at C2, and match / uniqueness / fan-out are re-checked for that key."""
 
-    key_pairs: tuple[tuple[str, str], ...]   # (anchor_col, feature_col) of the reduced key
-    dropped: str                             # the anchor_col element removed vs the full key
+    key_pairs: tuple[tuple[str, str], ...]   # (anchor_col, feature_col) of the alternative key
+    dropped: str                             # anchor_col(s) of the current key it leaves out
     match_rate: float
     feature_key_unique: bool
     fan_out_detected: bool
+    kind: str = "relaxation"
 
 
 @dataclass
@@ -163,6 +175,15 @@ class JoinDiagnostics:
     # T1-B8: proposed keys whose two sides have divergent stored dtypes across files. A "red"
     # (text<->float) divergence forces confirmation before execute; "warn" is surfaced only.
     key_dtype_divergences: tuple["KeyDtypeDivergence", ...] = ()
+    # Every data-resolved key pair for this feature table: the proposed key plus the identity
+    # keys the user can switch to at C2. Proposal evidence only — execution always uses
+    # JoinSpec.key_pairs, and a switched key is re-diagnosed before it can be confirmed.
+    key_candidates: tuple["KeyPair", ...] = ()
+    # Why the proposed key was chosen (see ColumnAligner.propose_keys): "customer_id",
+    # "customer_id_composite", "customer_id_not_unique", "customer_id_lower_match",
+    # "customer_id_hashed", "dictionary", "fuzzy", "user" (picked at C2), or "" (no key /
+    # legacy plan).
+    key_choice: str = ""
 
 
 @dataclass
@@ -188,6 +209,7 @@ __all__ = [
     "DATE_FORMATS",
     "HASH_ALGO_CANDIDATES",
     "HASH_HEX_LENGTHS",
+    "KEY_SELECTION_SEPARATOR",
     "LARGE_ROW_THRESHOLD",
     "MIN_KEY_MATCH_RATE",
     "SHRINK_WARN_THRESHOLD",
@@ -202,4 +224,5 @@ __all__ = [
     "KeyAlternative",
     "KeyDtypeDivergence",
     "KeyPair",
+    "key_selection_token",
 ]

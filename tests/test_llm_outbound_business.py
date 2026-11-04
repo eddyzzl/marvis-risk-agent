@@ -129,3 +129,15 @@ def test_oversized_acceptance_fails_before_request(monkeypatch):
     summary, _, _, _ = Reviewer(lambda: wire.client)._llm_summarize("验证", _plan(_step([])), {}, result)
     assert summary == "Plan execution reviewed."
     assert wire.requests == []
+
+
+def test_not_configured_reason_reads_plainly_and_keeps_its_reason_code():
+    from marvis.business_acceptance import OBJECTIVE_NOT_CONFIGURED_REASON
+
+    result = evaluate_business_acceptance(None, None)
+    assert result["reasons"] == [OBJECTIVE_NOT_CONFIGURED_REASON]
+    assert OBJECTIVE_NOT_CONFIGURED_REASON == "这次没有设置业务验收标准，所以只说明流程已跑完，不判断业务是否达标。"
+    assert business_acceptance_context(result)["reason_codes"] == ["objective_not_configured"]
+    # Results stored before the rewording keep mapping to the same code.
+    legacy = {**result, "reasons": ["未配置业务验收标准；流程完成不代表业务达标。"]}
+    assert business_acceptance_context(legacy)["reason_codes"] == ["objective_not_configured"]

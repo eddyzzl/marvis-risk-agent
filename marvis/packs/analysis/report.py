@@ -25,6 +25,28 @@ def collect_red_flags(*step_outputs) -> list[dict]:
     return flags
 
 
+def _worst_worsening_cell(migration: dict) -> dict | None:
+    """The largest pooled rate from a state to a worse one (states run from
+    good to bad), read straight off the step's heat table; no recomputation."""
+    states = [str(state) for state in migration.get("states") or []]
+    order = {state: index for index, state in enumerate(states)}
+    best = None
+    for row in migration.get("heat_table") or []:
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("from") or "")
+        if source not in order:
+            continue
+        for target, value in row.items():
+            if target == "from" or target not in order or order[target] <= order[source]:
+                continue
+            if not isinstance(value, (int, float)) or value <= 0:
+                continue
+            if best is None or value > best["rate"]:
+                best = {"from": source, "to": target, "rate": float(value)}
+    return best
+
+
 def gate_summary_payload(
     *,
     flow: dict | None,
@@ -52,8 +74,24 @@ def gate_summary_payload(
     if segment and isinstance(segment.get("concentration"), dict):
         highlights["hhi"] = segment["concentration"].get("hhi")
         highlights["top1_pct"] = segment["concentration"].get("top1_pct")
+        # Which segment that is, looked up from the step's own rows (eval S9:
+        # the user asked about concentration and got no sentence about it).
+        rows = [row for row in segment.get("segments") or [] if isinstance(row, dict)]
+        sized = [row for row in rows if isinstance(row.get("pop_pct"), (int, float))]
+        if sized:
+            top = max(row["pop_pct"] for row in sized)
+            highlights["top1_segment"] = "、".join(
+                str(row.get("segment")) for row in sized if row["pop_pct"] == top
+            )
+        highlights["concentration_flagged"] = any(
+            isinstance(flag, dict) and flag.get("kind") == "high_concentration"
+            for flag in segment.get("red_flags") or []
+        )
     if migration:
         highlights["migration_months"] = migration.get("window_months")
+        worst = _worst_worsening_cell(migration)
+        if worst is not None:
+            highlights["worst_migration"] = worst
     return {
         "highlights": highlights,
         "red_flags": red_flags,

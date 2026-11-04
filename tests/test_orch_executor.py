@@ -18,10 +18,11 @@ from marvis.orchestrator.contracts import (
     PostCheck,
     StepStatus,
     SubAgent,
+    plan_to_dict,
 )
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.evidence import payload_hash
-from marvis.orchestrator.errors import OrchestratorError
+from marvis.orchestrator.errors import OrchestratorError, requires_effect_reconciliation
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
 from marvis.plugins.manifest import (
@@ -1387,6 +1388,67 @@ def test_plan_executor_applies_retry_skip_and_fail_policies(tmp_path):
     fail_result = _executor(fail_repo, FakeRunner([_fail("fatal")])).run("plan-1")
     assert fail_result.status == PlanStatus.FAILED
     assert fail_repo.load_plan("plan-1").steps[0].status == StepStatus.FAILED
+
+
+class WriteEffectTools(FakeTools):
+    """A write effect means a dispatched failure cannot be proven retry-safe."""
+
+    def resolve_with_manifest(self, ref):
+        manifest, tool = super().resolve_with_manifest(ref)
+        tool = replace(tool, side_effects=("read:model", "write:model"))
+        return replace(manifest, tools=(tool,)), tool
+
+
+def test_plan_executor_unknown_effect_reports_tool_error_and_stays_blocked(tmp_path):
+    # The message the PMML converter error carries when JPMML rejects the
+    # installed scikit-learn; no Java is needed to replay the executor path.
+    cause = (
+        "PMML 导出环境不兼容：sklearn2pmml 0.131.0 内置的 JPMML 转换器不支持已安装的 "
+        "Scikit-Learn 1.9.1（转换器建议：downgrade Scikit-Learn to version '1.9.0'）"
+    )
+    repo = _repo(tmp_path, _plan(_step("step-deliver", tool="deliver")))
+    runner = FakeRunner(
+        [replace(_fail(cause), error_kind="pmml_export_environment"), _ok({"echoed": "late"})],
+    )
+    runner._tools = WriteEffectTools({"deliver": "retry"})
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    step = loaded.steps[0]
+    assert result.status == PlanStatus.FAILED
+    assert step.status == StepStatus.FAILED
+    assert len(runner.calls) == 1
+    assert step.error == (
+        "tool failure may have left side effects; explicit reconciliation required; "
+        f"original error_kind=pmml_export_environment: {cause}"
+    )
+    assert requires_effect_reconciliation(step.error)
+    runs = repo.list_step_runs("step-deliver")
+    assert [(run["error_kind"], run["error"]) for run in runs] == [("unknown_effect", step.error)]
+
+    from marvis.routers.plans import _attach_failure_envelopes
+
+    payload = plan_to_dict(loaded)
+    _attach_failure_envelopes(payload, repo)
+    envelope = payload["steps"][0]["failure_envelope"]
+    assert cause in envelope["message"]
+    assert envelope["error_kind"] == "completion_reconciliation"
+    assert envelope["retryable"] is False
+    assert envelope["suggested_actions"] == ["halt"]
+
+
+def test_plan_executor_unknown_effect_without_tool_error_keeps_fixed_message(tmp_path):
+    repo = _repo(tmp_path, _plan(_step("step-deliver", tool="deliver")))
+    runner = FakeRunner([replace(_fail(), error=None, error_kind=None)])
+    runner._tools = WriteEffectTools()
+
+    assert _executor(repo, runner).run("plan-1").status == PlanStatus.FAILED
+
+    assert repo.load_plan("plan-1").steps[0].error == (
+        "tool failure may have left side effects; explicit reconciliation required"
+    )
+    assert repo.list_step_runs("step-deliver")[0]["error_kind"] == "unknown_effect"
 
 
 def _protected_effect_policy():

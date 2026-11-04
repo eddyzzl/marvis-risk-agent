@@ -9,6 +9,7 @@ moving presentation rules back into the execution loop.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +26,29 @@ from marvis.agent.presenters._shared import (
     format_percent as _pct,
     format_value as _fmt,
 )
+from marvis.agent.presenters.display_labels import (
+    disabled_algorithm_reason as _disabled_algorithm_reason,
+    document_kind_label as _document_kind,
+    metric_label as _metric_label,
+    readable_recipe_text as _readable_recipe_text,
+    report_role_suffix,
+    metric_policy_label as _metric_policy_label,
+    metric_value_text as _metric_value,
+    money_text as _money,
+    readable_selection_reason as _readable_reason,
+    recipe_label as _recipe_label,
+    screening_reason_label as _screening_reason,
+    scrub_internal_ids as _scrub_ids,
+    selection_metric_label as _selection_metric_label,
+    target_type_label as _target_type_label,
+)
 from marvis.agent.presenters import strategy as _strategy_presenters
 from marvis.agent.presenters.strategy import (
     STRATEGY_RENDERERS,
     strategy_integrity_failure,
 )
 from marvis.orchestrator.evidence import artifact_bindings, artifact_refs
+from marvis.output.portfolio_report import PORTFOLIO_FLAG_LABELS
 
 
 _TRUSTED_RUNTIME_PRESENTERS = {
@@ -93,10 +111,10 @@ def _render_screen(o: dict):
     text = (
         f"**特征筛选完成**:从 {n} 个候选中提议保留 **{len(selected)}** 个特征。\n"
         f"- 剔除疑似**泄漏** {len(leak_names)} 个"
-        + (f"（如 {leak_names[:3]}）" if leak_names else "")
+        + (f"（如 {'、'.join(leak_names[:3])}）" if leak_names else "")
         + "\n"
         f"- 疑似**模型输出/评分**列 {len(susp_names)} 个"
-        + (f"（如 {susp_names[:5]}）" if susp_names else "")
+        + (f"（如 {'、'.join(susp_names[:5])}）" if susp_names else "")
         + "\n"
         f"- 剔除**不可用**（常量/稀疏） {len(unusable)} 个"
     )
@@ -113,7 +131,7 @@ def _render_screen(o: dict):
         )
         text += (
             f"\n- **{len(excluded_categorical)} 个类别列未入模**:{preview}{more}；"
-            "如需使用，请先用 woe_encode_categorical 编码，或改用 catboost（原生支持类别列）。"
+            "如需使用，请先对这些类别型特征做 WOE 编码，或改用 CatBoost 算法（可直接使用类别型特征）。"
         )
     nan_dropped = o.get("nan_labels_dropped") or 0
     if nan_dropped:
@@ -147,7 +165,8 @@ def _render_screen(o: dict):
                 "title": f"疑似泄漏（KS≥阈值，共{len(leak)}）",
                 "columns": ["特征", "KS", "原因"],
                 "rows": [
-                    [f, _num(k), r] for f, k, r in (_triple(i) for i in leak[:20])
+                    [f, _num(k), _screening_reason(r)]
+                    for f, k, r in (_triple(i) for i in leak[:20])
                 ],
             }
         )
@@ -157,7 +176,8 @@ def _render_screen(o: dict):
                 "title": f"疑似模型输出/评分列（共{len(susp)}）",
                 "columns": ["特征", "KS", "原因"],
                 "rows": [
-                    [f, _num(k), r] for f, k, r in (_triple(i) for i in susp[:20])
+                    [f, _num(k), _screening_reason(r)]
+                    for f, k, r in (_triple(i) for i in susp[:20])
                 ],
             }
         )
@@ -168,7 +188,7 @@ def _render_screen(o: dict):
                 rows.append(
                     [
                         str(item[0]) if item else "",
-                        str(item[1]) if len(item) > 1 else "",
+                        _screening_reason(item[1]) if len(item) > 1 else "",
                     ]
                 )
             else:
@@ -230,7 +250,7 @@ def _render_select(o: dict):
         f"- IV 底线淘汰 {len(low_iv)} 个\n"
         f"- 相关性去冗余淘汰 {len(collinear)} 个\n"
         f"- 高 VIF 淘汰 {len(high_vif)} 个\n"
-        f"- 超出 top_k 淘汰 {len(top_k_dropped)} 个"
+        f"- 超出入选数量上限淘汰 {len(top_k_dropped)} 个"
     )
     if other:
         text += f"\n- 其他原因淘汰 {len(other)} 个"
@@ -275,22 +295,23 @@ def _render_choose_modeling_spec(o: dict):
     target_type = str(o.get("target_type") or "binary")
     sample_weight_col = str(o.get("sample_weight_col") or "")
     metric_policy = str(o.get("metric_policy") or "")
+    recipe_text = "、".join(_recipe_label(recipe) for recipe in recipes) or "-"
     text = (
-        f"**建模规格已生成**:目标类型 `{target_type}`，"
-        f"算法 {'/'.join(recipes) or '-'}，选择策略 `{metric_policy}`。"
+        f"**建模规格已生成**:目标类型 {_target_type_label(target_type)}，"
+        f"算法 {recipe_text}，选择策略：{_metric_policy_label(metric_policy)}。"
     )
     tables = [
         {
             "title": "建模规格",
             "columns": ["项目", "值"],
             "rows": [
-                ["目标类型", target_type],
-                ["主调参算法", str(o.get("recipe") or "")],
-                ["训练算法", "/".join(recipes)],
+                ["目标类型", _target_type_label(target_type)],
+                ["主调参算法", _recipe_label(o.get("recipe")) if o.get("recipe") else ""],
+                ["训练算法", recipe_text if recipes else ""],
                 ["样本权重列", sample_weight_col or "不使用"],
-                ["候选特征数", _fmt(o.get("feature_count", ""))],
+                ["候选特征数", _metric_value("feature_count", o.get("feature_count", ""))],
                 ["调参轮数", _fmt(o.get("n_trials", ""))],
-                ["选择指标", metric_policy],
+                ["选择指标", _metric_policy_label(metric_policy)],
             ],
         }
     ]
@@ -304,12 +325,12 @@ def _render_choose_modeling_spec(o: dict):
                 "title": "算法可用性",
                 "columns": ["算法", "状态", "说明"],
                 "rows": (
-                    [[str(recipe), "可用", ""] for recipe in eligible]
+                    [[_recipe_label(recipe), "可用", ""] for recipe in eligible]
                     + [
                         [
-                            str(item.get("recipe", "")),
+                            _recipe_label(item.get("recipe", "")),
                             "不可用",
-                            str(item.get("reason", "")),
+                            _disabled_algorithm_reason(item.get("reason", "")),
                         ]
                         for item in disabled
                     ]
@@ -358,22 +379,22 @@ def _render_configure_tuning(o: dict):
     multi = len(budgets) > 1
     if multi:
         budget_note = "、".join(
-            f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets
+            f"{_recipe_label(recipe)} {budgets[recipe]} 轮" for recipe in recipes if recipe in budgets
         )
         text = (
-            f"**调参配置已生成**:候选算法 {'/'.join(recipes)}，"
+            f"**调参配置已生成**:候选算法 {'、'.join(_recipe_label(item) for item in recipes)}，"
             f"{'每个算法各自执行' if tune_enabled else '跳过'}两阶段随机搜索"
             f"（按算法预算 {budget_note}；多算法总预算=Σ各配方预算={_fmt(total_n_trials)} 轮）。"
         )
     else:
         text = (
-            f"**调参配置已生成**:算法 `{o.get('recipe', '')}`，"
+            f"**调参配置已生成**:算法 {_recipe_label(o.get('recipe', ''))}，"
             f"{'执行' if tune_enabled else '跳过'}两阶段随机搜索，"
             f"轮数 {o.get('n_trials', 0)}。"
         )
     rows = [
-        ["目标类型", str(o.get("target_type") or "")],
-        ["算法", "/".join(recipes) if recipes else str(o.get("recipe") or "")],
+        ["目标类型", _target_type_label(o.get("target_type"))],
+        ["算法", "、".join(_recipe_label(item) for item in recipes) if recipes else _recipe_label(o.get("recipe"))],
         ["随机搜索", "是" if tune_enabled else "否"],
     ]
     if multi:
@@ -381,7 +402,7 @@ def _render_configure_tuning(o: dict):
             [
                 "按算法调参预算（轮数，总预算=Σ各配方预算）",
                 "、".join(
-                    f"{recipe}={budgets[recipe]}"
+                    f"{_recipe_label(recipe)} {budgets[recipe]} 轮"
                     for recipe in recipes
                     if recipe in budgets
                 ),
@@ -391,7 +412,7 @@ def _render_configure_tuning(o: dict):
     else:
         rows.append(["调参轮数", _fmt(o.get("n_trials", ""))])
     rows.append(["样本权重列", sample_weight_col or "不使用"])
-    rows.append(["说明", str(o.get("reason") or "")])
+    rows.append(["说明", _readable_recipe_text(o.get("reason"))])
     tables = [
         {
             "title": "调参配置",
@@ -409,6 +430,12 @@ def _render_configure_tuning(o: dict):
             }
         )
     return text, tables
+
+
+def _estimator_params(params: dict) -> dict:
+    from marvis.packs.modeling.recipes.common import model_params
+
+    return model_params(params)
 
 
 def _render_tune(o: dict):
@@ -458,20 +485,20 @@ def _render_tune(o: dict):
             )
         tables.append(
             {
-                "title": "trials 排行（按 in-time 选优；前15）",
+                "title": "trials 排行（按样本内选优得分排序；前15）",
                 "columns": [
                     "#",
-                    "train_ks",
-                    "test_ks",
-                    "oot_ks",
-                    "test_auc",
-                    "oot_auc",
-                    "头部lift5%",
-                    "头部lift10%",
-                    "尾部lift5%",
-                    "尾部lift10%",
-                    "过拟合gap（tt）",
-                    "过拟合gap（to）",
+                    _metric_label("train_ks"),
+                    _metric_label("test_ks"),
+                    _metric_label("oot_ks"),
+                    _metric_label("test_auc"),
+                    _metric_label("oot_auc"),
+                    _metric_label("lift_head_5"),
+                    _metric_label("lift_head_10"),
+                    _metric_label("lift_tail_5"),
+                    _metric_label("lift_tail_10"),
+                    _metric_label("overfit_gap_tt"),
+                    _metric_label("overfit_gap_to"),
                 ],
                 "rows": rows,
             }
@@ -481,7 +508,14 @@ def _render_tune(o: dict):
             {
                 "title": "最优 trial 指标",
                 "columns": ["指标", "值"],
-                "rows": [[k, _fmt(v)] for k, v in best_metrics.items()],
+                # Per-fold detail records stay in the output; only readable
+                # scalars (and score lists) are listed.
+                "rows": [
+                    [_metric_label(k), _metric_value(k, v)]
+                    for k, v in best_metrics.items()
+                    if not isinstance(v, dict)
+                    and not (isinstance(v, list) and any(isinstance(i, dict) for i in v))
+                ],
             }
         )
     if best_params:
@@ -489,7 +523,14 @@ def _render_tune(o: dict):
             {
                 "title": "最优超参",
                 "columns": ["参数", "值"],
-                "rows": [[k, _fmt(v)] for k, v in best_params.items()],
+                # Only estimator settings: the platform's evidence records ride
+                # along in the params (eval S4 showed them as raw dicts).
+                "rows": [
+                    [k, _fmt(v)]
+                    for k, v in _estimator_params(best_params).items()
+                    if not isinstance(v, dict)
+                    and not (isinstance(v, list) and any(isinstance(i, dict) for i in v))
+                ],
             }
         )
     return text, tables
@@ -508,7 +549,10 @@ def _render_train(o: dict):
                 {
                     "title": "模型指标",
                     "columns": ["指标", "值"],
-                    "rows": [[k, _fmt(v)] for k, v in scalar.items()],
+                    "rows": [
+                        [_metric_label(k), _metric_value(k, v)]
+                        for k, v in scalar.items()
+                    ],
                 }
             )
     importance = o.get("feature_importance") or []
@@ -702,7 +746,7 @@ def _render_train_models(o: dict):
         tables.append(
             {
                 "title": "候选模型对比",
-                "columns": ["算法", *metric_columns],
+                "columns": ["算法", *(_metric_label(column) for column in metric_columns)],
                 "rows": rows,
             }
         )
@@ -717,7 +761,9 @@ def _render_train_models(o: dict):
             {
                 "title": "模型指标",
                 "columns": ["指标", "值"],
-                "rows": [[k, _fmt(v)] for k, v in scalar.items()],
+                "rows": [
+                    [_metric_label(k), _metric_value(k, v)] for k, v in scalar.items()
+                ],
             }
         )
     return text, tables
@@ -751,13 +797,61 @@ def _render_compare(o: dict):
     return f"**实验对比完成**:共 {len(experiments)} 个实验候选。", tables
 
 
+_REFIT_METRIC_KEYS = ("train_ks", "train_auc", "test_ks", "test_auc", "oot_ks", "oot_auc")
+
+
+def _missing_metric_cell(key: str, refit: dict) -> str:
+    if key.startswith(("test_", "weighted_test_")):
+        return "—（未计算：原 test 已并入重新拟合）"
+    if key.startswith(("oot_", "weighted_oot_")) and refit.get("oot_evaluation") == "not_performed":
+        return "—（未计算：重新拟合后未做 OOT 评估）"
+    return "—（未计算）"
+
+
+def _metric_cell(key: str, value) -> str:
+    return "—（未计算）" if value is None else _metric_value(key, value)
+
+
+_POLICY_STATUS_LABELS = {
+    "accepted": "已通过",
+    "overridden": "已人工放行",
+    "blocked": "未通过",
+    "not_requested": "未启用",
+}
+
+_LEGACY_REFIT_FAILURE_PREFIX = "全量重训失败,已保留原候选:"
+_LEGACY_REFIT_FAILURE_TEXT = "用 train+test 全量重训时训练过程出错，没有生成新模型；已保留原候选模型，后续报告和交付都使用它。"
+
+
 def _render_select_experiment(o: dict):
-    selected = o.get("selected_experiment_id") or ""
+    delivered = o.get("selected_experiment_id") or ""
+    evaluation = (
+        o.get("evaluation_evidence")
+        if isinstance(o.get("evaluation_evidence"), dict)
+        else {}
+    )
+    refit = o.get("refit") if isinstance(o.get("refit"), dict) else {}
+    selected = evaluation.get("experiment_id") or delivered
+    refit_applied = bool(evaluation.get("refit_applied")) and selected != delivered
     recipe = o.get("recipe") or "?"
     metric = o.get("selection_metric") or ""
     reason = o.get("selection_reason") or ""
     caps = o.get("capabilities") or {}
-    text = f"**已选择最终实验**:`{selected}`（{recipe}）；{reason}"
+    # Experiment ids stay in metadata (model_delivery); the card names the
+    # algorithm instead of an internal id.
+    text = f"**已选择最终实验**:{_recipe_label(recipe)} 实验；{_readable_reason(reason)}"
+    if refit_applied:
+        text += (
+            "\n\n交付模型已用同一组超参在 train+test 上重新拟合，报告和交付都使用这个重新拟合的模型。"
+            + (_scrub_ids(evaluation.get("note")) or "评估指标来自所选实验的留出集。")
+        )
+    elif refit.get("requested") and refit.get("reason") and not refit.get("applied"):
+        refit_reason = str(refit.get("reason"))
+        if refit_reason.startswith(_LEGACY_REFIT_FAILURE_PREFIX):
+            # Outputs stored before the producer moved the raw exception into
+            # failure_detail carried it in the reason itself.
+            refit_reason = _LEGACY_REFIT_FAILURE_TEXT
+        text += f"\n\n未重新拟合：{refit_reason}"
     rows = [
         ["PMML", "是" if caps.get("pmml_supported") else "否"],
         ["移交验证", "是" if caps.get("handoff_supported") else "否"],
@@ -769,7 +863,8 @@ def _render_select_experiment(o: dict):
         o.get("policy_decision") if isinstance(o.get("policy_decision"), dict) else {}
     )
     if policy:
-        rows.append(["策略门控", policy.get("status") or "not_requested"])
+        status = str(policy.get("status") or "not_requested")
+        rows.append(["策略门控", _POLICY_STATUS_LABELS.get(status, status)])
         violations = [
             str(item.get("message") or item.get("code") or "")
             for item in (policy.get("violations") or [])
@@ -777,29 +872,66 @@ def _render_select_experiment(o: dict):
         ]
         if violations:
             rows.append(["策略说明", "; ".join(item for item in violations if item)])
+        warnings = [
+            str(item.get("message") or item.get("code") or "")
+            for item in (policy.get("warnings") or [])
+            if isinstance(item, dict)
+        ]
+        if warnings:
+            rows.append(["质量提醒", "; ".join(item for item in warnings if item)])
         if policy.get("override_reason"):
-            rows.append(["Override", policy.get("override_reason")])
+            rows.append(["放行原因", policy.get("override_reason")])
     tables = [
         {
-            "title": f"最终模型交付能力（{metric}）",
+            "title": f"最终模型交付能力（{_selection_metric_label(metric)}）",
             "columns": ["能力", "状态"],
             "rows": rows,
         }
     ]
-    metrics = o.get("metrics") or {}
+    delivered_metrics = o.get("metrics") if isinstance(o.get("metrics"), dict) else {}
+    evaluation_metrics = (
+        evaluation.get("metrics") if isinstance(evaluation.get("metrics"), dict) else {}
+    )
+    metrics = evaluation_metrics if refit_applied else (evaluation_metrics or delivered_metrics)
     if metrics:
         tables.append(
             {
-                "title": "最终模型指标",
+                "title": (
+                    "最终模型指标（评估证据：所选实验的留出集）"
+                    if refit_applied
+                    else "最终模型指标"
+                ),
                 "columns": ["指标", "值"],
-                "rows": [[key, _fmt(value)] for key, value in metrics.items()],
+                "rows": [
+                    [_metric_label(key), _metric_cell(key, value)]
+                    for key, value in metrics.items()
+                ],
+            }
+        )
+    if refit_applied:
+        keys = list(dict.fromkeys([
+            *_REFIT_METRIC_KEYS,
+            *(key for key, value in delivered_metrics.items() if value is not None),
+        ]))
+        tables.append(
+            {
+                "title": "交付模型指标（train+test 重新拟合）",
+                "columns": ["指标", "值"],
+                "rows": [
+                    [
+                        _metric_label(key),
+                        _metric_value(key, delivered_metrics[key])
+                        if delivered_metrics.get(key) is not None
+                        else _missing_metric_cell(key, refit),
+                    ]
+                    for key in keys
+                ],
             }
         )
     return text, tables
 
 
 def _render_report(o: dict):
-    path = o.get("report_path") or ""
     sections = [
         section
         for section in (o.get("section_status") or [])
@@ -808,7 +940,7 @@ def _render_report(o: dict):
     available = sum(1 for section in sections if section.get("available"))
     skipped = len(sections) - available
     text = (
-        f"**模型开发报告已生成**:`{path}`"
+        "**模型开发报告已生成**"
         f"（业务章节 {available}/{len(sections)} 可生成"
         + (f"，{skipped} 个缺输入/跳过" if skipped else "")
         + "，可在右栏下载）。"
@@ -840,12 +972,10 @@ def _render_report(o: dict):
 
 def _render_reports(o: dict):
     reports = [item for item in (o.get("reports") or []) if isinstance(item, dict)]
-    primary_path = str(o.get("report_path") or "")
     generated = [item for item in reports if str(item.get("report_path") or "").strip()]
     text = (
-        f"**模型开发报告已生成**：共 {len(generated)} 份"
-        + (f"，主报告 `{primary_path}`" if primary_path else "")
-        + "。请使用本条结果下方的“下载模型开发报告”按钮。"
+        f"**模型开发报告已生成**：共 {len(generated)} 份。"
+        "请使用本条结果下方的“下载模型开发报告”按钮。"
     )
     tables = []
     if reports:
@@ -855,14 +985,14 @@ def _render_reports(o: dict):
                 "columns": ["实验", "算法", "状态", "报告"],
                 "rows": [
                     [
-                        str(item.get("experiment_id") or ""),
-                        str(item.get("recipe") or ""),
+                        f"实验 {index}{report_role_suffix(o, item.get('experiment_id'))}",
+                        _recipe_label(item.get("recipe")),
                         "已生成"
                         if str(item.get("report_path") or "").strip()
                         else "缺失",
-                        str(item.get("report_path") or ""),
+                        _document_kind(item.get("report_path")) or "-",
                     ]
-                    for item in reports
+                    for index, item in enumerate(reports, start=1)
                 ],
             }
         )
@@ -1202,7 +1332,9 @@ def _render_feature_metrics(o: dict):
                         "有效样本",
                         "覆盖率",
                         "缺失率",
-                        "单一值率",
+                        # mode_rate is the share of the most common value;
+                        # "单一值率" was read backwards (eval S3).
+                        "最常见值占比",
                         "零值率",
                     ],
                     "rows": [
@@ -1373,9 +1505,8 @@ def _render_feature_report(o: dict):
     if bin_text:
         text += f"\n\n{bin_text}"
     tables.extend(bin_tables)
-    path = o.get("report_path") or ""
-    if path:
-        text += f"\n\n**特征分析报告已生成**:`{path}`。请使用本条结果下方的“下载特征分析报告”按钮。"
+    if o.get("report_path"):
+        text += "\n\n**特征分析报告已生成**（Excel）。请使用本条结果下方的“下载特征分析报告”按钮。"
     return text, tables
 
 
@@ -1440,12 +1571,45 @@ def _render_feature_bins(o: dict):
     return f"**分箱分析完成**：已分析 {len(analyses)} 个用户选择的特征。", [table]
 
 
+def _chart_number(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _render_vintage_curve(o: dict):
     cohorts = [str(item) for item in (o.get("cohorts") or [])]
     mob_axis = list(o.get("mob_axis") or [])
     summary = o.get("summary") if isinstance(o.get("summary"), dict) else {}
     trend = str(summary.get("trend") or "stable")
-    text = f"**Vintage 曲线完成**:{len(cohorts)} 个 cohort，趋势 `{trend}`。"
+    # The platform's trend code, read as the comparison it encodes (newest
+    # vs. oldest cohort at the reference MOB).
+    trend_text = {
+        "deteriorating": "整体在变差（最新一批高于最早一批）",
+        "improving": "整体在变好（最新一批低于最早一批）",
+        "stable": "整体平稳",
+    }.get(trend, trend)
+    text = f"**Vintage 曲线完成**:{len(cohorts)} 个 cohort，{trend_text}。"
+    # The headline the user usually asked for (eval S7: 「哪个月最差」 went
+    # unanswered): worst and best cohort at the reference MOB, straight from
+    # the tool's at_ref values; cohorts that have not reached it are absent.
+    reference = summary.get("at_ref") if isinstance(summary.get("at_ref"), dict) else {}
+    ranked = sorted(
+        ((str(cohort), number) for cohort, value in reference.items()
+         if (number := _chart_number(value)) is not None),
+        key=lambda item: item[1],
+    )
+    if len(ranked) >= 2:
+        worst, best = ranked[-1], ranked[0]
+        text += (
+            f"参考 MOB 下资产质量最差的是 {worst[0]}（{_pct(worst[1])}），"
+            f"最好的是 {best[0]}（{_pct(best[1])}）。"
+        )
+        missing = [cohort for cohort in cohorts if cohort not in reference]
+        if missing:
+            text += f"{'、'.join(missing)} 还没到参考 MOB，没有参与比较。"
     tables = []
     curves = o.get("curves") if isinstance(o.get("curves"), dict) else {}
     counts = o.get("counts") if isinstance(o.get("counts"), dict) else {}
@@ -1453,6 +1617,22 @@ def _render_vintage_curve(o: dict):
         tables.append(
             {
                 "title": "Vintage 累计坏账率",
+                # The tool's own curve values (0..1) for the cohort x MOB line
+                # chart above the table; the frontend only plots them.
+                "chart": {
+                    "kind": "vintage_curves",
+                    "mob_axis": [str(mob) for mob in mob_axis],
+                    "series": [
+                        {
+                            "cohort": cohort,
+                            "values": [
+                                _chart_number(value)
+                                for value in (curves.get(cohort) or [])[: len(mob_axis)]
+                            ],
+                        }
+                        for cohort in cohorts
+                    ],
+                },
                 "columns": ["cohort", "样本数", *[f"MOB{mob}" for mob in mob_axis]],
                 "rows": [
                     [
@@ -2178,6 +2358,15 @@ def _render_propose_join(o: dict):
         f"**拼接诊断完成**:{len(joins)} 张特征表待左连接到锚样本（锚行数 **1:1 保留**）。\n"
         "请核对每张表的命中率/键唯一性/是否膨胀。键不唯一的特征需选去重策略；确认后才会真正执行拼接。"
     )
+    # Why each proposed key was chosen (customer-id precedence; hashed keys explained), as
+    # built by data_ops.propose_join from the diagnosed facts.
+    key_reasons = [
+        str(j.get("key_choice_reason") or "").strip() for j in joins if isinstance(j, dict)
+    ]
+    if any(key_reasons):
+        text += "\n\n**拼接键选择**：\n" + "\n".join(
+            f"- {reason}" for reason in key_reasons if reason
+        )
     if any_conflict:
         text += (
             "\n\n⚠️ 检测到**同键值冲突**（同一键多行但特征值不一致）：这类**不会自动删除**，"
@@ -2342,7 +2531,7 @@ def _render_execute_join(o: dict):
     joined_rows = o.get("joined_rows")
     ok = anchor_rows == joined_rows
     text = (
-        f"**拼接执行完成**:结果数据集 `{o.get('result_dataset_id', '')}`，"
+        "**拼接执行完成**:已生成拼接结果数据集，"
         f"锚行 {anchor_rows} → 拼接后 {joined_rows} 行"
         + ("（1:1 保持 ✓）" if ok else "（⚠️ 行数发生变化，请检查膨胀）")
     )
@@ -2356,10 +2545,11 @@ def _render_execute_join(o: dict):
         tables.append(
             {
                 "title": "各特征表贡献",
-                "columns": ["特征表", "命中率", "新增列", "新列缺失率", "去重策略"],
+                "columns": ["特征表", "拼接键", "命中率", "新增列", "新列缺失率", "去重策略"],
                 "rows": [
                     [
-                        str(row.get("feature_id", "?")),
+                        str(row.get("feature_name") or row.get("feature_id", "?")),
+                        str(row.get("key") or "-"),
                         _num(row.get("match_rate")),
                         str(row.get("new_columns", "")),
                         _num(row.get("new_columns_null_rate")),
@@ -2372,6 +2562,29 @@ def _render_execute_join(o: dict):
     return text, tables
 
 
+_DELIVERY_ACTION_LABELS = {
+    "export_pmml": "导出 PMML",
+    "handoff_to_validation": "移交验证",
+    "create_challenger_backtest": "创建挑战者回测",
+}
+_DELIVERY_STATUS_LABELS = {
+    "succeeded": "已完成",
+    "skipped": "已跳过",
+    "missing": "缺失",
+    "failed": "失败",
+    "unsupported": "不支持",
+    "partial": "部分完成",
+    "warn": "需复核",
+    "warning": "需复核",
+    "pass": "通过",
+}
+
+
+def _delivery_status(status) -> str:
+    text = str(status or "")
+    return _DELIVERY_STATUS_LABELS.get(text, text)
+
+
 def _render_post_training_action(o: dict):
     actions = [item for item in (o.get("actions") or []) if isinstance(item, dict)]
     succeeded = sum(1 for item in actions if item.get("status") == "succeeded")
@@ -2381,21 +2594,25 @@ def _render_post_training_action(o: dict):
         if actions
         else "**训练后交付动作完成**。"
     )
+    # Stored paths stay in the tool output (downloads use them); the card names
+    # each deliverable and its file type instead of an internal file name.
     rows = [
         [
-            "原生模型",
-            "succeeded" if o.get("native_model_path") else "missing",
-            o.get("native_model_path") or "",
+            "模型文件",
+            _delivery_status("succeeded" if o.get("native_model_path") else "missing"),
+            _document_kind(o.get("native_model_path")) or "-",
             "",
         ],
     ]
     if o.get("approval_package_path"):
         rows.append(
             [
-                "审批包",
-                "succeeded",
-                o.get("approval_package_markdown_path")
-                or o.get("approval_package_path"),
+                "审批材料包",
+                _delivery_status("succeeded"),
+                _document_kind(
+                    o.get("approval_package_markdown_path")
+                    or o.get("approval_package_path")
+                ),
                 "模型审批与交付证据包",
             ]
         )
@@ -2403,8 +2620,8 @@ def _render_post_training_action(o: dict):
         rows.append(
             [
                 "模型卡",
-                "succeeded",
-                o.get("model_card_markdown_path") or o.get("model_card_path"),
+                _delivery_status("succeeded"),
+                _document_kind(o.get("model_card_markdown_path") or o.get("model_card_path")),
                 "最终模型卡",
             ]
         )
@@ -2417,24 +2634,35 @@ def _render_post_training_action(o: dict):
         rows.append(
             [
                 "监控策略",
-                monitoring.get("status") or "succeeded",
-                o.get("monitoring_policy_markdown_path")
-                or o.get("monitoring_policy_path"),
+                _delivery_status(monitoring.get("status") or "succeeded"),
+                _document_kind(
+                    o.get("monitoring_policy_markdown_path")
+                    or o.get("monitoring_policy_path")
+                ),
                 monitoring.get("recommendation") or "模型监控阈值策略",
             ]
         )
     for item in actions:
         action = str(item.get("action") or "")
         status = str(item.get("status") or "")
-        artifact = (
-            item.get("pmml_path")
-            or item.get("validation_task_id")
-            or item.get("challenger_task_id")
-            or item.get("markdown_path")
-            or item.get("package_path")
-            or ""
+        if item.get("validation_task_id"):
+            artifact = "已创建验证任务"
+        elif item.get("challenger_task_id"):
+            artifact = "已创建挑战者回测任务"
+        else:
+            artifact = _document_kind(
+                item.get("pmml_path")
+                or item.get("markdown_path")
+                or item.get("package_path")
+            )
+        rows.append(
+            [
+                _DELIVERY_ACTION_LABELS.get(action, action),
+                _delivery_status(status),
+                artifact or "-",
+                str(item.get("reason") or ""),
+            ]
         )
-        rows.append([action, status, artifact, str(item.get("reason") or "")])
     tables = [
         {
             "title": "训练后交付状态",
@@ -2591,6 +2819,12 @@ def _render_flow_rate(o: dict):
         text += f" 红旗 {len(red_flags)} 项。"
     tables = []
     if net_flows:
+        # Balance-weighted flows read as money; count-weighted flows as counts.
+        by_balance = any(
+            isinstance(m, dict) and m.get("base_kind") == "balance"
+            for m in (o.get("matrix_by_month") or [])
+        )
+        amount = _money if by_balance else _count_text
         tables.append(
             {
                 "title": "逐月净流量（进入坏 / 退出坏）",
@@ -2598,15 +2832,15 @@ def _render_flow_rate(o: dict):
                 "rows": [
                     [
                         str(r.get("month") or ""),
-                        _fmt(r.get("into_bad")),
-                        _fmt(r.get("out_of_bad")),
+                        amount(r.get("into_bad")),
+                        amount(r.get("out_of_bad")),
                     ]
                     for r in net_flows
                 ],
             }
         )
     if red_flags:
-        tables.append(_data_quality_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags, step_label="流量分析"))
     return text, tables
 
 
@@ -2616,12 +2850,37 @@ def _render_bucket_migration(o: dict):
     heat_table = [row for row in (o.get("heat_table") or []) if isinstance(row, dict)]
     red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
     window = [str(m) for m in (o.get("window_months") or [])]
-    text = f"**桶迁徙热力完成**:{len(states)} 状态，窗口 {len(window)} 个月。"
+    # a row whose every cell is None is an unobserved from-state (undefined row)
+    unobserved = [
+        str(row.get("from") or "")
+        for row in heat_table
+        if to_states and all(row.get(state) is None for state in to_states)
+    ]
+    text = (
+        f"**桶迁徙热力完成**:{len(states)} 状态，窗口 {len(window)} 个月；"
+        "平均迁徙率按窗口内迁出基数池化，每行合计 100%（含 exited）。"
+    )
+    if unobserved:
+        text += f" {'、'.join(unobserved)} 在窗口内无迁出观测，该行显示「无观测」。"
+    from marvis.packs.analysis.report import _worst_worsening_cell
+
+    worst = _worst_worsening_cell(o)
+    if worst is not None:
+        text += (
+            f" 最大的恶化流向是 {worst['from']} → {worst['to']}"
+            f"（窗口平均 {_pct(worst['rate'])}）。"
+        )
     tables = []
     if heat_table and to_states:
-        columns = ["from", *to_states]
+        columns = ["起始状态", *to_states]
         rows = [
-            [str(row.get("from") or ""), *[_pct(row.get(state)) for state in to_states]]
+            [
+                str(row.get("from") or ""),
+                *[
+                    "无观测" if row.get(state) is None else _pct(row.get(state))
+                    for state in to_states
+                ],
+            ]
             for row in heat_table
         ]
         # matrix-heat column_specs: the from label is text, each to-state cell is a
@@ -2636,7 +2895,7 @@ def _render_bucket_migration(o: dict):
             }
         )
     if red_flags:
-        tables.append(_data_quality_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags, step_label="迁徙热力"))
     return text, tables
 
 
@@ -2648,6 +2907,14 @@ def _render_segment_profile(o: dict):
         f"**细分画像完成**:{len(segments)} 个细分，top1 占比 {_pct(conc.get('top1_pct'))}，"
         f"HHI {_fmt(conc.get('hhi'))}。"
     )
+    # Which segment that is and whether it is flagged, read off the step's own
+    # rows (eval S9: the user asked about concentration and got no sentence).
+    sized = [r for r in segments if isinstance(r.get("pop_pct"), (int, float))]
+    if sized:
+        top = max(r["pop_pct"] for r in sized)
+        names = "、".join(str(r.get("segment") or "") for r in sized if r["pop_pct"] == top)
+        flagged = any(f.get("kind") == "high_concentration" for f in red_flags)
+        text += f"占比最大的细分是 {names}（{_pct(top)}），{'已触发' if flagged else '没有触发'}集中度红旗。"
     tables = []
     if segments:
         tables.append(
@@ -2665,7 +2932,7 @@ def _render_segment_profile(o: dict):
                         _fmt(r.get("avg_score"))
                         if r.get("avg_score") is not None
                         else "n/a",
-                        _fmt(r.get("net_profit"))
+                        _money(r.get("net_profit"))
                         if r.get("net_profit") is not None
                         else "n/a",
                     ]
@@ -2674,7 +2941,7 @@ def _render_segment_profile(o: dict):
             }
         )
     if red_flags:
-        tables.append(_data_quality_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags, step_label="细分画像"))
     return text, tables
 
 
@@ -2687,7 +2954,7 @@ def _render_el_estimate(o: dict):
     # total_el is a reference-snapshot口径 (latest month), NOT a cross-month sum;
     # annotate the headline so the user ties合计 EL to a specific month.
     basis_note = f"（参考快照 {ref} 口径）" if ref else ""
-    text = f"**预期损失估计完成**:损失态 `{o.get('loss_state', '')}`，合计 EL {_fmt(o.get('total_el'))}{basis_note}。"
+    text = f"**预期损失估计完成**:损失态 `{o.get('loss_state', '')}`，合计 EL {_money(o.get('total_el'))}{basis_note}。"
     tables = []
     if chain:
         tables.append(
@@ -2695,7 +2962,12 @@ def _render_el_estimate(o: dict):
                 "title": "各状态到损失态的吸收概率",
                 "columns": ["起始状态", "P(损失)"],
                 "rows": [
-                    [str(r.get("from_state") or ""), _pct(r.get("p_to_loss"))]
+                    [
+                        str(r.get("from_state") or ""),
+                        "无法估计"
+                        if r.get("p_to_loss") is None
+                        else _pct(r.get("p_to_loss")),
+                    ]
                     for r in chain
                 ],
             }
@@ -2709,29 +2981,30 @@ def _render_el_estimate(o: dict):
                     [
                         ("★ " if r.get("is_reference") else "")
                         + str(r.get("month") or ""),
-                        _fmt(r.get("balance")),
-                        _fmt(r.get("expected_loss")),
+                        _money(r.get("balance")),
+                        _money(r.get("expected_loss")),
                     ]
                     for r in el_by_month
                 ],
             }
         )
     if red_flags:
-        tables.append(_data_quality_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags, step_label="损失估计"))
     return text, tables
 
 
 def _render_portfolio_report(o: dict):
     sheets = [str(s) for s in (o.get("sheets") or [])]
     text = (
-        f"**组合报告已生成**:`{o.get('report_path', '')}`，含 {len(sheets)} 个 sheet。"
+        f"**组合分析报告已生成**（Excel，含 {len(sheets)} 个工作表）。"
+        "请使用本条结果下方的“下载组合分析报告”按钮。"
     )
     tables = []
     if sheets:
         tables.append(
             {
-                "title": "报告 sheet",
-                "columns": ["#", "sheet"],
+                "title": "报告工作表",
+                "columns": ["#", "工作表"],
                 "rows": [[str(i), s] for i, s in enumerate(sheets, start=1)],
             }
         )
@@ -2801,17 +3074,60 @@ def _render_risk_analysis_report(o: dict):
     return text, tables
 
 
+_PORTFOLIO_HIGHLIGHT_LABELS = {
+    "total_el": "合计预期损失（参考快照口径）",
+    "reference_snapshot": "参考快照月",
+    "hhi": "细分集中度 HHI",
+    "top1_pct": "最大细分占比",
+    "migration_months": "迁徙窗口月份",
+    "top1_segment": "最大细分",
+}
+
+
+def _portfolio_highlight_value(key: str, value) -> str:
+    if key == "total_el":
+        return _money(value)
+    if key == "top1_pct":
+        return _pct(value)
+    if isinstance(value, (list, tuple)):
+        return "、".join(str(item) for item in value) or "-"
+    return _fmt(value)
+
+
+def _count_text(value) -> str:
+    return "n/a" if value is None else _integer_text(value)
+
+
 def _render_portfolio_gate_summary(o: dict):
     checklist = [str(item) for item in (o.get("checklist") or [])]
     highlights = o.get("highlights") if isinstance(o.get("highlights"), dict) else {}
     text = f"**组合分析汇总**:{o.get('red_flag_count', 0)} 项数据质量红旗，请确认后生成报告。"
+    # The conclusions the user asked for, from the platform's own numbers.
+    findings = []
+    worst = highlights.get("worst_migration")
+    if isinstance(worst, dict) and worst.get("rate") is not None:
+        findings.append(
+            f"迁徙上最大的恶化流向是 {worst.get('from')} → {worst.get('to')}（窗口平均 {_pct(worst.get('rate'))}）"
+        )
+    if highlights.get("top1_segment") and highlights.get("top1_pct") is not None:
+        flagged = "，已触发集中度红旗" if highlights.get("concentration_flagged") else "，没有触发集中度红旗"
+        findings.append(f"最大细分 {highlights['top1_segment']} 占 {_pct(highlights['top1_pct'])}{flagged}")
+    if highlights.get("total_el") is not None:
+        findings.append(f"合计预期损失 {_money(highlights['total_el'])}（参考快照口径）")
+    if findings:
+        text += "\n" + "；".join(findings) + "。"
     tables = []
-    if highlights:
+    rows = [
+        [_PORTFOLIO_HIGHLIGHT_LABELS.get(str(k), str(k)), _portfolio_highlight_value(str(k), v)]
+        for k, v in highlights.items()
+        if v is not None and str(k) not in {"total_el_basis", "worst_migration", "concentration_flagged"}
+    ]
+    if rows:
         tables.append(
             {
                 "title": "关键数字",
                 "columns": ["指标", "值"],
-                "rows": [[str(k), _fmt(v)] for k, v in highlights.items()],
+                "rows": rows,
             }
         )
     if checklist:
@@ -2825,14 +3141,50 @@ def _render_portfolio_gate_summary(o: dict):
     return text, tables
 
 
-def _data_quality_flag_table(red_flags: list[dict]) -> dict:
+_PORTFOLIO_FLAG_LABELS = PORTFOLIO_FLAG_LABELS
+
+
+def _data_quality_flag_table(red_flags: list[dict], *, step_label: str) -> dict:
+    """One table per step, titled with the step; identical flags shown once and
+    flag kinds shown as Chinese labels (never the raw internal kind)."""
+    rows: list[list[str]] = []
+    for flag in red_flags:
+        kind = str(flag.get("kind") or "")
+        row = [
+            _PORTFOLIO_FLAG_LABELS.get(kind, "数据质量提示"),
+            str(flag.get("message") or ""),
+        ]
+        if row not in rows:
+            rows.append(row)
     return {
-        "title": "数据质量红旗",
+        "title": f"数据质量红旗 · {step_label}",
         "columns": ["类型", "说明"],
-        "rows": [
-            [str(f.get("kind") or ""), str(f.get("message") or "")] for f in red_flags
-        ],
+        "rows": rows,
     }
+
+
+def _render_resolve_special_values(o: dict):
+    """Special-value policy result in business words; the derived dataset id and
+    policy fingerprint stay in the tool output for audit, not in the sentence."""
+    masked = [str(item) for item in (o.get("masked") or [])]
+    retained = [str(item) for item in (o.get("retained") or [])]
+    dropped = [str(item) for item in (o.get("dropped") or [])]
+    selected = [str(item) for item in (o.get("selected") or [])]
+    if not (masked or retained or dropped):
+        return f"**特殊值检查完成**：所选 {len(selected)} 个特征没有需要处理的特殊值。", []
+    parts = []
+    if masked:
+        parts.append(f"按缺失处理 {len(masked)} 个（{'、'.join(masked[:5])}）")
+    if retained:
+        parts.append(f"保留原值 {len(retained)} 个（{'、'.join(retained[:5])}）")
+    if dropped:
+        parts.append(f"剔除 {len(dropped)} 个（{'、'.join(dropped[:5])}）")
+    text = (
+        "**特殊值处理完成**：" + "；".join(parts)
+        + f"。后续使用 {len(selected)} 个特征"
+        + ("，并已生成处理后的数据集。" if masked else "。")
+    )
+    return text, []
 
 
 _RENDERERS = {
@@ -2869,16 +3221,26 @@ _RENDERERS = {
     "expected_loss_estimate": _render_el_estimate,
     "portfolio_gate_summary": _render_portfolio_gate_summary,
     "portfolio_report": _render_portfolio_report,
+    "resolve_special_values": _render_resolve_special_values,
 }
 
 
 def _render_generic(o: dict):
     if not isinstance(o, dict) or not o:
         return "已完成。", []
-    scalar = {k: v for k, v in o.items() if isinstance(v, (str, int, float, bool))}
+    # Only values with a business label are echoed; raw keys never reach the sentence.
+    scalar = {
+        k: v
+        for k, v in o.items()
+        if isinstance(v, (str, int, float, bool))
+        and _metric_label(k) != str(k)
+        and str(v).strip()
+    }
     if scalar:
-        head = ", ".join(f"{k}={_fmt(v)}" for k, v in list(scalar.items())[:6])
-        return f"已完成:{head}", []
+        head = "，".join(
+            f"{_metric_label(k)} {_metric_value(k, v)}" for k, v in list(scalar.items())[:6]
+        )
+        return f"已完成：{head}。", []
     return "已完成。", []
 
 

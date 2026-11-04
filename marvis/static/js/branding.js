@@ -75,7 +75,25 @@ export function imageMimeType(url) {
 
 export function applyBranding(branding) {
   document.title = branding.browserTitle;
-  if ($("platformName")) $("platformName").textContent = branding.platformName;
+  if ($("platformName")) {
+    // Mockup sidebar: "MARVIS" on top and the descriptor small underneath when
+    // the configured name reads "MARVIS-全能风控智能体"; other names stay one line.
+    // Only the first separator splits; the rest of the name stays as written.
+    const match = /^(.+?)\s*[-—–·]\s*(.+)$/.exec(branding.platformName);
+    const mark = match ? match[1].trim() : "";
+    const descriptor = match ? match[2].trim() : "";
+    const node = $("platformName");
+    node.textContent = "";
+    if (descriptor && mark) {
+      const markNode = document.createElement("b");
+      markNode.textContent = mark;
+      const small = document.createElement("small");
+      small.textContent = descriptor;
+      node.append(markNode, small);
+    } else {
+      node.textContent = branding.platformName;
+    }
+  }
   if ($("brandLogo")) {
     $("brandLogo").src = branding.logoUrl;
     $("brandLogo").alt = `${branding.platformName} logo`;

@@ -372,6 +372,25 @@ def test_pool_validation_rejects_ambiguous_or_expansive_commands(
     assert result.clarification_code == code
 
 
+def test_pool_validation_ungrounded_controls_are_named_in_business_terms() -> None:
+    result, _ = _compile(
+        "对当前审批和拒绝策略池执行 validation 和 OOT 独立样本回放验证",
+        {"strategy_type": "approval", "partition": "validation"},
+    )
+
+    assert result.clarification_code == "strategy_pool_validation_controls_not_grounded"
+    assert result.clarification_fields == (
+        "strategy_type approval",
+        "partition validation",
+    )
+    assert (
+        "当前无法核对：策略类型（审批策略）、回放分区（验证集）。"
+        in result.clarification
+    )
+    for internal in ("strategy_type", "partition", "approval/reject", "validation/OOT"):
+        assert internal not in result.clarification
+
+
 def test_explicit_pool_validation_cannot_be_rerouted_by_llm() -> None:
     result, _llm = _compile(
         "对当前审批策略池执行 validation 独立样本回放验证",

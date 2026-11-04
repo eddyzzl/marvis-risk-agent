@@ -454,7 +454,7 @@ def test_driver_tuning_budget_revision_preserves_features_and_reopens_config_gat
         for table in turn.messages[-1].metadata["tables"]
         if table.get("title") == "建模规格"
     )
-    assert ["按算法调参预算", "lgb=1、xgb=1、catboost=1（总计 3 轮）"] in spec_table[
+    assert ["按算法调参预算", "LightGBM 1 轮、XGBoost 1 轮、CatBoost 1 轮（总计 3 轮）"] in spec_table[
         "rows"
     ]
     revised = repo.load_plan(plan.id)

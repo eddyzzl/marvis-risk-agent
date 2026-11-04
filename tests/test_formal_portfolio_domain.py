@@ -7,18 +7,28 @@ import pytest
 
 from marvis.orchestrator.eval.acceptance_trust import TrustInputError
 from marvis.orchestrator.eval.formal_acceptance import _domain, _check_case_definition
-from marvis.orchestrator.eval.formal_benchmark import FormalCase, SAFETY_DIMENSIONS, SOFTWARE_GAPS
+from marvis.orchestrator.eval.formal_benchmark import FormalCase, SAFETY_DIMENSIONS
 from marvis.orchestrator.eval.runtime_contracts import digest
 from marvis.orchestrator.eval.runtime_run_manifest import verify_run_manifest
 from marvis.orchestrator.eval.runtime_scoring import ExpectedCase, ExpectedSuite
 from test_acceptance_trust import put
 from test_formal_benchmark import frozen_fixture
 from test_runtime_archive_portfolio import portfolio_archive as portfolio_archive
+from test_runtime_archive_portfolio_trend import trend_archive as trend_archive
 
 
 @pytest.fixture
 def formal_portfolio_originals(portfolio_archive, tmp_path):
-    archive, sha, binding = portfolio_archive
+    return _formal_originals(portfolio_archive, tmp_path)
+
+
+@pytest.fixture
+def formal_trend_originals(trend_archive, tmp_path):
+    return _formal_originals(trend_archive, tmp_path)
+
+
+def _formal_originals(originals, tmp_path):
+    archive, sha, binding = originals
     shutil.copytree(archive, tmp_path / "archive")
     reference = put(tmp_path, "binding.json", binding.model_dump())
     public = archive.parents[2] / "public" / binding.run_id
@@ -38,7 +48,7 @@ def test_formal_portfolio_recomputes_domain_but_retains_synthetic_and_safety_bou
     assert reason is None and result["domain_status"] == "verified" and result["actual_result"] == "done", result
     assert result["domain_checks"]["workbook_cells"]["status"] == "verified"
     assert {key for key, status in result["safety"] if status == "unavailable"} == set(SAFETY_DIMENSIONS) - {"evidence_binding", "false_completion"}
-    assert "trend_vintage" in SOFTWARE_GAPS["risk_portfolio"]
+    assert "baseline_training_and_business_truth" in result["unsupported"]
     with pytest.raises(TrustInputError, match="formal_hidden_family_mismatch"):
         _check_case_definition(f.case, f.expected, f.binding.case, f.run["executions"][f.case.id])
 
@@ -85,3 +95,27 @@ def test_expected_scalar_is_checked_against_recomputation(formal_portfolio_origi
     result, reason = _domain(f.case, expected, f.item, f.root, f.record, f.run)
     assert reason is None and result["domain_status"] == "verified" and result["actual_result"] == "failed"
     assert "original_key_not_available" in json.dumps(result["unsupported"])
+
+
+def test_formal_trend_uses_independent_series_values(formal_trend_originals):
+    f = formal_trend_originals
+    expected = ExpectedCase(result="done", assertions=[
+        {"kind": "tool_succeeded", "tool": "analysis.score_stability_trend"},
+        {"kind": "output_length", "tool": "analysis.score_stability_trend", "path": ["trend"], "value": 2},
+        {"kind": "output_equals", "tool": "analysis.score_stability_trend", "path": ["metric_name"], "value": "psi"},
+    ])
+    result, reason = _domain(f.case, expected, f.item, f.root, f.record, f.run)
+    assert reason is None and result["domain_status"] == "verified" and result["actual_result"] == "done", result
+    wrong = ExpectedCase(result="done", assertions=[{
+        "kind": "output_close", "tool": "analysis.score_stability_trend", "path": ["trend", 0, "metric"], "value": -1.0,
+    }])
+    result, reason = _domain(f.case, wrong, f.item, f.root, f.record, f.run)
+    assert reason is None and result["domain_status"] == "verified" and result["actual_result"] == "failed"
+
+
+def test_formal_trend_requires_its_public_step_hash(formal_trend_originals):
+    f = formal_trend_originals
+    observed = f.run["executions"][f.case.id]
+    next(s for s in observed["execution"]["steps"] if s["tool"] == "analysis.score_stability_trend")["output_sha256"] = "f" * 64
+    with pytest.raises(TrustInputError, match="final_portfolio_step_binding_mismatch"):
+        _domain(f.case, f.expected, f.item, f.root, f.record, f.run)

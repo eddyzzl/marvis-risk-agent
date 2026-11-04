@@ -35,6 +35,7 @@ class Assertion(StrictModel):
         "artifact_exists",
         "validation_report_verified",
         "validation_pipeline_equals",
+        "validation_boundary_equals",
         "labeling_evidence",
         "monitoring_evidence",
         "portfolio_report_download",
@@ -82,6 +83,17 @@ def _at(value, path):
 
 
 def _assertion(assertion, record, private):
+    if assertion.kind == "validation_boundary_equals":
+        from .runtime_validation_boundary import boundary_observation
+
+        values = boundary_observation(record, private)
+        if values is None or assertion.tool:
+            return False
+        try:
+            actual = _at(values, assertion.path)
+            return type(actual) is type(assertion.value) and actual == assertion.value
+        except (KeyError, TypeError, IndexError):
+            return False
     if assertion.kind == "extension_value":
         observation = record.get("execution", {}).get("extension_observation", {})
         values = private.get("extension_values")
@@ -378,6 +390,16 @@ def score_case(
                            and observation.get("verified") is True and type(observation.get("rejection_count")) is int and observation["rejection_count"] > 0
                            and any(a.kind == "extension_value" and len(a.path) == 3 and a.path[0] == "rejections" and a.path[2] == "status"
                                    and isinstance(a.value, str) and a.value in {"rejected", "http_rejected"} for a in expected.assertions))
+        if case.task.task_type == "validation" and expected.result == "rejected":
+            from .runtime_validation_boundary import boundary_observation
+
+            faults = private.get("validation_faults", [])
+            terminal_ok = (not statuses and boundary_observation(record, private) is not None
+                and len(faults) == 1 and faults[0].get("action_index") == 2
+                and len(case.actions) == 2 and case.actions[1].kind == "confirm_current_validation_report"
+                and getattr(case.actions[1].fault, "kind", None) == "stale_report_revision_once"
+                and faults[0].get("action_sha256") == digest(case.actions[1].model_dump())
+                and any(a.kind == "validation_boundary_equals" for a in expected.assertions))
     checks = [_assertion(a, record, private) for a in expected.assertions]
     job = record.get("execution", {}).get("latest_job") or {}
     job_settled = job.get("status") not in {"queued", "running"}

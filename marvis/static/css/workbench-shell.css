@@ -1,0 +1,3394 @@
+/* Workbench shell — mockup parity (2026-10-19).
+   Source of truth: docs/superpowers/specs/2026-10-14-workbench-mockup/index.html.
+   This layer loads last and owns the floating chrome of the redesign: the task
+   header capsules, the sidebar, the home composer bar and the plan rail. Glass
+   only on what floats above the conversation; content stays flat (D2-D4). */
+
+/* Status marks use the mockup's system colours (dots, checks, rings); text
+   keeps the darker ink tokens for contrast. */
+body {
+  --mark-run: var(--accent);
+  --mark-wait: #ff9f0a;
+  --mark-bad: #ff3b30;
+  --mark-ok: #34c759;
+}
+
+/* ---------- task header: floating capsules ---------- */
+
+#resultWorkspace .workspace-head {
+  padding: 12px 16px 0;
+  background: transparent;
+  background-image: none;
+  pointer-events: none;
+}
+
+#resultWorkspace .task-hero,
+#resultWorkspace .task-hero.is-glass-active {
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transform: none;
+  will-change: auto;
+  pointer-events: none;
+}
+
+#resultWorkspace .task-hero::before,
+#resultWorkspace .task-hero::after {
+  display: none;
+}
+
+.task-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.task-hero-top > *,
+.task-hero-details {
+  pointer-events: auto;
+}
+
+/* One capsule height and glass for every control in the row. */
+.task-hero-title,
+.task-hero-top .validation-batch-switcher-list,
+.task-hero-top .validation-batch-switcher-actions,
+.task-hero-top .task-thread-filter,
+.task-hero-top .task-toolbar-button {
+  height: 44px;
+  border: 1px solid var(--glass-rim);
+  border-radius: 22px;
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.task-hero-title {
+  display: flex;
+  /* Gives way to the chips and buttons first, down to its min-width. */
+  flex: 0 1 auto;
+  max-width: 46%;
+  min-width: min(260px, 40%);
+  align-items: center;
+  gap: 9px;
+  overflow: hidden;
+  padding: 0 8px 0 14px;
+  cursor: pointer;
+}
+
+/* A single task has no model chips; its name may use the whole row. */
+.task-hero-top:not(:has(.validation-batch-switcher-list)) .task-hero-title {
+  flex-shrink: 1;
+  max-width: none;
+}
+
+.task-hero-glyph {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+}
+
+.task-hero-glyph:empty {
+  display: none;
+}
+
+.task-hero-glyph .task-kind-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.task-hero-glyph .task-kind-icon .cut,
+.task-hero-glyph .task-kind-icon .back,
+.task-hero-glyph .task-kind-icon .mid {
+  --surface: rgba(255, 255, 255, 0.9);
+}
+
+body[data-theme="dark"] .task-hero-glyph .task-kind-icon .cut,
+body[data-theme="dark"] .task-hero-glyph .task-kind-icon .back,
+body[data-theme="dark"] .task-hero-glyph .task-kind-icon .mid {
+  --surface: #3a3a3e;
+}
+
+#resultWorkspace .task-hero-name {
+  min-width: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.3;
+}
+
+/* Status: one status word, no tinted pill and no mascot (2026-10-19 user
+   feedback: the avatar belongs to the conversation, not the capsule). */
+.task-hero-state > .agent-face {
+  display: none;
+}
+
+.task-hero-state {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--sep);
+  white-space: nowrap;
+}
+
+.task-hero-state:has(> .task-pill:empty) {
+  display: none;
+}
+
+.task-hero-state .task-pill,
+.task-hero-state .task-pill.ok,
+.task-hero-state .task-pill.fail,
+.task-hero-state .task-pill.run,
+.task-hero-state .task-pill.review {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.task-hero-state .task-pill::before,
+.task-hero-state .agent-face:not([hidden]) + .task-pill::before {
+  display: none;
+}
+
+.task-hero-state .task-pill.review {
+  color: var(--warning-strong);
+  font-weight: 600;
+}
+
+.task-hero-state .task-pill.fail {
+  color: var(--danger-strong);
+  font-weight: 600;
+}
+
+.task-hero-state .task-pill.ok {
+  color: var(--success-strong);
+}
+
+.task-hero-title .task-hero-toggle {
+  width: 28px;
+  height: 28px;
+  margin-left: -2px;
+  color: var(--text-muted);
+}
+
+/* Model chips: one segmented capsule, one line per model (mockup .seg.models).
+   The switcher wrappers dissolve so 全部确认 can sit at the far right. */
+#validationBatchSwitcher.task-hero-batch-switcher:not([hidden]),
+.task-hero-top .validation-batch-switcher {
+  display: contents;
+}
+
+.task-hero-top .validation-batch-switcher-list {
+  display: flex;
+  flex: 1 1 0;
+  order: 2;
+  gap: 0;
+  min-width: 180px;
+  padding: 3px;
+  overflow-x: auto;
+  /* A classic scrollbar would not fit inside the 44px capsule; the list
+     scrolls with the wheel, the trackpad and keyboard focus instead. */
+  scrollbar-width: none;
+}
+
+.task-hero-top .validation-batch-switcher-list::-webkit-scrollbar {
+  display: none;
+}
+
+.task-hero-top .validation-batch-switcher-item {
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  height: 36px;
+  padding: 0 14px 0 12px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.task-hero-top .validation-batch-switcher-item:hover {
+  background: var(--fill);
+}
+
+.task-hero-top .validation-batch-switcher-item.is-selected,
+.task-hero-top .validation-batch-switcher-item.is-selected:hover,
+body[data-theme="dark"] .task-hero-top .validation-batch-switcher-item.is-selected {
+  background: var(--fill-2);
+  box-shadow: none;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.task-hero-top .validation-batch-switcher-name {
+  max-width: 200px;
+  font-weight: inherit;
+}
+
+/* Status mark before each model: a dot while it needs an eye, a green check
+   when done. The status word stays for assistive tech and the tooltip. */
+.task-hero-top .validation-batch-switcher-item::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.55;
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="run"]::before {
+  background: var(--mark-run);
+  opacity: 1;
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="review"]::before {
+  background: var(--mark-wait);
+  opacity: 1;
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="fail"]::before {
+  background: var(--mark-bad);
+  opacity: 1;
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="ok"]::before {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  opacity: 1;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='m5.6 10.4 3 3 5.8-6.2' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 10px 10px no-repeat,
+    var(--mark-ok);
+}
+
+/* Each chip keeps its own progress word next to the dot (workspace rule:
+   every model shows its own progress and status colour). */
+.task-hero-top .validation-batch-switcher-progress {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="review"] .validation-batch-switcher-progress {
+  color: var(--warning-strong);
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="fail"] .validation-batch-switcher-progress {
+  color: var(--danger-strong);
+}
+
+.task-hero-top .validation-batch-switcher-item[data-tone="run"] .validation-batch-switcher-progress {
+  color: var(--accent);
+}
+
+.task-hero-top .validation-batch-switcher-actions {
+  display: flex;
+  order: 3;
+  margin-left: auto;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+.task-hero-top .validation-batch-switcher-actions .button {
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.task-hero-top .validation-batch-switcher-actions .button:hover:not(:disabled) {
+  background: var(--fill);
+}
+
+.task-hero-top .validation-batch-switcher-actions .button:disabled {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+.task-hero-top .validation-batch-confirm-scope {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.task-hero-top .validation-batch-confirm-count,
+.task-hero-top .task-toolbar-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 19px;
+  height: 19px;
+  margin-left: 7px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--fill-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.task-hero-top .task-toolbar-count[hidden] {
+  display: none;
+}
+
+.task-hero-top .validation-batch-switcher-loading {
+  order: 2;
+  align-self: center;
+}
+
+/* View controls on the right. */
+.task-hero-top-right {
+  display: flex;
+  flex: none;
+  order: 4;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.task-hero-top:has(.validation-batch-switcher-actions) .task-hero-top-right {
+  margin-left: 0;
+}
+
+.task-hero-top .task-thread-filter {
+  display: flex;
+  gap: 0;
+  padding: 3px;
+}
+
+.task-hero-top .task-thread-filter[hidden] {
+  display: none;
+}
+
+.task-hero-top .task-thread-filter button {
+  height: 36px;
+  padding: 0 15px;
+  border-radius: 18px;
+  font-size: 13px;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+/* iOS-style tab capsule: the chosen segment is a darker see-through pill
+   inside the glass bar, not an opaque white chip (2026-10-19 user feedback). */
+.task-hero-top .task-thread-filter button[aria-checked="true"],
+body[data-theme="dark"] .task-hero-top .task-thread-filter button[aria-checked="true"] {
+  background: rgba(60, 60, 67, 0.14);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.55);
+  color: var(--text);
+  font-weight: 600;
+}
+
+body[data-theme="dark"] .task-hero-top .task-thread-filter button[aria-checked="true"] {
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.18);
+}
+
+.task-hero-top .task-thread-filter button[aria-checked="false"]:hover {
+  background: rgba(60, 60, 67, 0.07);
+}
+
+.task-hero-top .task-toolbar-button {
+  gap: 7px;
+  padding: 0 14px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.task-hero-top .task-toolbar-button[hidden] {
+  display: none;
+}
+
+.task-hero-top .task-toolbar-button:hover,
+.task-hero-top .task-toolbar-button[aria-expanded="true"]#taskInspectorToggle {
+  background: color-mix(in srgb, var(--text) 8%, var(--glass-bg));
+}
+
+/* Details float over the conversation in place (they never push it down),
+   in the same glass as the capsules; a click anywhere else folds them. */
+#resultWorkspace .task-hero {
+  position: relative;
+}
+
+#resultWorkspace .task-hero-details {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: min(560px, 100%);
+  border-radius: 18px;
+}
+
+@media (min-width: 861px) {
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) #resultWorkspace .task-hero-details {
+    left: 44px;
+  }
+}
+
+#resultWorkspace .task-hero.is-collapsed .task-hero-details {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#resultWorkspace .task-hero:not(.is-collapsed) .task-hero-details {
+  padding: 12px 16px;
+  border: 1px solid var(--glass-rim);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+/* Layout (2026-10-19 user feedback; replaces the mockup's full-width header):
+   the header row belongs to the conversation column, task capsule on the
+   left and 全部/只看结果 + 检查器 right-aligned on the same line; the plan rail
+   is its own column on the right from the top, collapsed or not. */
+@media (min-width: 861px) {
+  .validation-workspace:not(.is-empty) #progressRail {
+    position: relative;
+    z-index: 4;
+    margin-top: 26px;
+    max-height: calc(100dvh - 40px);
+  }
+
+  .validation-workspace:not(.is-empty) #rightResizeHandle {
+    margin-top: 26px;
+  }
+
+  /* Rail collapsed: the expanded report layer keeps to the reading column. */
+  .validation-workspace:not(.is-empty).rail-collapsed .report-draft-workspace.is-expanded {
+    right: max(0px, calc((100% - var(--thread-max-width)) / 2));
+    left: max(0px, calc((100% - var(--thread-max-width)) / 2));
+  }
+}
+
+/* The row wraps only when it truly runs out of room; the name keeps its
+   content width and truncates before anything else is squeezed. */
+.task-hero-top {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+/* The sidebar toggle lines up with the capsules instead of sitting inside a card. */
+@media (min-width: 861px) {
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) > .sidebar-collapse-button {
+    top: 31px;
+    left: calc(var(--workspace-main-gutter) + 22px);
+  }
+
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) .task-hero-top {
+    padding-left: 44px;
+  }
+}
+
+@media (max-width: 860px) {
+  .task-hero-top {
+    flex-wrap: wrap;
+  }
+
+  .task-hero-state .agent-face {
+    display: none;
+  }
+
+  /* The header overlays the top of the conversation instead of being placed
+     after it by the auto grid. */
+  #resultWorkspace > .workspace-head {
+    grid-row: 1;
+    grid-column: 1;
+  }
+}
+
+/* ---------- plan rail (mockup .rail) ---------- */
+
+.validation-workspace:not(.is-empty) #progressRail {
+  gap: 10px;
+  padding: 14px 10px 12px;
+}
+
+#progressRail .step-rail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 0 0 6px;
+  border-bottom: 0;
+}
+
+/* The ring summary replaces the plain title; the title stays for screen readers. */
+#progressRail .step-rail-head:has(#railSummary:not([hidden])) h3 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.rail-summary {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.rail-summary[hidden] {
+  display: none;
+}
+
+.rail-ring {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  transform: rotate(-90deg);
+}
+
+.rail-ring circle {
+  fill: none;
+  stroke-width: 4.5;
+}
+
+.rail-ring-track {
+  stroke: var(--fill-2);
+}
+
+.rail-ring-progress {
+  stroke: var(--text-muted);
+  stroke-linecap: round;
+}
+
+.rail-ring[data-tone="run"] .rail-ring-progress { stroke: var(--mark-run); }
+.rail-ring[data-tone="review"] .rail-ring-progress { stroke: var(--mark-wait); }
+.rail-ring[data-tone="fail"] .rail-ring-progress { stroke: var(--mark-bad); }
+.rail-ring[data-tone="ok"] .rail-ring-progress { stroke: var(--mark-ok); }
+
+.rail-summary-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.rail-summary-copy b {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.rail-summary-copy small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Steps: unnumbered rows, a filled check when done, a ring while pending. */
+#progressRail .step {
+  position: relative;
+  padding: 11px 10px;
+  border-radius: 10px;
+}
+
+#progressRail .step + .step {
+  border-top: 0;
+}
+
+#progressRail .step + .step::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 38px;
+  height: 1px;
+  background: var(--sep);
+}
+
+#progressRail .step-head {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+#progressRail .step-head > .check-icon,
+#progressRail .step-head > .agent-face {
+  margin-top: 1px;
+}
+
+#progressRail .step-number,
+#progressRail .notebook-step-no {
+  display: none;
+}
+
+#progressRail .step-copy {
+  gap: 2px;
+}
+
+#progressRail .step-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+#progressRail .step-hint {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+#progressRail .step.pending .step-title,
+#progressRail .step.stopped .step-title {
+  color: var(--text-muted);
+}
+
+#progressRail .step.running .step-title {
+  color: var(--text);
+}
+
+#progressRail .step.review .step-hint {
+  color: var(--warning-strong);
+  font-weight: 500;
+}
+
+#progressRail .step.failed .step-hint {
+  color: var(--danger-strong);
+}
+
+#progressRail .check-icon.succeeded {
+  background: var(--mark-ok);
+  color: #ffffff;
+}
+
+#progressRail .check-icon.failed {
+  background: var(--mark-bad);
+  color: #ffffff;
+}
+
+/* 等你: the amber mark of the step waiting on the user. */
+#progressRail .check-icon.review {
+  border: 0;
+  background: var(--mark-wait);
+  color: #1d1d1f;
+}
+
+#progressRail .check-icon.pending {
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--border-strong);
+}
+
+#progressRail .notebook-step-group > summary {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+#progressRail .notebook-step-group {
+  margin: 6px 0 0 28px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+#progressRail .notebook-step {
+  min-height: 24px;
+  padding: 2px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+#progressRail .notebook-step.running strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* 产物 rows (mockup "产物" card in the rail). */
+#progressRail .step-download-actions {
+  display: grid;
+  gap: 0;
+  margin: 12px -10px -11px;
+  padding: 0;
+}
+
+#progressRail .step:has(.step-download-actions):hover {
+  background: transparent;
+}
+
+.rail-artifacts-label {
+  margin: 0 18px 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.rail-artifact {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 6px 10px 6px 14px;
+}
+
+.rail-artifact + .rail-artifact::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 46px;
+  height: 1px;
+  background: var(--sep);
+}
+
+.rail-artifact-icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: var(--text-secondary);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rail-artifact-icon.is-sheet {
+  stroke: var(--success);
+}
+
+.rail-artifact-name {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.rail-artifact-name b {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.rail-artifact-name small {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+#progressRail .rail-artifact .step-action-button,
+#progressRail .rail-artifact .step-action-button.word,
+#progressRail .rail-artifact .step-action-button.excel {
+  flex: none;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+#progressRail .rail-artifact .step-action-button:hover:not(:disabled),
+#progressRail .rail-artifact .step-action-button:focus-visible:not(:disabled) {
+  background: var(--fill);
+  box-shadow: none;
+  color: var(--accent);
+}
+
+/* ---------- sidebar (mockup .side) ---------- */
+
+.app-shell:not(.sidebar-collapsed) .sidebar-head {
+  padding: 14px 16px 12px;
+}
+
+.app-shell:not(.sidebar-collapsed) .brand-logo {
+  grid-template-columns: 34px minmax(0, 1fr);
+  column-gap: 9px;
+}
+
+.app-shell:not(.sidebar-collapsed) .brand-logo .brand-mark {
+  width: 34px;
+  height: 34px;
+}
+
+.app-shell:not(.sidebar-collapsed) .brand-logo h1 {
+  display: grid;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+#platformName b {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+#platformName small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Search: a pill that opens the existing spotlight search. */
+.app-shell:not(.sidebar-collapsed) .list-head {
+  padding: 0 12px 8px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.app-shell:not(.sidebar-collapsed) .list-head > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.app-shell:not(.sidebar-collapsed) .list-search-toggle {
+  justify-content: flex-start;
+  gap: 7px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 16px;
+  background: var(--fill);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.app-shell:not(.sidebar-collapsed) .list-search-toggle svg {
+  width: 17px;
+  height: 17px;
+}
+
+.list-search-label,
+.list-search-kbd {
+  display: none;
+}
+
+.app-shell:not(.sidebar-collapsed) .list-search-label {
+  display: inline;
+}
+
+.app-shell:not(.sidebar-collapsed) .list-search-kbd {
+  display: inline;
+  margin-left: auto;
+  color: var(--text-muted);
+  font: 500 11.5px var(--font-ui, inherit);
+}
+
+.app-shell:not(.sidebar-collapsed) .list-search-toggle:hover {
+  background: var(--fill-2);
+}
+
+.app-shell:not(.sidebar-collapsed) .task-search {
+  right: 12px;
+}
+
+body.search-active .app-shell:not(.sidebar-collapsed) .task-search {
+  width: calc(100% - 24px);
+}
+
+.app-shell:not(.sidebar-collapsed) .list-toolbar {
+  padding: 0 12px 10px;
+}
+
+.app-shell:not(.sidebar-collapsed) .nav-action {
+  min-height: 34px;
+  padding: 0 18px;
+  border-radius: 17px;
+  font-size: 13px;
+}
+
+.app-shell:not(.sidebar-collapsed) .nav-action svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* Group headings and rows. */
+.app-shell:not(.sidebar-collapsed) .task-list {
+  padding: 0 10px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-group-title {
+  margin: 12px 8px 4px;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-group-title:first-child {
+  margin-top: 4px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row-shell {
+  margin: 0;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row {
+  min-height: 34px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 9px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row-top,
+.app-shell:not(.sidebar-collapsed) .task-row-title {
+  gap: 9px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row .task-kind-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row-name {
+  font-size: 13.5px;
+  font-weight: 400;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row.selected {
+  background: var(--sidebar-selected, #e2e2e7);
+}
+
+.app-shell:not(.sidebar-collapsed) .task-row.selected .task-row-name {
+  font-weight: 500;
+}
+
+body[data-theme="dark"] .app-shell:not(.sidebar-collapsed) .task-row.selected {
+  background: #3d3d41;
+}
+
+.task-status-dot.wait { background: var(--mark-wait); }
+.task-status-dot.bad { background: var(--mark-bad); }
+
+/* Footer rows match the list rows. */
+.app-shell:not(.sidebar-collapsed) .sidebar-footer {
+  margin: 0 10px;
+  padding: 6px 0 10px;
+  border-top: 1px solid var(--sep);
+}
+
+.app-shell:not(.sidebar-collapsed) .sidebar-footer .ops-entry,
+.app-shell:not(.sidebar-collapsed) .sidebar-settings summary {
+  min-height: 34px;
+  padding: 0 8px;
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 400;
+}
+
+.app-shell:not(.sidebar-collapsed) .sidebar-footer .ops-entry svg,
+.app-shell:not(.sidebar-collapsed) .sidebar-settings summary svg {
+  color: var(--text-secondary);
+}
+
+.app-shell:not(.sidebar-collapsed) .ops-entry [data-ops-unread] {
+  min-width: 19px;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--fill-2);
+  color: var(--text-secondary);
+  font-weight: 600;
+  line-height: 19px;
+}
+
+/* ---------- home composer bar (mockup .ask .bar) ---------- */
+
+.home-composer-bar {
+  gap: 2px;
+}
+
+.home-composer-grow {
+  flex: 1;
+}
+
+.home-composer-chip[hidden] {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .home-composer-bar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    row-gap: 4px;
+  }
+}
+
+.home-composer .home-composer-chip select:disabled {
+  cursor: default;
+}
+
+/* ---------- artifact cards in the conversation (mockup .art / .ev-f) ---------- */
+
+.artifact-card {
+  display: grid;
+  width: 100%;
+  margin-top: 4px;
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.artifact-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 10px 12px 10px 14px;
+}
+
+.artifact-row + .artifact-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 50px;
+  height: 1px;
+  background: var(--sep);
+}
+
+.artifact-row .rail-artifact-icon {
+  width: 24px;
+  height: 24px;
+}
+
+.artifact-row-name {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.artifact-row-name b {
+  font-weight: 500;
+}
+
+.artifact-row-name small {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.artifact-row-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.artifact-action,
+.result-dataset-download .button,
+.report-result-download .button {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 15px;
+  background: var(--fill);
+  box-shadow: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.artifact-action:hover,
+.result-dataset-download .button:hover:not(:disabled),
+.report-result-download .button:hover:not(:disabled) {
+  background: var(--fill-2);
+}
+
+.artifact-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The workflow download cards read as the same file row. */
+.result-dataset-download {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 12px 14px;
+  border-radius: 14px;
+}
+
+.result-dataset-download-copy {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding-left: 40px;
+}
+
+.result-dataset-download-copy::before {
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translateY(-50%);
+}
+
+.result-dataset-download-copy strong {
+  display: block;
+  font-weight: 500;
+}
+
+/* Descriptions are prose, not code. */
+.result-dataset-download-copy span,
+.report-result-download-item > span {
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+/* A report card with several files: the file list takes its own line under
+   the description instead of squeezing it to one character per line. */
+.result-dataset-download:has(.report-result-download-list) {
+  flex-wrap: wrap;
+}
+
+.result-dataset-download .report-result-download-list {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .artifact-row {
+    flex-wrap: wrap;
+  }
+
+  .artifact-row-actions {
+    width: 100%;
+    padding-left: 36px;
+  }
+}
+
+/* ---------- result summary on workflow result cards (mockup .ev .tiles / .bars) ---------- */
+
+.result-headline {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.result-headline-source {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.result-headline-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.result-headline-tile {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--fill);
+}
+
+.result-headline-tile span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-headline-tile b {
+  overflow: hidden;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-headline-bars {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.result-headline-bars figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.result-headline-bars figcaption b {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.result-headline-bars figcaption span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.result-headline-bar-list {
+  display: grid;
+  gap: 8px;
+}
+
+.result-headline-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 190px) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.result-headline-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-headline-bar i {
+  width: var(--w);
+  min-width: 2px;
+  height: 8px;
+  border-radius: 0 4px 4px 0;
+  background: var(--accent);
+  opacity: 0.75;
+}
+
+.result-headline-bar b {
+  color: var(--text);
+  font-weight: 600;
+  text-align: right;
+}
+
+.result-headline-bar small {
+  min-width: 48px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: right;
+}
+
+body[data-theme="dark"] .result-headline-tile {
+  background: var(--fill-2);
+}
+
+@media (max-width: 640px) {
+  .result-headline-bar {
+    grid-template-columns: minmax(0, 110px) minmax(0, 1fr) auto;
+  }
+
+  .result-headline-bar small {
+    display: none;
+  }
+}
+
+/* ---------- validation evidence as step rows (mockup .card.rows .act) ---------- */
+
+#scanSummary > strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* The material rows below already name each file; the chip line repeats it. */
+#scanSummary:has(.preflight-check-item[data-check-id^="material_"]) > .chip-row {
+  display: none;
+}
+
+#scanSummary .preflight-check-item,
+#scanSummary .preflight-check-item.danger,
+#scanSummary .preflight-check-item.warning,
+#scanSummary .preflight-check-item.success {
+  position: relative;
+  grid-template-columns: 18px auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  min-height: 42px;
+  padding: 11px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+#scanSummary .preflight-check-item + .preflight-check-item::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 30px;
+  height: 1px;
+  background: var(--sep);
+}
+
+.preflight-check-mark {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--mark-ok);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.preflight-check-item.warning .preflight-check-mark {
+  background: var(--mark-wait);
+  color: #1d1d1f;
+}
+
+.preflight-check-item.danger .preflight-check-mark {
+  background: var(--mark-bad);
+}
+
+#scanSummary .preflight-check-item strong {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+#scanSummary .preflight-check-item small {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+#scanSummary .preflight-check-item.danger small {
+  color: var(--danger-strong);
+  font-weight: 500;
+}
+
+/* PMML scoring facts: a two-column label/value list (mockup .kv). */
+#reproducibilitySummary .summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+}
+
+#reproducibilitySummary .summary-item,
+#reproducibilitySummary .summary-item[class*="repro-status-"] {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 0;
+  border: 0;
+  border-bottom: 1px solid var(--sep);
+  border-radius: 0;
+  background: transparent;
+  font-size: 13px;
+}
+
+#reproducibilitySummary .summary-item span {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+#reproducibilitySummary .summary-item strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  #reproducibilitySummary .summary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+#reproducibilitySummary .summary-item[class*="repro-status-"] strong {
+  padding: 0;
+  background: transparent;
+}
+
+#reproducibilitySummary .summary-item.repro-status-fail strong {
+  font-weight: 600;
+}
+
+/* Composer controls wrap to a second line instead of overlapping when the
+   column is narrow (rail open on a small window). */
+.agent-composer-toolbar {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.agent-composer-right-controls {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-left: auto;
+  row-gap: 4px;
+}
+
+/* Long unbroken strings (algorithm lists, ids, paths) wrap inside the reading
+   column instead of running past its right edge (2026-10-19 user feedback).
+   Code blocks keep their own horizontal scroll. */
+.agent-message-content,
+.agent-message-content :is(p, li, td, th, strong, em, span) {
+  overflow-wrap: anywhere;
+}
+
+.agent-message-content :not(pre) > code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.agent-message-content > *,
+.agent-message-body > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Flat page (U3): the conversation runs edge to edge under the floating glass
+   (header on top, composer at the bottom) instead of being clipped 14px short
+   with a white band; the old rounded-card corner mask under the composer is
+   gone too. Header and composer keep their visual position. */
+.validation-workspace:not(.is-empty) > .workspace-body > #resultWorkspace {
+  --agent-composer-gap: 42px;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.validation-workspace:not(.is-empty) #resultWorkspace .workspace-head {
+  padding-top: 26px;
+}
+
+.validation-workspace:not(.is-empty) #resultWorkspace .agent-composer {
+  bottom: 14px;
+}
+
+.agent-composer::before {
+  display: none;
+}
+
+/* ---------- home (2026-10-19 user feedback) ---------- */
+
+/* U1: the mascot stands still on the page itself, no grey card behind it. */
+.home-hero {
+  padding: 8px 24px 4px;
+  background: transparent;
+}
+
+/* U2: 添加文件 is a labelled chip on the left, sized like the permission,
+   model and effort chips on the right. */
+.home-composer .home-composer-attach {
+  display: inline-flex;
+  width: auto;
+  height: 30px;
+  gap: 5px;
+  padding: 0 12px 0 9px;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.home-composer .home-composer-attach svg {
+  width: 14px;
+  height: 14px;
+}
+
+.home-composer .home-composer-attach:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text-secondary);
+}
+
+/* U9: primary buttons read as tinted glass (dark see-through with a light top
+   edge), suggestions as clear glass pills. */
+.app-shell:not(.sidebar-collapsed) .nav-action,
+.home-composer-send:not(:disabled) {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(29, 29, 31, 0.82);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 6px 18px rgba(0, 0, 0, 0.16);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  color: #ffffff;
+}
+
+.app-shell:not(.sidebar-collapsed) .nav-action:hover,
+.home-composer-send:not(:disabled):hover {
+  background: rgba(29, 29, 31, 0.9);
+}
+
+body[data-theme="dark"] .app-shell:not(.sidebar-collapsed) .nav-action,
+body[data-theme="dark"] .home-composer-send:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 18px rgba(0, 0, 0, 0.4);
+  color: #1d1d1f;
+}
+
+.home-example {
+  border: 1px solid var(--glass-rim);
+  background: var(--glass-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 3px 8px rgba(0, 0, 0, 0.08);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.home-example:hover {
+  background: color-mix(in srgb, var(--text) 6%, var(--glass-bg));
+}
+
+body[data-theme="dark"] .home-example {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 3px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* U8: work-icon template — the sentence reads like the textarea, with the
+   values to change marked and the file slots as small attach chips. */
+.home-composer-template {
+  min-height: 52px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 8px 10px;
+  outline: 0;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  line-height: 1.9;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.home-composer-template[hidden] {
+  display: none;
+}
+
+.home-slot {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong, var(--accent));
+  font-weight: 600;
+  box-shadow: inset 0 -1.5px 0 color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.home-file-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  margin: 0 2px;
+  padding: 0 9px 0 7px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--accent-strong, var(--accent));
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  vertical-align: 1px;
+  cursor: pointer;
+}
+
+.home-file-slot svg {
+  width: 13px;
+  height: 13px;
+}
+
+.home-file-slot:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.home-file-slot.has-files {
+  border-style: solid;
+}
+
+.home-file-slot-names:empty {
+  display: none;
+}
+
+.home-file-slot-names {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-file-chip-role {
+  color: var(--accent-strong, var(--accent));
+  font-weight: 600;
+}
+
+/* U5: an empty status group still shows, with a quiet line. */
+.task-group-empty {
+  margin: 0 8px 6px;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* U14: while searching (collapsed rail flyout above the blur scrim, z 50/60),
+   the task hover card rises above both instead of being blurred beneath. */
+body.search-active .task-row-preview {
+  z-index: 70;
+}
+
+/* U4: the four collapsed-rail icons share one size, stroke and colour. */
+.app-shell.sidebar-collapsed :is(.list-search-toggle, .collapsed-create-toggle, .ops-entry, .sidebar-settings summary) svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.6;
+  color: var(--text-secondary);
+}
+
+.app-shell.sidebar-collapsed :is(.list-search-toggle, .collapsed-create-toggle) {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.app-shell.sidebar-collapsed :is(.list-search-toggle, .collapsed-create-toggle, .ops-entry, .sidebar-settings summary):hover {
+  background: var(--fill);
+}
+
+/* U17: file-type icons — a document page with a Word / Excel / CSV / data
+   badge, used in the rail's 产物, the conversation's artifact card and the
+   workflow download cards. */
+.file-type-icon {
+  display: inline-block;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  background: center / contain no-repeat;
+}
+
+.file-type-icon[data-kind="word"] { background-image: url("../brand/file-icons/word.svg"); }
+.file-type-icon[data-kind="excel"] { background-image: url("../brand/file-icons/excel.svg"); }
+.file-type-icon[data-kind="csv"] { background-image: url("../brand/file-icons/csv.svg"); }
+.file-type-icon[data-kind="data"] { background-image: url("../brand/file-icons/data.svg"); }
+
+.rail-artifact-icon.file-type-icon {
+  width: 24px;
+  height: 24px;
+  stroke: none;
+}
+
+.artifact-row .rail-artifact-icon.file-type-icon {
+  width: 28px;
+  height: 28px;
+}
+
+/* Workflow download cards: reports are Excel workbooks, datasets are data. */
+.result-dataset-download .result-dataset-download-copy::before {
+  width: 28px;
+  height: 28px;
+  background: url("../brand/file-icons/data.svg") center / contain no-repeat;
+  -webkit-mask: none;
+  mask: none;
+}
+
+.result-dataset-download.report-result-download .result-dataset-download-copy::before {
+  background-image: url("../brand/file-icons/excel.svg");
+}
+
+/* U10: the validation 效果与稳定性 card lies flat on the page (no grey box);
+   each part is an open section under a thin rule, nothing folded. */
+.result-card[data-result-card="validation-metrics"] {
+  padding: 4px 0 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.result-card[data-result-card="validation-metrics"] .result-section,
+.result-card[data-result-card="validation-metrics"] .result-sections .metric-table-section {
+  margin: 0;
+  padding: 18px 0 0;
+  border: 0;
+  border-top: 1px solid var(--sep);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.result-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.result-section-head h4,
+.result-card[data-result-card="validation-metrics"] .metric-section-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-section-title {
+  margin-bottom: 12px;
+}
+
+.result-sections {
+  display: grid;
+  gap: 4px;
+}
+
+.result-card[data-result-card="validation-metrics"] .result-sections {
+  gap: 20px;
+}
+
+/* The ROC/KS curves sit side by side as compact panels (three splits in one
+   row on a wide column, two or one as it narrows). */
+.result-card[data-result-card="validation-metrics"] .roc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.result-card[data-result-card="validation-metrics"] .roc-card {
+  min-width: 0;
+  padding: 10px 10px 8px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--fill);
+  box-shadow: none;
+}
+
+.result-card[data-result-card="validation-metrics"] .roc-card svg {
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+}
+
+/* Inside the flat card the old evidence-page ornaments go: no folio numbers,
+   no accent rules, no coloured margins — headings and thin rules only. */
+.result-card[data-result-card="validation-metrics"] .metric-table-section::before,
+.result-card[data-result-card="validation-metrics"] .metric-table-section::after,
+.result-card[data-result-card="validation-metrics"] .metric-table-section > .metric-table-stack::before {
+  display: none;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table-section {
+  position: relative;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table-stack {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table-section {
+  --accent: var(--text-secondary);
+  --accent-soft: var(--fill);
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table thead th {
+  background: var(--fill);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ---------- U13: platform tables read as clean data sheets ---------- */
+
+.workflow-data-widget {
+  border: 1px solid var(--sep);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.workflow-widget-head {
+  min-height: 0;
+  gap: 10px;
+  padding: 10px 10px 9px 14px;
+  border-bottom: 1px solid var(--sep);
+  background: transparent;
+}
+
+.workflow-widget-glyph {
+  display: none;
+}
+
+.workflow-widget-title strong {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.workflow-widget-title small {
+  color: var(--text-muted);
+  font: 500 11.5px/1.3 var(--font-sans, inherit);
+}
+
+.workflow-widget-search input {
+  min-height: 28px;
+  border-color: transparent;
+  background: var(--fill);
+}
+
+.workflow-widget-toggle {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+}
+
+.workflow-data-widget .agent-inline-table-scroll,
+.agent-inline-table {
+  background: transparent;
+}
+
+.agent-inline-table thead th,
+.agent-inline-table thead th:first-child {
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.agent-inline-table td,
+.agent-inline-table td:first-child {
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.agent-inline-table td {
+  border-bottom-color: color-mix(in srgb, var(--sep) 65%, transparent);
+}
+
+.agent-inline-table td:first-child {
+  font-weight: 500;
+}
+
+/* Status tags: colour only where it carries a meaning. */
+.result-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--fill);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.result-tag[data-tone="good"] {
+  background: color-mix(in srgb, var(--mark-ok) 14%, transparent);
+  color: var(--success-strong, #1e7e34);
+}
+
+.result-tag[data-tone="warn"] {
+  background: color-mix(in srgb, var(--mark-wait) 16%, transparent);
+  color: var(--warning-strong, #9a5b00);
+}
+
+.result-tag[data-tone="bad"] {
+  background: color-mix(in srgb, var(--mark-bad) 13%, transparent);
+  color: var(--danger-strong, #c0261c);
+}
+
+.result-tag[data-tone="info"] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong, var(--accent));
+}
+
+/* Evidence strings ("iv=…；ks=…") as compact metric chips. */
+.result-metric-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  max-width: 340px;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-metric-chip {
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.result-metric-chip i {
+  margin-right: 3px;
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.agent-inline-table td.cell-metrics {
+  min-width: 220px;
+}
+
+/* Field/value tables (验证字段候选 …) as a two-column field list. */
+.result-field-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0 24px;
+  margin: 0;
+  padding: 6px 14px 10px;
+}
+
+.result-field {
+  display: grid;
+  grid-template-columns: minmax(84px, auto) 1fr;
+  gap: 12px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--sep) 65%, transparent);
+}
+
+.result-field dt {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.result-field dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* Screen-reader-only text (the widget filters' labels used it undefined). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* U13: inside the flat validation card, rate cells show their heat as a small
+   dot beside plain numbers and count bars are faint, so a 10-row bin table
+   no longer reads as a wall of coloured pills. */
+.result-card[data-result-card="validation-metrics"] .metric-table td.cell-heat > .heat-chip {
+  position: relative;
+  padding: 0 0 0 13px;
+  background: transparent;
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table td.cell-heat > .heat-chip::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--heat);
+  transform: translateY(-50%);
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table .databar {
+  height: 20px;
+  background: transparent;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table .databar .databar-fill,
+.result-card[data-result-card="validation-metrics"] .metric-table .databar[data-color] .databar-fill {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent-strong, #0a6ed1) 18%, transparent);
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table .databar-label {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.result-card[data-result-card="validation-metrics"] .metric-table-wrap {
+  overflow-x: auto;
+}
+
+/* ---------- U11: one type scale (2026-10-19 user feedback) ----------
+   brand 18/12.5 · reading text 15 · card titles 15 · section & sheet titles
+   14 · secondary 13 · captions 12 · table cells 13, table heads 12. */
+
+.app-shell:not(.sidebar-collapsed) #platformName b {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.app-shell:not(.sidebar-collapsed) #platformName small {
+  font-size: 12.5px;
+}
+
+/* Both sides of the conversation read at the same size. */
+.agent-message.user .agent-message-content {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+/* Titles: a card 15, a section or data sheet inside it 14. */
+.result-card-head b,
+.report-card-head b {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.workflow-widget-title strong,
+.result-section-head h4,
+.result-card[data-result-card="validation-metrics"] .metric-section-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Table text: cells 13, heads 12 muted, everywhere. */
+.agent-inline-table td,
+.agent-inline-table td:first-child,
+.metric-table-section .metric-table td,
+.result-mini-table td {
+  font-size: 13px;
+}
+
+.agent-inline-table thead th,
+.metric-table-section .metric-table thead th,
+.result-mini-table th {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Header controls share one weight; the chosen segment is the only bold one. */
+.task-hero-top .task-thread-filter button {
+  font-weight: 500;
+}
+
+.task-hero-top .task-thread-filter button[aria-checked="true"] {
+  font-weight: 600;
+}
+
+/* ---------- U12: execution mode choice (2026-10-19 user feedback) ----------
+   Two quiet tiles; the chosen one lifts onto white with a soft shadow and a
+   dark check that pops in, and its icon plays its own animation. No coloured
+   rims, no glow. */
+.run-mode-card,
+.run-mode-card.selected-tone-amber,
+.run-mode-card.selected-tone-green,
+body[data-theme="dark"] .run-mode-card.selected-tone-amber,
+body[data-theme="dark"] .run-mode-card.selected-tone-green {
+  --run-mode-tone: var(--text);
+  --run-mode-soft: var(--surface);
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: var(--fill);
+  box-shadow: none;
+  transition:
+    background 220ms ease,
+    box-shadow 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.run-mode-card:hover:not(.disabled):not(:has(input:checked)) {
+  transform: none;
+  border-color: transparent;
+  background: var(--fill-2);
+  box-shadow: none;
+}
+
+.run-mode-card:has(input:checked) {
+  border-color: transparent;
+  background: var(--surface);
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.1),
+    0 8px 24px rgba(0, 0, 0, 0.1);
+  transform: translateY(-1px);
+}
+
+.run-mode-card:has(input:checked)::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='m5.6 10.4 3 3 5.8-6.2' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat,
+    var(--text);
+  animation: run-mode-check-pop 280ms cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+body[data-theme="dark"] .run-mode-card:has(input:checked) {
+  background: color-mix(in srgb, var(--surface) 80%, #ffffff 6%);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.14), 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+body[data-theme="dark"] .run-mode-card:has(input:checked)::after {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='m5.6 10.4 3 3 5.8-6.2' fill='none' stroke='%231d1d1f' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat,
+    #f5f5f7;
+}
+
+@keyframes run-mode-check-pop {
+  from { opacity: 0; transform: scale(0.4); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.run-mode-card .run-mode-icon {
+  color: var(--text-muted);
+  transition: color 220ms ease;
+}
+
+.run-mode-card:has(input:checked) .run-mode-icon,
+.run-mode-card:hover .run-mode-icon {
+  color: var(--text);
+}
+
+.run-mode-card:focus-within:not(:has(input:checked)) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-mode-card:has(input:checked)::after {
+    animation: none;
+  }
+}
+
+/* Home creation card: the chosen chip reads clearly (dark on light). */
+.home-draft-chip[aria-pressed="true"] {
+  background: var(--text);
+  color: var(--surface);
+}
+
+/* U12 in the create dialog: bring the animated icons back in a compact row
+   (icon, then copy), hide the native radio behind the tile. */
+#taskDialog .run-mode-cards { gap: 10px; }
+#taskDialog .run-mode-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 14px 40px 14px 14px;
+  border-radius: 14px;
+  text-align: left;
+}
+#taskDialog .run-mode-card input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+#taskDialog .run-mode-icon {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+}
+#taskDialog .run-mode-icon svg {
+  width: 36px;
+  height: 36px;
+  filter: none;
+}
+#taskDialog .run-mode-copy { justify-items: start; gap: 3px; }
+#taskDialog .run-mode-copy strong { font-size: 14px; }
+#taskDialog .run-mode-copy small { max-width: none; font-size: 12px; line-height: 1.45; }
+#taskDialog .run-mode-card:has(input:checked)::after { top: 50%; right: 14px; margin-top: -10px; }
+@media (max-width: 640px) {
+  #taskDialog .run-mode-cards { flex-direction: column; }
+}
+
+/* More glass (2026-10-19 user feedback), still only on layers that float
+   over content: the sidebar hover card, the settings menu, toasts and the
+   column tooltip. Text-bearing layers use the denser pop material. */
+.task-row-preview,
+.coming-soon-toast {
+  border: 1px solid var(--glass-rim);
+  background: var(--glass-bg-pop);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.settings-menu,
+.dataset-column-tooltip {
+  border: 1px solid var(--glass-rim);
+  background: var(--glass-bg-dense);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+/* P0-5: corrected materials are uploaded from the material dialog itself. */
+.material-binding-supplement {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--fill);
+}
+.material-binding-supplement .material-binding-upload {
+  position: relative;
+  cursor: pointer;
+}
+.material-binding-supplement .material-binding-upload[hidden] { display: none; }
+.material-binding-supplement small {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* The dictionary's unavailable reason spans the row instead of wrapping in
+   the narrow role column. */
+.material-binding-row .material-binding-unavailable {
+  grid-column: 1 / -1;
+  line-height: 1.5;
+}
+
+/* U13: Vintage cohort x MOB curves (js/metric-tables.js renderVintageCurvesCard). */
+.vintage-curves-card {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.vintage-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.vintage-grid {
+  stroke: var(--sep);
+  stroke-width: 1;
+}
+.vintage-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.vintage-axis-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.vintage-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.vintage-point {
+  stroke: var(--surface);
+  stroke-width: 1.2;
+}
+.vintage-series:hover .vintage-line { stroke-width: 3; }
+.vintage-curves-card:has(.vintage-series:hover) .vintage-series:not(:hover) { opacity: 0.25; }
+.vintage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.vintage-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.vintage-legend-item i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+.vintage-legend-item b {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* U13: migration matrix as a heatmap — each cell shaded by its own rate. */
+td.cell-matrix-heat {
+  padding: 2px !important;
+  text-align: center;
+}
+.matrix-heat {
+  display: block;
+  min-width: 52px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) calc(8% + var(--heat) * 82%), transparent);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+}
+.matrix-heat[data-strong] {
+  color: #fff;
+  font-weight: 600;
+}
+td.cell-matrix-heat.is-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Rail text wrapping (eval round 1): an artifact name never breaks inside a
+   word — with two actions the actions move under it — and step titles avoid
+   a one-character last line next to their action button. */
+.rail-artifact {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.rail-artifact-name {
+  flex: 1 0 auto;
+  max-width: calc(100% - 34px);
+}
+.rail-artifact-name b,
+.rail-artifact-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-artifact:has(.step-action-button + .step-action-button) .rail-artifact-name {
+  flex-basis: calc(100% - 34px);
+}
+.rail-artifact:has(.step-action-button + .step-action-button) .step-action-button:first-of-type {
+  margin-left: auto;
+}
+#progressRail .step-title,
+#progressRail .step-hint {
+  text-wrap: pretty;
+}
+
+/* Portfolio contract form fits the reading column (eval S9: four fixed
+   columns overflowed it and hid the submit button). */
+.portfolio-setup-panel { max-width: 100%; min-width: 0; }
+.portfolio-setup-grid { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
+.portfolio-setup-grid-optional { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.portfolio-setup-guidance { overflow-wrap: anywhere; }
+.portfolio-setup-footer { flex-wrap: wrap; row-gap: 8px; }
+.portfolio-setup-footer .portfolio-setup-status { flex: 1 1 200px; }
+.portfolio-setup-grid input[data-prefilled="true"] { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+/* Flat card, no coloured rim or tinted bands (redesign rule). */
+.portfolio-setup-panel {
+  border: 0;
+  border-radius: 16px;
+  background: var(--card);
+}
+.portfolio-setup-head,
+.portfolio-setup-footer { background: transparent; }
+.portfolio-setup-head { border-bottom: 1px solid var(--sep); }
+.portfolio-setup-footer { border-top: 1px solid var(--sep); }
+.portfolio-setup-badge {
+  border: 0;
+  color: var(--text-secondary) !important;
+  background: var(--fill);
+}
+.portfolio-setup-grid input { border-color: var(--border); }
+
+/* 「全部确认」 waiting on drafts reads as unavailable, not as a live button
+   (eval S5); the reason stays in its tooltip and status line. */
+.task-hero-top .validation-batch-switcher-actions .button:disabled {
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.task-hero-top .validation-batch-switcher-actions .button:disabled .validation-batch-confirm-count {
+  background: var(--fill-2);
+  color: var(--text-muted);
+}
+
+.home-draft-files .home-draft-warning {
+  display: block;
+  margin-top: 4px;
+  color: var(--mark-wait, #b25000);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* More glass (2026-10-21, chosen by the user over the floating-controls-only
+   rule): the open sidebar is an inset glass panel, dialogs are glass sheets
+   over the dimmed page (their form cards stay opaque for reading), and the
+   home composer is glass. No tints, gradients or coloured rims. */
+.app-shell:not(.sidebar-collapsed) .task-sidebar {
+  margin: 8px 0 8px 8px;
+  border: 1px solid var(--glass-rim);
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: var(--glass-shadow);
+}
+
+/* The panel's material sits on its own layer: Chromium does not render a
+   blur nested inside a blurred box, and UI-15's header/footer glass sits
+   inside the sidebar. */
+.app-shell:not(.sidebar-collapsed) .task-sidebar::before {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+  background: var(--glass-sidebar-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.task-dialog {
+  border: 1px solid var(--glass-rim);
+  background: var(--glass-dialog-bg);
+  box-shadow: var(--glass-shadow), 0 24px 60px rgba(0, 0, 0, 0.16);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+.task-dialog .task-dialog-panel { background: transparent; }
+
+.home-composer {
+  background: var(--glass-bg-pop);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    0 0 0 1px var(--sep),
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 10px 30px rgba(0, 0, 0, 0.08);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+.task-dialog .create-task-footer,
+#taskDialog .create-task-footer,
+.task-dialog .dialog-head {
+  background: transparent;
+}
+#taskDialog .create-task-footer { border-top: 1px solid var(--sep); }
+
+/* Label construction entry in data-processing tasks: a flat, folded card that
+   never shrinks to a coloured line (eval S6). */
+.labeling-setup-panel {
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 16px;
+  background: var(--card);
+}
+.labeling-setup-panel .labeling-setup-head { background: transparent; }
+.labeling-setup-panel:has(.labeling-setup-form[hidden]):has(.labeling-proposal-panel[hidden]) .labeling-setup-head {
+  border-bottom: 0;
+}
+
+/* Model delivery cards: flat grey tiles. Status lives in the glyph and the
+   status word, never in a coloured outline or tinted fill (eval S4 showed
+   green/orange framed tiles). */
+.model-delivery-chip,
+.model-delivery-readiness-card,
+.model-delivery-business-card,
+.model-delivery-policy-card,
+.model-delivery-metric,
+.model-delivery-readiness-card[data-readiness-kind],
+.model-delivery-business-card[data-signal-kind],
+.model-delivery-policy-card[data-signal-kind] {
+  border: 0;
+  background: var(--card);
+}
+.model-delivery-status[data-readiness-kind],
+.model-delivery-status[data-signal-kind] {
+  border-color: transparent;
+}
+.model-delivery-readiness-card[data-readiness-kind="ready"] strong,
+.model-delivery-business-card[data-signal-kind="ready"] strong,
+.model-delivery-policy-card[data-signal-kind="ready"] strong {
+  color: var(--model-signal-ready, var(--success));
+}
+.model-delivery-readiness-card[data-readiness-kind="warning"] strong,
+.model-delivery-business-card[data-signal-kind="warning"] strong,
+.model-delivery-policy-card[data-signal-kind="warning"] strong {
+  color: var(--model-signal-warning, var(--warning));
+}
+.model-delivery-readiness-card[data-readiness-kind="error"] strong,
+.model-delivery-business-card[data-signal-kind="error"] strong,
+.model-delivery-policy-card[data-signal-kind="error"] strong {
+  color: var(--model-signal-error, var(--danger));
+}
+.model-delivery-reason {
+  border: 0;
+  background: var(--card);
+}
+
+/* Join key picker: a flat grey card holding one white card per feature table,
+   grey option tiles, normal-size checkboxes (a generic input rule stretched
+   them to 169x34). The current key shows by its tick, not a coloured
+   outline; no tinted header. */
+.join-key-picker {
+  border: 0;
+  border-radius: 16px;
+  background: var(--card);
+}
+.join-key-picker-intro {
+  background: transparent;
+  border-bottom: 1px solid var(--sep);
+}
+.join-key-card {
+  border: 0;
+  background: var(--bg);
+}
+.join-key-option,
+.join-key-option:has(input:checked),
+.join-key-suggestion {
+  border: 0;
+  background: var(--card);
+}
+.join-key-suggestion:hover {
+  border: 0;
+  background: var(--fill);
+}
+.join-key-option input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  border: 1.5px solid var(--fill-2);
+  border-radius: 4px;
+  background: var(--bg);
+  cursor: pointer;
+}
+.join-key-option input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.2 6.7 11 12 5.2' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+.join-key-option input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.join-key-option input[type="checkbox"]:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.join-key-alternatives {
+  border-top: 1px solid var(--sep);
+}
+.join-key-picker > .gate-action-bar {
+  border-top: 1px solid var(--sep);
+}
+
+/* ---------- V3 batch 1 (2026-10-23 user feedback) ---------- */
+
+/* UI-1: the new-task pill keeps its light rim but drops the outer shadow; the
+   sidebar edge cut that shadow into a hard line. */
+.app-shell:not(.sidebar-collapsed) .nav-action,
+.app-shell:not(.sidebar-collapsed) .nav-action:hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+body[data-theme="dark"] .app-shell:not(.sidebar-collapsed) .nav-action {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* UI-2 / UI-11: one top line. The brand is a little larger, the collapse
+   button sits inside the sidebar beside it, and the header capsules, the plan
+   rail and the brand share the same vertical centre (21px + 44px / 2). */
+@media (min-width: 861px) {
+  .app-shell:not(.sidebar-collapsed) .sidebar-head {
+    padding-right: 54px;
+  }
+
+  .app-shell:not(.sidebar-collapsed) .brand-logo {
+    grid-template-columns: 40px minmax(0, 1fr);
+    column-gap: 10px;
+  }
+
+  .app-shell:not(.sidebar-collapsed) .brand-logo .brand-mark {
+    width: 40px;
+    height: 40px;
+  }
+
+  .app-shell:not(.sidebar-collapsed) #platformName b {
+    font-size: 17px;
+  }
+
+  .app-shell:not(.sidebar-collapsed) #platformName small {
+    font-size: 12px;
+  }
+
+  .app-shell:not(.sidebar-collapsed) .sidebar-collapse-button,
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) > .sidebar-collapse-button {
+    position: fixed;
+    top: 26px;
+    left: calc(var(--sidebar-width) - 47px);
+    z-index: 45;
+  }
+
+  .app-shell:not(.sidebar-collapsed) .validation-workspace:not(.is-empty) .task-hero-top {
+    padding-left: 0;
+  }
+
+  .validation-workspace:not(.is-empty) #resultWorkspace .workspace-head {
+    padding-top: 20px;
+  }
+
+  .validation-workspace:not(.is-empty) #progressRail,
+  .validation-workspace:not(.is-empty) #rightResizeHandle {
+    margin-top: 21px;
+  }
+}
+
+/* UI-9: the rail header lines up with the header capsules (21px top, 44px
+   row) and the step list folds up and down under it. */
+@media (min-width: 861px) {
+  .validation-workspace:not(.is-empty) #progressRail {
+    padding-top: 3px;
+  }
+}
+
+#progressRail .step-rail-head {
+  min-height: 38px;
+}
+
+.validation-workspace.rail-steps-collapsed #workflowStepper {
+  display: none;
+}
+
+.validation-workspace.rail-steps-collapsed:not(.is-empty) #progressRail {
+  gap: 0;
+  padding-bottom: 3px;
+}
+
+#progressRail.is-steps-folding #workflowStepper {
+  overflow: hidden;
+}
+
+#progressRail .step-rail-collapse .rail-fold-chevron {
+  transform-origin: 12px 12px;
+  transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.validation-workspace.rail-steps-collapsed #progressRail .step-rail-collapse .rail-fold-chevron {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #progressRail .step-rail-collapse .rail-fold-chevron {
+    transition: none;
+  }
+}
+
+/* UI-8: the title capsule wraps its content. The 260px floor only matters when
+   model chips compete for the row; a short single-task title left a blank
+   strip on the right of the capsule. */
+.task-hero-top:not(:has(.validation-batch-switcher-list)) .task-hero-title {
+  min-width: 0;
+}
+
+/* UI-12: when the delete button shows on hover, the status dot moves left to
+   keep a gap instead of touching the button's hover circle. */
+.app-shell:not(.sidebar-collapsed) .task-row-shell:is(:hover, :focus-within) .task-row {
+  padding-right: 18px;
+}
+
+/* UI-13: the main column is positioned and painted over the sidebar's right
+   shadow and hairline, so the glass sidebar looked cut off on its right side
+   in light mode. Lift the sidebar above it. */
+.app-shell:not(.sidebar-collapsed) .task-sidebar {
+  position: relative;
+  z-index: 2;
+}
+
+/* UI-14: the settings popover reads at the sidebar's own text size (13px,
+   medium weight) instead of 14px bold. */
+.settings-menu {
+  gap: 10px;
+  padding: 12px 14px 14px;
+  right: auto;
+  width: min(320px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+}
+
+.app-shell.sidebar-collapsed .sidebar-settings[open] .settings-menu {
+  width: min(320px, calc(100vw - var(--collapsed-popover-left) - 16px));
+}
+
+.settings-menu .settings-menu-section {
+  gap: 8px;
+}
+
+.settings-menu .settings-row {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.settings-menu .settings-row-title {
+  height: 30px;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-menu .settings-row-title svg,
+.settings-menu .settings-system-row > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-menu .settings-select,
+.settings-menu .settings-system-row,
+.settings-menu .settings-select option {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-menu .settings-select,
+.settings-menu .settings-system-row {
+  min-height: 30px;
+}
+
+/* Native select insets vary between browsers. Keep the text and chevron
+   aligned to the same fixed gutters on every settings row. */
+.settings-menu .settings-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 5px 30px 5px 10px;
+  text-align: left;
+  text-indent: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2 4 4 4 4-4' fill='none' stroke='%2386868b' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+}
+
+:root[lang="en"] .settings-menu .settings-row {
+  grid-template-columns: 98px minmax(0, 1fr);
+}
+
+.settings-menu .settings-system-row {
+  height: 30px;
+}
+
+.settings-menu .settings-system-row .settings-row-title {
+  font-weight: 500;
+}
+
+/* V3 UI-15 (2026-10-23): the open sidebar's top block (logo, search,
+   新建任务) and footer stay flat; the task list runs under both and each turns
+   to glass only while rows are under it. workbench-chrome.js measures the two
+   heights into --sidebar-list-top/--sidebar-list-bottom and toggles
+   .list-under-top/.list-under-bottom. */
+.app-shell:not(.sidebar-collapsed) .task-list-wrap {
+  overflow: visible;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-list {
+  position: relative;
+  z-index: 0;
+  margin-top: calc(-1 * var(--sidebar-list-top, 0px));
+  margin-bottom: calc(-1 * var(--sidebar-list-bottom, 0px));
+  padding-top: var(--sidebar-list-top, 0px);
+  padding-bottom: calc(var(--sidebar-list-bottom, 0px) + 8px);
+  scroll-padding-top: var(--sidebar-list-top, 0px);
+  scroll-padding-bottom: calc(var(--sidebar-list-bottom, 0px) + 8px);
+  border-radius: 17px;
+}
+
+.app-shell:not(.sidebar-collapsed) .sidebar-head,
+.app-shell:not(.sidebar-collapsed) .list-head,
+.app-shell:not(.sidebar-collapsed) .list-toolbar,
+.app-shell:not(.sidebar-collapsed) .sidebar-footer {
+  position: relative;
+  z-index: 2;
+}
+
+/* Search and results must escape the sidebar's normal stacking context to
+   sit above the scrim (50). The input row also clears the result list (60),
+   whose transparent scroll padding extends underneath it. */
+body.search-active .app-shell:not(.sidebar-collapsed) .task-sidebar {
+  z-index: auto;
+}
+
+body.search-active .app-shell:not(.sidebar-collapsed) .list-head {
+  z-index: 61;
+}
+
+.app-shell:not(.sidebar-collapsed) .sidebar-head::before,
+.app-shell:not(.sidebar-collapsed) .sidebar-footer::before {
+  position: absolute;
+  z-index: -1;
+  content: "";
+  pointer-events: none;
+  opacity: 0;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  transition: opacity 180ms ease;
+}
+
+/* The head band covers the logo, search and 新建任务 rows below it. */
+.app-shell:not(.sidebar-collapsed) .sidebar-head::before {
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--sidebar-list-top, 0px);
+  border-radius: 17px 17px 0 0;
+}
+
+/* The footer is inset 10px; its band spans the full sidebar width. */
+.app-shell:not(.sidebar-collapsed) .sidebar-footer::before {
+  right: -10px;
+  bottom: 0;
+  left: -10px;
+  height: var(--sidebar-list-bottom, 0px);
+  border-radius: 0 0 17px 17px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-sidebar.list-under-top .sidebar-head::before,
+.app-shell:not(.sidebar-collapsed) .task-sidebar.list-under-bottom .sidebar-footer::before {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell:not(.sidebar-collapsed) .sidebar-head::before,
+  .app-shell:not(.sidebar-collapsed) .sidebar-footer::before {
+    transition: none;
+  }
+}
+
+/* V3 UI-17 (2026-10-28): the avatar takes a column on the left, so every item
+   in an Agent conversation (both sides' messages, cards, tables, gates and the
+   sections between messages) leaves the same width free on the right; leaving
+   the avatar aside, the content sits centred. The composer keeps its width and
+   manual mode (no avatars) is untouched. */
+#resultScrollContent:has(.agent-message.assistant > .agent-face) .agent-message {
+  padding-right: var(--agent-gutter);
+}
+
+#resultScrollContent:has(.agent-message.assistant > .agent-face) > :is(#planDriverActions, #planRetryPanel, #scanSection, #notebookSection, #metricSection, #reportSection) {
+  align-self: stretch;
+  width: auto;
+  /* messages carry a 2px side margin; match it so all items share one edge */
+  margin-right: calc(var(--agent-gutter) + 2px);
+  margin-left: calc(var(--agent-gutter) + 2px);
+}
+
+/* V3 UI-4 (2026-10-28): the delete dialog names what goes. One flat list,
+   kind on the left, names on the right; count chips stay for the rest. */
+.platform-confirm-purge-list {
+  display: grid;
+  flex: 1 0 100%;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--danger-soft);
+  text-align: left;
+}
+
+.platform-confirm-purge-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.platform-confirm-purge-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--danger-strong);
+  font-weight: 600;
+}
+
+.platform-confirm-purge-kind svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.platform-confirm-purge-names {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* V3 UI-21 (2026-10-28): during the expand slide app.js pins the sidebar's
+   children to --rail-content-width (the grid column width). The open sidebar
+   is an inset panel (8px margin + 1px borders, see the 2026-10-21 rule), and
+   the footer has 10px side margins, so pin them to their real widths;
+   otherwise everything snaps 10px narrower when the slide ends. */
+body.sidebar-sliding .app-shell:not(.sidebar-collapsed) .task-sidebar > * {
+  width: calc(var(--rail-content-width) - 10px);
+}
+
+body.sidebar-sliding .app-shell:not(.sidebar-collapsed) .task-sidebar > .sidebar-footer {
+  width: calc(var(--rail-content-width) - 30px);
+}
+
+/* V3 UI-21 (2026-10-28): expanded and collapsed sidebar share one icon
+   column (centre x = 38px, the collapsed rail's centre), one icon size (18px)
+   and the same vertical centres, so collapsing only fades the labels.
+   Expanded side: the panel's inner edge is at x = 9px. */
+/* The default mark's robot head sits left of its image centre because the
+   gauge extends right. Optical alignment follows the head in both states;
+   percentages preserve the correction at smaller logo sizes. */
+#sidebarBrandTrigger .brand-mark[src*="static/brand/marvis-logo.png"] {
+  translate: 12% 0;
+}
+
+.app-shell:not(.sidebar-collapsed) .sidebar-head {
+  padding-left: 9px;
+}
+
+.app-shell:not(.sidebar-collapsed) .list-search-toggle {
+  padding-left: 8px;
+}
+
+.app-shell:not(.sidebar-collapsed) .nav-action {
+  justify-content: center;
+  padding-inline: 12px;
+}
+
+.app-shell:not(.sidebar-collapsed) .sidebar-footer .ops-entry,
+.app-shell:not(.sidebar-collapsed) .sidebar-settings summary {
+  padding-left: 10px;
+}
+
+.app-shell:not(.sidebar-collapsed) :is(.list-search-toggle, .nav-action, .ops-entry, .sidebar-settings summary) svg,
+.app-shell.sidebar-collapsed :is(.list-search-toggle, .collapsed-create-toggle, .ops-entry, .sidebar-settings summary) svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Keep the collapsed create/search order and search flyout aligned with
+   the expanded rows. */
+.app-shell.sidebar-collapsed {
+  --collapsed-search-top: 117px;
+}
+
+.app-shell.sidebar-collapsed .sidebar-head {
+  top: 21px;
+}
+
+.app-shell.sidebar-collapsed .brand-logo .brand-mark {
+  width: 40px;
+  height: 40px;
+}
+
+.app-shell.sidebar-collapsed .list-head {
+  top: 75px;
+  gap: 8px;
+}
+
+.app-shell.sidebar-collapsed .list-search-toggle {
+  height: 32px;
+}
+
+/* 新建任务 keeps its dark glass when collapsed, as a 34px circle (id
+   selectors: the U4 :is() rules above outrank a class here). */
+.app-shell.sidebar-collapsed #collapsedCreateTaskButton {
+  width: 34px;
+  height: 34px;
+  margin: 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  background: rgba(29, 29, 31, 0.82);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.app-shell.sidebar-collapsed #collapsedCreateTaskButton svg {
+  color: #ffffff;
+}
+
+.app-shell.sidebar-collapsed #collapsedCreateTaskButton:hover {
+  background: rgba(29, 29, 31, 0.9);
+}
+
+body[data-theme="dark"] .app-shell.sidebar-collapsed #collapsedCreateTaskButton {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+body[data-theme="dark"] .app-shell.sidebar-collapsed #collapsedCreateTaskButton svg {
+  color: #1d1d1f;
+}
+
+.app-shell.sidebar-collapsed .sidebar-footer {
+  bottom: 19px;
+  gap: 0;
+}
+
+.app-shell.sidebar-collapsed .sidebar-footer .ops-entry,
+.app-shell.sidebar-collapsed .sidebar-settings summary {
+  height: 34px;
+  min-height: 34px;
+}
+
+/* V3 UI-21: the list runs under both fixed blocks (UI-15), but its scrollbar
+   track stays between them. Track margins are a WebKit scrollbar feature,
+   which Chrome only honours while the standard scrollbar-width/-color are
+   auto, so the expanded list hands styling back to the ::-webkit rules. */
+.app-shell:not(.sidebar-collapsed) .task-list {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-list::-webkit-scrollbar-track {
+  margin-top: var(--sidebar-list-top, 0px);
+  margin-bottom: var(--sidebar-list-bottom, 0px);
+  background: transparent;
+}
+
+.app-shell:not(.sidebar-collapsed) .task-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* V3 UI-19 (2026-10-28): a smaller rail header; folded, the rail is exactly
+   one header capsule (44px tall, top 21px: 1px borders + 3px padding + 36px
+   head), and the conversation spans the free width under it, centred in the
+   area right of the sidebar. The header row keeps clear of the capsule. */
+#progressRail .step-rail-head {
+  min-height: 36px;
+}
+
+#progressRail .rail-summary {
+  gap: 10px;
+}
+
+#progressRail .rail-ring {
+  width: 26px;
+  height: 26px;
+}
+
+#progressRail .rail-ring circle {
+  stroke-width: 5;
+}
+
+#progressRail .rail-summary-copy b {
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+#progressRail .rail-summary-copy small {
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.validation-workspace.rail-steps-collapsed:not(.is-empty) #progressRail {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+@media (min-width: 861px) {
+  .validation-workspace.rail-steps-collapsed:not(.is-empty) #resultWorkspace {
+    grid-column: 1 / -1;
+  }
+
+  .validation-workspace.rail-steps-collapsed:not(.is-empty) #resultWorkspace .task-hero-top {
+    padding-right: calc(var(--workspace-rail-gap) + var(--progress-width));
+  }
+
+  .validation-workspace.rail-steps-collapsed:not(.is-empty) #rightResizeHandle {
+    visibility: hidden;
+  }
+}
+
+#progressRail.is-steps-folding {
+  overflow: hidden;
+}
+
+/* The chevron turns with the click, not when the fold lands. */
+#progressRail .step-rail-collapse[aria-expanded="false"] .rail-fold-chevron {
+  transform: rotate(180deg);
+}
+
+#progressRail .step-rail-collapse[aria-expanded="true"] .rail-fold-chevron {
+  transform: none;
+}
+
+/* V3 UI-22 (2026-10-28): every dialog and floating layer opens and closes the
+   same way: a 180ms fade with a 6px rise and a slight scale in, 140ms back
+   out, and its scrim fades with it. Closing animates through discrete
+   display/overlay transitions where the browser supports them; elsewhere it
+   just disappears. The per-dialog entrance keyframes are retired here (the
+   confirm dialog's inner glyph and rows still play after it lands). */
+:root {
+  --pop-in: 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  --pop-out: 140ms ease-in;
+}
+
+dialog[open],
+.task-dialog[open],
+.platform-confirm-dialog[open],
+.governance-settings-dialog[open],
+.validation-batch-create-dialog[open],
+.ops-dialog[open],
+dialog[open]::backdrop,
+.platform-confirm-dialog[open]::backdrop,
+.governance-settings-dialog[open]::backdrop {
+  animation: none;
+}
+
+dialog,
+#taskInspector,
+.settings-menu,
+.task-row-preview,
+.dataset-column-tooltip {
+  transition:
+    opacity var(--pop-out),
+    transform var(--pop-out),
+    display var(--pop-out) allow-discrete,
+    overlay var(--pop-out) allow-discrete;
+}
+
+dialog:not([open]),
+#taskInspector[hidden],
+.task-row-preview[hidden] {
+  opacity: 0;
+  transform: translateY(6px) scale(0.98);
+}
+
+dialog[open],
+#taskInspector:not([hidden]),
+.sidebar-settings[open] .settings-menu,
+.task-row-preview:not([hidden]),
+.dataset-column-tooltip {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity var(--pop-in),
+    transform var(--pop-in),
+    display var(--pop-in) allow-discrete,
+    overlay var(--pop-in) allow-discrete;
+}
+
+@starting-style {
+  dialog[open],
+  #taskInspector:not([hidden]),
+  .sidebar-settings[open] .settings-menu,
+  .task-row-preview:not([hidden]),
+    .dataset-column-tooltip {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+dialog::backdrop {
+  opacity: 0;
+  transition:
+    opacity var(--pop-out),
+    display var(--pop-out) allow-discrete,
+    overlay var(--pop-out) allow-discrete;
+}
+
+dialog[open]::backdrop {
+  opacity: 1;
+  transition:
+    opacity var(--pop-in),
+    display var(--pop-in) allow-discrete,
+    overlay var(--pop-in) allow-discrete;
+}
+
+@starting-style {
+  dialog[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The open-state selectors are listed too: they outrank the base ones and
+     would otherwise put the transition back (review 2026-11-03). */
+  dialog,
+  dialog[open],
+  dialog::backdrop,
+  dialog[open]::backdrop,
+  #taskInspector,
+  #taskInspector:not([hidden]),
+  .settings-menu,
+  .sidebar-settings[open] .settings-menu,
+  .task-row-preview,
+  .task-row-preview:not([hidden]),
+  .dataset-column-tooltip,
+  .coming-soon-toast,
+  .coming-soon-toast.is-visible {
+    transition: none;
+  }
+}
+
+/* The toast centres itself with translateX(-50%) and toggles .is-visible;
+   it keeps its own transform and takes the shared timing. */
+.coming-soon-toast {
+  transition: opacity var(--pop-out), transform var(--pop-out);
+}
+
+.coming-soon-toast.is-visible {
+  transition: opacity var(--pop-in), transform var(--pop-in);
+}
+
+/* V3 UI-24 (2026-10-28): icon-only buttons are round everywhere. The hover
+   fill, the pressed fill and the focus ring (outlines follow border-radius)
+   all take the circle. The collapsed rail entries become 34px circles on the
+   same icon column (x = 38px) as UI-21. */
+.button.dialog-close-button,
+.task-dialog .button.dialog-close-button,
+#governanceRefreshButton,
+#sidebarCollapseButton,
+#progressRailCollapse,
+#taskSearchClose,
+.workflow-widget-toggle,
+.ops-dialog [data-ops-action="close"],
+.app-shell.sidebar-collapsed #sidebarBrandTrigger,
+.app-shell.sidebar-collapsed .list-search-toggle,
+.app-shell.sidebar-collapsed .sidebar-footer .ops-entry,
+.app-shell.sidebar-collapsed .sidebar-settings summary {
+  border-radius: 50%;
+}
+
+.agent-memory-reference-action {
+  border-radius: 999px;
+}
+
+.app-shell.sidebar-collapsed .list-search-toggle {
+  width: 32px;
+  height: 32px;
+}
+
+.app-shell.sidebar-collapsed .sidebar-footer .ops-entry,
+.app-shell.sidebar-collapsed .sidebar-settings summary {
+  width: 34px;
+  margin: 0 auto;
+}
+
+/* Match the neighbouring chips at rest; use the accent on hover or focus. */
+.home-composer .home-composer-attach {
+  align-self: center;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.home-composer .home-composer-attach svg {
+  color: currentColor;
+}
+
+.home-composer .home-composer-attach:hover,
+.home-composer .home-composer-attach:focus-within {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent-strong, var(--accent));
+}
+
+/* V3 UI-7: the example row sits above the composer. */
+.home-examples {
+  /* Keep an 8px pill-to-composer gap while leaving shadow space inside
+     the horizontal scrolling viewport. */
+  margin: -10px 0 -26px;
+}
+
+/* V3 UI-3 (2026-10-23): buttons are glass across the platform. Default and
+   secondary: a clear pane (translucent surface, glass rim, light top edge);
+   primary keeps its colour as tinted glass; danger buttons are red text on
+   the clear pane. No outer drop shadow
+   (UI-1); close buttons and disabled buttons keep their own looks. */
+.button:not(.primary):not(.dialog-close-button):not(:disabled) {
+  border-color: var(--glass-rim);
+  background: color-mix(in srgb, var(--surface) 58%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), 0 0 0 0.5px var(--sep);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.button:not(.primary):not(.dialog-close-button):not(:disabled):hover {
+  background: color-mix(in srgb, var(--text) 7%, color-mix(in srgb, var(--surface) 58%, transparent));
+}
+
+.button.primary:not(:disabled) {
+  background: color-mix(in srgb, var(--button-primary-bg) 86%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(170%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(170%);
+}
+
+.button.primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--button-primary-bg-hover, var(--button-primary-bg)) 94%, transparent);
+}
+
+body[data-theme="dark"] .button:not(.primary):not(.dialog-close-button):not(:disabled) {
+  border-color: var(--glass-rim);
+  background: color-mix(in srgb, var(--surface-soft) 62%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 0.5px var(--sep);
+}
+
+/* The delete confirmation's red button is a .button.primary recoloured by
+   tone; keep it red as tinted glass. */
+.platform-confirm-dialog[data-tone="danger"] .button.primary.platform-confirm-affirmative:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 70%, transparent);
+  background: color-mix(in srgb, var(--danger) 88%, transparent);
+}
+
+.platform-confirm-dialog[data-tone="danger"] .button.primary.platform-confirm-affirmative:not(:disabled):hover {
+  background: color-mix(in srgb, var(--danger) 88%, #000000);
+}
+
+/* V3 UI-16 (2026-10-28 rule: no secondary captions the layout already says).
+   Hidden, not removed, so the DOM and its translations stay intact. */
+.home-hero-sub,
+.ops-dialog .ops-note,
+.labeling-setup-head strong {
+  display: none;
+}
+
+/* With its caption gone the label is the panel's title. */
+.labeling-setup-head span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}

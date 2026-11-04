@@ -13,6 +13,7 @@ from marvis.agent.service import (
     fallback_word_conclusions,
     generate_word_conclusions,
 )
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
 from marvis.agent.validation_evidence import agent_evidence_from_settings
 from marvis.api_scan_helpers import perform_scan_task
 from marvis.api_stage_helpers import pipeline_settings_from_settings, run_stage_job
@@ -34,6 +35,7 @@ from marvis.repositories.validation_batches import (
 from marvis.repositories.validation_contracts import ValidationContractRepository
 from marvis.safe_paths import prepare_task_output_dir, resolve_fixed_task_output
 from marvis.validation.results import validation_results_from_dict
+from marvis.validation_completion import legacy_validation_delivery_complete
 from marvis.validation.stress_risk import (
     stress_ks_risk,
     stress_psi_risk,
@@ -603,6 +605,26 @@ def _record_completed_item(
         settings.tasks_dir,
         item.child_task_id,
     )
+    if not report_complete:
+        raise ValidationBatchItemError("report", "报告产物不完整")
+    if (
+        final_task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
+        or getattr(final_task, "status_reason_code", None)
+    ):
+        raise ValidationBatchItemError("report", "报告尚未完成或已取消")
+    if final_task.status is TaskStatus.REVIEW_REQUIRED:
+        task_repo = TaskRepository(settings.db_path)
+        if not legacy_validation_delivery_complete(
+            task_repo, final_task, settings.tasks_dir,
+            active_job_kind=task_repo.get_active_job_kind(item.child_task_id),
+            workflow_status=None,
+            awaiting_input_confirmation=bool(
+                ValidationContractRepository(settings.db_path).pending_confirmation_task_ids(
+                    [item.child_task_id],
+                )
+            ),
+        ):
+            raise ValidationBatchItemError("report", "报告尚未完成或已取消")
     outcome, reasons = validation_batch_item_outcome(
         oot_ks=oot_ks,
         pmml_status=pmml_status,
@@ -613,7 +635,7 @@ def _record_completed_item(
     )
     batch_repo.update_item(
         item.id,
-        status="succeeded" if outcome == "pass" else "review_required",
+        status="succeeded",
         stage="completed",
         oot_ks=oot_ks,
         oot_psi=oot_psi,
@@ -766,8 +788,8 @@ def _add_parent_waiting_message(
     if contract_count:
         parts.append(
             f"批次中有 {contract_count} 个模型等待确认输入合同。"
-            "无冲突时请在对话里回复「都按这个」按识别结果确认；"
-            "某个模型要改列时指出模型名和字段。"
+            "无冲突时点「都按识别结果确认」；"
+            "某个模型要改列时，直接说模型名和字段。"
             "表单仍可展开核对，但不必逐项点选才能继续。"
         )
     if report_count:
@@ -780,11 +802,14 @@ def _add_parent_waiting_message(
         role="assistant",
         stage="input_confirmation" if contract_count else "report_conclusion",
         content="\n".join(parts),
-        metadata={
-            "awaiting_confirmation": True,
-            "waiting_item_count": len(waiting_items),
-            "waiting_report_count": report_count,
-        },
+        metadata=with_quick_replies(
+            {
+                "awaiting_confirmation": True,
+                "waiting_item_count": len(waiting_items),
+                "waiting_report_count": report_count,
+            },
+            *([quick_reply("都按识别结果确认", "都按这个")] if contract_count else []),
+        ),
     )
 
 
@@ -948,12 +973,17 @@ def _finalize_batch(
             prepare_task_output_dir(settings.tasks_dir, parent_task_id)
             / "validation_batch_summary.xlsx"
         )
-        written = writer(
+        writer(
             batch_name=parent.model_name,
             created_at=batch.created_at,
             rows=rows,
             output_path=output_path,
         )
+        summary_file = resolve_fixed_task_output(
+            settings.tasks_dir, parent_task_id, "validation_batch_summary.xlsx",
+        )
+        if summary_file is None or not zipfile.is_zipfile(summary_file):
+            raise ValidationBatchItemError("summary", "批次汇总报告未生成或已损坏")
     except Exception as exc:
         detail = _bounded_public_error(exc, settings)
         task_repo.add_agent_message(
@@ -981,7 +1011,7 @@ def _finalize_batch(
         return failed_batch
 
     failed_count = sum(item.status == "failed" for item in items)
-    manual_review_count = sum(item.status == "review_required" for item in items)
+    manual_review_count = sum(item.outcome == "manual_review" for item in items)
     status = (
         "failed"
         if failed_count == len(items)
@@ -989,7 +1019,7 @@ def _finalize_batch(
         if failed_count
         else "completed"
     )
-    summary_path = str(Path(written) if written is not None else output_path)
+    summary_path = str(summary_file)
     final = batch_repo.update_batch(
         parent_task_id,
         status=status,
@@ -1001,7 +1031,7 @@ def _finalize_batch(
         TaskStatus.FAILED
         if status == "failed"
         else TaskStatus.REVIEW_REQUIRED
-        if failed_count or manual_review_count
+        if failed_count
         else TaskStatus.SUCCEEDED
     )
     _finish_parent_task(

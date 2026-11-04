@@ -157,7 +157,7 @@ jobs:
     # For completed runs, aggregate every gate that applies to the event.
     if: ${{ !cancelled() }}
     needs:
-      [quality, fast_tests, full_checks, strategy_smoke, browser_smoke, pmml_runtime, security]
+      [quality, fast_tests, full_checks, strategy_smoke, browser_smoke, pmml_runtime, security, macos_native_isolation]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -172,8 +172,10 @@ jobs:
           BROWSER_SMOKE_RESULT: ${{ needs.browser_smoke.result }}
           PMML_RUNTIME_RESULT: ${{ needs.pmml_runtime.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
+          MACOS_NATIVE_ISOLATION_RESULT: ${{ needs.macos_native_isolation.result }}
         run: |
           test "$SECURITY_RESULT" = "success"
+          test "$MACOS_NATIVE_ISOLATION_RESULT" = "success"
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             test "$FULL_CHECKS_RESULT" = "success"
             test "$QUALITY_RESULT" = "skipped"
@@ -290,6 +292,61 @@ jobs:
 
       - name: Run PMML/JVM runtime tests
         run: uv run python -m pytest -q -m pmml_runtime
+
+  macos_native_isolation:
+    # Linux runners skip every native Seatbelt test, so a green Ubuntu run says
+    # nothing about the macOS isolation boundary. This lane runs them on macOS
+    # and fails if any of them is skipped: a skip is not a pass here.
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Register the default Jupyter kernel
+        run: uv run python -m ipykernel install --user --name python3
+
+      - name: Run native isolation tests (skips fail the lane)
+        run: |
+          uv run python -m pytest -q -rs \
+            --junitxml=native-isolation.xml \
+            tests/test_local_execution_network.py \
+            tests/test_local_execution_journeys.py \
+            tests/test_native_worker_isolation.py \
+            "tests/test_notebooks.py" -k "loopback or test_local_execution_network or test_local_execution_journeys or test_native_worker_isolation"
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("native-isolation.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          tests = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          print(f"native isolation: {tests} tests, {skipped} skipped")
+          if tests == 0 or skipped:
+              sys.exit("native isolation tests must run on macOS; skipped tests do not count as passes")
+          PY
 
   security:
     runs-on: ubuntu-latest

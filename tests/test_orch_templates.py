@@ -262,9 +262,10 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
         "特征", "特征", "特征", "特征", "特征", "建模", "建模", "建模", "建模", "建模", "报告", "交付"
     ]
     # gates: confirm split/features/refined-features/tuning config, select final
-    # experiment, approve report and delivery.
+    # experiment, approve report and delivery.  D-4: 「调参」 runs straight after
+    # the 「配置调参」 confirmation, with no second gate.
     assert [step.needs_confirmation for step in plan.steps] == [
-        False, False, True, True, True, True, True, False, False, True, True, True
+        False, False, True, True, True, True, False, False, False, True, True, True
     ]
     assert not any(step.decision_point for step in plan.steps)
 
@@ -1639,3 +1640,14 @@ def _tool_registry(tmp_path: Path) -> ToolRegistry:
     registry = PluginRegistry(repo)
     load_builtin_packs(registry, Path(__file__).parents[1] / "marvis" / "packs")
     return ToolRegistry(registry)
+
+
+@pytest.mark.parametrize("template_id", ["modeling", "modeling_with_join"])
+def test_modeling_tuning_is_confirmed_once_at_configuration(template_id):
+    """D-4: 「配置调参」 is the only tuning gate; confirming it starts 「调参」."""
+
+    from marvis.orchestrator.templates import get_template
+
+    steps = {step.title: step for step in get_template(template_id).steps}
+    assert steps["配置调参"].needs_confirmation is True
+    assert steps["调参"].needs_confirmation is False

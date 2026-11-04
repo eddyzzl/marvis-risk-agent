@@ -36,6 +36,24 @@
     <link rel="stylesheet" href="static/css/blind-oot.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/historical-replay.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/collection-workspace.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/workbench-chrome.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/conversation-components.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/result-cards.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/agent-face.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/workbench-shell.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/ui-language.css?v=__MARVIS_STATIC_VERSION__" />
+    <script>
+      (() => {
+        try {
+          if (/^en\b/i.test(localStorage.getItem("marvis_ui_locale") || "")) {
+            document.documentElement.lang = "en";
+            document.documentElement.dataset.uiLocale = "en";
+          }
+        } catch (_) {
+          // Language preference is optional; Chinese stays the default.
+        }
+      })();
+    </script>
     <script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>
   </head>
   <body class="app-booting" data-theme="light" data-marvis-local-token="__MARVIS_LOCAL_TOKEN__" data-marvis-plugin-admin-token="__MARVIS_PLUGIN_ADMIN_TOKEN__">
@@ -70,7 +88,7 @@
       <form class="task-dialog-panel" method="dialog">
         <header class="dialog-head">
           <h2 id="taskDialogTitle">创建验证任务</h2>
-          <p id="taskDialogSubtitle" class="dialog-subtitle">选择执行模式并补充材料信息。</p>
+          <p id="taskDialogSubtitle" class="dialog-subtitle" hidden></p>
           <button id="closeTaskDialogButton" class="button compact secondary dialog-close-button" type="button" aria-label="关闭" title="关闭">
             <span aria-hidden="true">&times;</span>
           </button>
@@ -410,7 +428,7 @@
               </label>
               <label class="algorithm-choice">
                 <input type="checkbox" name="featureMetric" value="coverage" checked />
-                <span>覆盖率 / 缺失率 / 单一值率 / 零值率</span>
+                <span>覆盖率 / 缺失率 / 最常见值占比 / 零值率</span>
               </label>
               <label class="algorithm-choice">
                 <input type="checkbox" name="featureMetric" value="psi_month_first" />
@@ -537,13 +555,20 @@
       <form class="task-dialog-panel material-binding-panel" method="dialog">
         <header class="dialog-head">
           <h2 id="materialBindingTitle">选择验证材料</h2>
-          <p class="dialog-subtitle">确认 Notebook、样本数据、PMML 模型和数据字典后，再执行契约检查。</p>
           <button id="closeMaterialBindingDialogButton" class="button compact secondary dialog-close-button" type="button" aria-label="关闭" title="关闭">
             <span aria-hidden="true">&times;</span>
           </button>
         </header>
         <div class="material-binding-body">
           <div id="materialBindingRows" class="material-binding-rows"></div>
+          <div class="material-binding-supplement">
+            <label id="materialBindingUploadLabel" class="button compact secondary material-binding-upload">
+              <input id="materialBindingFileInput" class="visually-hidden" type="file" multiple />
+              上传补充文件
+            </label>
+            <button id="materialBindingRefreshButton" class="button compact secondary" type="button">刷新列表</button>
+            <small id="materialBindingSupplementHint">补好的数据字典等文件可以直接传进这个任务，原文件保留。</small>
+          </div>
           <div id="materialBindingStatus" class="status" role="status" aria-live="polite"></div>
           <div class="material-binding-actions">
             <button id="materialBindingCancelButton" class="button secondary" type="button">稍后选择</button>
@@ -992,7 +1017,7 @@
             const sidebarWidth = Number(storedLayout.sidebar);
             const progressWidth = Number(storedLayout.progress);
             if (Number.isFinite(sidebarWidth) && sidebarWidth > 0) {
-              const normalizedSidebarWidth = clamp(sidebarWidth, 240, 520);
+              const normalizedSidebarWidth = clamp(sidebarWidth === 320 ? 248 : sidebarWidth, 200, 380);
               document.documentElement.style.setProperty("--sidebar-width", `${normalizedSidebarWidth}px`);
               document.documentElement.style.setProperty("--rail-content-width", `${normalizedSidebarWidth}px`);
             }
@@ -1016,26 +1041,23 @@
               src="static/brand/marvis-logo.png"
               alt="MARVIS-全能风控智能体 logo"
             />
-            <h1 id="platformName">MARVIS-全能风控智能体</h1>
+            <h1 id="platformName"><b>MARVIS</b><small>全能风控智能体</small></h1>
           </div>
         </header>
 
         <section class="task-list-wrap" aria-label="任务列表">
+          <div class="list-toolbar">
+            <button id="createTaskOpenButton" class="nav-action" type="button">
+              <svg id="createTaskIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <rect x="4" y="4" width="16" height="16" rx="5"></rect>
+                <path d="M12 9.2v5.6"></path>
+                <path d="M9.2 12h5.6"></path>
+              </svg>
+              <span>新建任务</span>
+            </button>
+          </div>
           <div class="list-head">
             <span>任务列表</span>
-            <button
-              id="taskSearchToggle"
-              class="list-search-toggle"
-              type="button"
-              aria-label="搜索任务"
-              aria-expanded="false"
-              title="搜索任务"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <circle cx="10.5" cy="10.5" r="6"></circle>
-                <path d="m14.85 14.85 4.15 4.15"></path>
-              </svg>
-            </button>
             <button
               id="collapsedCreateTaskButton"
               class="collapsed-create-toggle"
@@ -1048,6 +1070,21 @@
                 <path d="M12 9.2v5.6"></path>
                 <path d="M9.2 12h5.6"></path>
               </svg>
+            </button>
+            <button
+              id="taskSearchToggle"
+              class="list-search-toggle"
+              type="button"
+              aria-label="搜索任务"
+              aria-expanded="false"
+              title="搜索任务"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="10.5" cy="10.5" r="6"></circle>
+                <path d="m14.85 14.85 4.15 4.15"></path>
+              </svg>
+              <span class="list-search-label" aria-hidden="true">搜索任务</span>
+              <kbd class="list-search-kbd" aria-hidden="true">⌘K</kbd>
             </button>
             <label class="task-search">
               <span class="visually-hidden">搜索任务</span>
@@ -1069,16 +1106,6 @@
                 </svg>
               </button>
             </label>
-          </div>
-          <div class="list-toolbar">
-            <button id="createTaskOpenButton" class="nav-action" type="button">
-              <svg id="createTaskIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <rect x="4" y="4" width="16" height="16" rx="5"></rect>
-                <path d="M12 9.2v5.6"></path>
-                <path d="M9.2 12h5.6"></path>
-              </svg>
-              <span>新建任务</span>
-            </button>
           </div>
           <div id="taskList" class="task-list" role="list">
             <div class="empty-state">暂无任务</div>
@@ -1127,6 +1154,7 @@
                     <span>分组</span>
                   </label>
                   <select id="settingsGroupSelect" class="settings-select">
+                    <option value="attention">按状态</option>
                     <option value="none">不分组</option>
                     <option value="task_type">按任务类型</option>
                     <option value="validator">按验证人员</option>
@@ -1166,6 +1194,20 @@
                   </label>
                   <select id="settingsPetSelect" class="settings-select"></select>
                 </div>
+                <div class="settings-row" data-settings-row="language">
+                  <span class="settings-row-title">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <circle cx="12" cy="12" r="8.5"></circle>
+                      <path d="M3.5 12h17"></path>
+                      <path d="M12 3.5c2.4 2.3 3.6 5.2 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.2-3.6-8.5s1.2-6.2 3.6-8.5Z"></path>
+                    </svg>
+                    <span>界面语言</span>
+                  </span>
+                  <div class="ui-locale-switch" role="radiogroup" aria-label="界面语言 / Language" translate="no" data-i18n-skip>
+                    <button type="button" class="ui-locale-option selected" role="radio" aria-checked="true" data-ui-locale-option="zh" lang="zh-CN">中文</button>
+                    <button type="button" class="ui-locale-option" role="radio" aria-checked="false" tabindex="-1" data-ui-locale-option="en" lang="en">English</button>
+                  </div>
+                </div>
               </section>
               <button id="openGovernanceSettingsButton" class="settings-system-row" type="button" data-settings-row="system">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1204,15 +1246,20 @@
         </button>
         <section id="workspaceWelcome" class="workspace-welcome" aria-label="欢迎">
           <div class="workspace-welcome-inner">
-            <img
-              id="workspaceBrandLogo"
-              class="workspace-brand-logo"
-              src="static/brand/marvis-workspace-logo.png"
-              alt="MARVIS-全能风控智能体 logo"
-            />
-            <h2 id="workspaceGreetingTitle">
-              <span id="workspaceGreetingText" class="workspace-greeting-nowrap">早上好</span><span>，我来帮您完成信贷风控工作</span>
-            </h2>
+            <!-- 2026-10-14 redesign batch 5 (D7): input-first home. The hero is the
+                 mascot illustration; a custom brand.json workspace logo replaces it. -->
+            <div class="home-hero">
+              <img
+                id="workspaceBrandLogo"
+                class="workspace-brand-logo"
+                src="static/brand/marvis-home-hero.png"
+                alt="MARVIS-全能风控智能体 logo"
+              />
+              <h2 id="workspaceGreetingTitle">
+                <span id="workspaceGreetingText" class="workspace-greeting-nowrap">早上好</span><span>，今天想做什么？</span>
+              </h2>
+              <p class="home-hero-sub">说出目标，或者把样本、Notebook、PMML 拖进来。缺什么我会问你。</p>
+            </div>
             <script>
               (() => {
                 const hour = new Date().getHours();
@@ -1228,6 +1275,100 @@
                 if (text) text.textContent = greeting;
               })();
             </script>
+            <div id="homeExamples" class="home-examples" aria-label="示例"></div>
+            <form id="homeComposer" class="home-composer" novalidate>
+              <div id="homeComposerFiles" class="home-file-chips" aria-label="已添加的文件" hidden></div>
+              <!-- Work-icon templates (2026-10-19): an editable sentence with value
+                   slots and file slots; js/home-composer.js keeps the textarea
+                   below in sync, so sending works exactly as typed text. -->
+              <div
+                id="homeComposerTemplate"
+                class="home-composer-template"
+                contenteditable="true"
+                role="textbox"
+                aria-multiline="true"
+                aria-label="按模板改写你的目标"
+                spellcheck="false"
+                hidden
+              ></div>
+              <input id="homeComposerRoleFileInput" class="visually-hidden" type="file" tabindex="-1" aria-hidden="true" />
+              <textarea
+                id="homeComposerInput"
+                rows="2"
+                placeholder="例如：用这份样本做一个贷前 A 卡，OOT 取最近两个月，KS 不低于 0.30"
+                aria-label="告诉 Agent 你想做什么"
+              ></textarea>
+              <div class="home-composer-bar">
+                <!-- Mockup home composer: the same permission, model and effort
+                     chips as the task composer. They mirror its selects
+                     (app.js bindHomeComposerChips), so the first message of the
+                     new task uses exactly what is picked here. -->
+                <!-- Files first, on the left, as a labelled chip like the others
+                     (2026-10-19 user feedback); permission, model and effort sit
+                     on the right. -->
+                <label class="home-composer-attach" title="添加文件">
+                  <input id="homeComposerFileInput" class="visually-hidden" type="file" multiple />
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M20.5 11.5 12 20a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2L9.4 17.4a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8" />
+                  </svg>
+                  <span class="home-composer-attach-text">添加文件</span>
+                </label>
+                <span class="home-composer-grow" aria-hidden="true"></span>
+                <div class="agent-composer-chip agent-composer-acceptance home-composer-chip" data-acceptance-mode="normal">
+                  <svg class="agent-composer-chip-icon agent-acceptance-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <rect x="4" y="10.5" width="16" height="10.5" rx="2.2" />
+                    <path d="M7.5 10.5V7.5a4.5 4.5 0 0 1 9 0V10.5" />
+                  </svg>
+                  <svg class="agent-composer-chip-icon agent-acceptance-icon-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M20 12c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 19.5 4 17 4 12V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+                    <path d="m9 12 2 2 4-4" />
+                  </svg>
+                  <select id="homeAcceptanceModeSelect" aria-label="选择 Agent 执行模式" data-mirrors="agentAcceptanceModeSelect">
+                    <option value="normal">默认权限</option>
+                    <option value="auto_accept">自动审查</option>
+                  </select>
+                  <svg class="agent-composer-chip-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+                <div class="agent-composer-chip agent-composer-model home-composer-chip">
+                  <svg class="agent-composer-chip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <rect x="6" y="6" width="12" height="12" rx="1.6" />
+                    <rect x="9.25" y="9.25" width="5.5" height="5.5" rx="0.6" />
+                    <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" />
+                  </svg>
+                  <select id="homeModelSelect" aria-label="选择大模型" data-mirrors="agentModelSelect"></select>
+                  <svg class="agent-composer-chip-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+                <div class="agent-composer-chip agent-composer-effort home-composer-chip">
+                  <svg class="agent-composer-chip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M9 18h6" />
+                    <path d="M10 21h4" />
+                    <path d="M5 9a7 7 0 0 1 14 0c0 2-1 4-2.5 5.2-.9.7-1.4 1.6-1.5 2.3h-7c-.1-.7-.6-1.6-1.5-2.3C6 13 5 11 5 9z" />
+                  </svg>
+                  <select id="homeEffortSelect" aria-label="推理强度" data-mirrors="agentEffortSelect">
+                    <option value="low">低</option>
+                    <option value="medium">中</option>
+                    <option value="high" selected>高</option>
+                  </select>
+                  <svg class="agent-composer-chip-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+                <button id="homeComposerSend" class="home-composer-send" type="submit" aria-label="发送" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M12 19V5M6 11l6-6 6 6" />
+                  </svg>
+                </button>
+              </div>
+            </form>
+            <section id="homeContinue" class="home-continue" aria-label="接着做" hidden>
+              <h3 class="home-section-title">接着做</h3>
+              <div id="homeContinueList" class="home-continue-list"></div>
+            </section>
+            <h3 class="home-section-title">从常用工作开始</h3>
             <div id="welcomeTaskCards" class="welcome-task-cards" aria-label="选择任务类型">
               <button
                 id="welcomeDataJoinCard"
@@ -1443,16 +1584,24 @@
                 <span>规则构造、策略回测、收益测算和阈值权衡</span>
               </button>
             </div>
+            <section id="homeDraft" class="home-draft" aria-label="新建任务" aria-live="polite" hidden></section>
           </div>
         </section>
         <div class="workspace-body">
           <section id="resultWorkspace" class="result-workspace" aria-label="验证输出">
             <header class="workspace-head">
               <div class="task-hero is-collapsed" id="taskHero">
+                <!-- 2026-10-19 (mockup parity): the header is a row of floating
+                     glass capsules — title and status, model chips, then the
+                     view controls — and the conversation scrolls underneath. -->
                 <div class="task-hero-top">
-                  <h2 id="currentTaskTitle" class="task-hero-name">验证任务</h2>
-                  <div class="task-hero-top-right">
-                    <span id="actionStatus" class="task-pill" role="status" aria-live="polite"></span>
+                  <div class="task-hero-title">
+                    <span id="currentTaskGlyph" class="task-hero-glyph" aria-hidden="true"></span>
+                    <h2 id="currentTaskTitle" class="task-hero-name">验证任务</h2>
+                    <span class="task-hero-state">
+                      <span id="taskStatusFace" class="agent-face" data-face="idle" data-size="sm" aria-hidden="true" hidden></span>
+                      <span id="actionStatus" class="task-pill" role="status" aria-live="polite"></span>
+                    </span>
                     <button
                       type="button"
                       id="taskHeroToggle"
@@ -1467,14 +1616,69 @@
                       </svg>
                     </button>
                   </div>
+                  <div
+                    id="validationBatchSwitcher"
+                    class="task-hero-batch-switcher hidden"
+                    hidden
+                    aria-hidden="true"
+                    aria-label="切换验证模型"
+                  ></div>
+                  <div class="task-hero-top-right">
+                    <div id="threadFilter" class="task-thread-filter" role="radiogroup" aria-label="对话筛选" hidden>
+                      <button type="button" role="radio" data-thread-filter="all" aria-checked="true">全部</button>
+                      <button type="button" role="radio" data-thread-filter="results" aria-checked="false">只看结果</button>
+                    </div>
+                    <button
+                      type="button"
+                      id="progressRailExpand"
+                      class="task-toolbar-button task-plan-capsule"
+                      aria-controls="progressRail"
+                      aria-expanded="true"
+                      title="展开计划"
+                      hidden
+                    >
+                      <svg class="task-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <path d="M9 6h11M9 12h11M9 18h11" />
+                        <path d="M4 6h.01M4 12h.01M4 18h.01" />
+                      </svg>
+                      <span id="progressRailExpandLabel">计划</span>
+                    </button>
+                    <button
+                      type="button"
+                      id="taskInspectorToggle"
+                      class="task-toolbar-button"
+                      aria-controls="taskInspector"
+                      aria-expanded="false"
+                      aria-label="检查器"
+                      title="检查器"
+                      hidden
+                    >
+                      <svg class="task-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+                        <path d="M14.5 4.5v15" />
+                      </svg>
+                      <span>检查器</span>
+                      <span id="taskInspectorCount" class="task-toolbar-count" hidden></span>
+                    </button>
+                    <button
+                      type="button"
+                      id="taskArtifactsToggle"
+                      class="task-toolbar-button"
+                      aria-controls="taskArtifacts"
+                      aria-expanded="false"
+                      aria-label="查看产物"
+                      title="查看产物"
+                      hidden
+                    >
+                      <svg class="task-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+                        <path d="M14 3v6h6M8 13h8M8 17h5" />
+                      </svg>
+                      <span>产物</span>
+                      <span id="taskArtifactsCount" class="task-toolbar-count" hidden></span>
+                    </button>
+                  </div>
                 </div>
-                <div
-                  id="validationBatchSwitcher"
-                  class="task-hero-batch-switcher hidden"
-                  hidden
-                  aria-hidden="true"
-                  aria-label="切换验证模型"
-                ></div>
                 <div class="task-hero-details" id="taskHeroDetails" aria-hidden="true" inert>
                   <div class="task-hero-details-inner">
                     <p
@@ -1491,11 +1695,104 @@
                 </div>
               </div>
             </header>
-            <nav id="validationWorkspaceNav" class="validation-workspace-nav" aria-label="当前模型工作视图" hidden>
-              <button type="button" class="button compact" data-validation-view="conversation" aria-pressed="true">对话</button>
-              <button type="button" class="button compact" data-validation-view="evidence" aria-pressed="false">证据</button>
-              <button type="button" class="button compact" data-validation-view="report" aria-pressed="false">报告</button>
-            </nav>
+            <div id="taskArtifacts" class="task-inspector task-artifacts ui-glass" role="dialog" aria-label="产物" hidden>
+              <header class="task-inspector-head"><b>产物</b></header>
+              <div id="taskArtifactsBody" class="task-artifacts-body"></div>
+            </div>
+            <div id="taskInspector" class="task-inspector ui-glass" role="dialog" aria-label="检查器" hidden>
+              <header class="task-inspector-head">
+                <b>检查器</b>
+                <small>这项任务的治理与扩展项</small>
+              </header>
+              <div id="taskInspectorBody" class="task-inspector-body">
+                <section
+                  id="dataWorkspacePanel"
+                  data-inspector-item
+                  class="data-workspace-panel"
+                  aria-label="数据工作区"
+                  hidden
+                >
+                  <header class="data-workspace-head">
+                    <div class="data-workspace-identity">
+                      <span>数据工作区</span>
+                      <strong id="dataWorkspaceDataset">尚未绑定数据集</strong>
+                      <small id="dataWorkspaceDatasetHash">无内容指纹</small>
+                    </div>
+                    <div class="data-workspace-head-actions">
+                      <span id="dataWorkspaceRevision" class="data-workspace-revision">R–</span>
+                      <span id="dataWorkspaceState" class="data-workspace-state data-workspace-state-clean">已同步</span>
+                      <button
+                        id="dataWorkspaceRefreshButton"
+                        class="button compact secondary data-workspace-refresh"
+                        type="button"
+                        aria-label="刷新数据工作区"
+                        title="刷新数据工作区"
+                      >刷新</button>
+                    </div>
+                  </header>
+                  <div class="data-workspace-editor">
+                    <label class="data-workspace-target">
+                      <span>目标字段</span>
+                      <select id="dataWorkspaceTarget" aria-label="目标字段">
+                        <option value="">未设置目标字段</option>
+                      </select>
+                    </label>
+                    <section class="data-workspace-semantics" aria-label="字段语义">
+                      <header>
+                        <div>
+                          <strong>字段角色与业务名称</strong>
+                          <small>角色和目标字段由平台按同一语义契约保存。</small>
+                        </div>
+                        <span id="dataWorkspaceFieldCount">0 个字段 · 0 个已标注</span>
+                      </header>
+                      <div class="data-workspace-field-head" aria-hidden="true">
+                        <span>字段</span><span>角色</span><span>业务名称</span>
+                      </div>
+                      <div id="dataWorkspaceFields" class="data-workspace-fields">
+                        <p class="data-workspace-empty">绑定数据集后显示字段语义。</p>
+                      </div>
+                    </section>
+                  </div>
+                  <div id="sqlImportPanel" class="data-workspace-controls"></div>
+                  <footer class="data-workspace-footer">
+                    <p id="dataWorkspaceStatus" class="data-workspace-status" role="status" aria-live="polite">
+                      上传或由 Agent 绑定数据集后，可在这里维护字段语义。
+                    </p>
+                    <div class="data-workspace-actions">
+                      <button id="dataWorkspaceDiscardButton" class="button compact secondary" type="button" disabled>丢弃</button>
+                      <button id="dataWorkspaceSaveButton" class="button compact primary" type="button" disabled>保存</button>
+                    </div>
+                  </footer>
+                </section>
+                <section id="businessAcceptancePanel" data-inspector-item class="business-acceptance-panel" aria-label="业务验收" aria-live="polite" hidden></section>
+                <section id="blindOotPanel" data-inspector-item class="blind-oot-panel production-workspace" aria-label="盲 OOT" aria-live="polite" hidden></section>
+                <section id="historicalReplayPanel" data-inspector-item class="historical-replay-panel" aria-label="历史决策回放" hidden></section>
+                <section id="riskContextPanel" data-inspector-item class="historical-replay-panel" aria-label="外部数据与事件特征" hidden></section>
+                <section id="institutionAdapterPanel" data-inspector-item class="historical-replay-panel" aria-label="机构服务接入" hidden></section>
+                <section id="operationsExtensionsPanel" data-inspector-item class="historical-replay-panel" aria-label="周期运营与决策反馈" hidden></section>
+                <section id="collectionWorkspacePanel" data-inspector-item class="collection-workspace" aria-label="催收参考工作台" hidden></section>
+                <section id="dataHistoryMappingPanel" data-inspector-item class="historical-replay-panel" aria-label="历史材料映射" hidden></section>
+                <details id="modelMonitoringPanel" data-inspector-item class="model-monitoring-panel" hidden>
+                  <summary>模型监控 <span>用本期数据检查已选模型的变化</span></summary>
+                  <form id="modelMonitoringForm" novalidate>
+                    <div class="model-monitoring-tools">
+                      <label>上传本期数据<input id="modelMonitoringFile" type="file" accept=".csv,.parquet,.xlsx,.xls" /></label>
+                      <button id="modelMonitoringRefresh" class="button compact secondary" type="button">刷新选项</button>
+                    </div>
+                    <div class="model-monitoring-fields">
+                      <label>已选模型<select id="modelMonitoringModel" aria-label="监控模型"></select></label>
+                      <label>本期数据<select id="modelMonitoringDataset" aria-label="监控数据"></select></label>
+                      <label>可选标签<select id="modelMonitoringTarget" aria-label="监控标签"></select></label>
+                    </div>
+                    <p id="modelMonitoringLimits" class="model-monitoring-limits">缺少标签时仅检查漂移；标签成熟度未知，默认技术阈值不代表业务验收目标。</p>
+                    <small>选中的本期数据将设为当前数据集。生成计划不会执行评分；请在对话中审阅并确认计划。</small>
+                    <footer><p id="modelMonitoringStatus" class="model-monitoring-status" role="status" aria-live="polite"></p><button id="modelMonitoringSubmit" class="button compact primary" type="submit">生成监控计划</button></footer>
+                  </form>
+                </details>
+              </div>
+            </div>
+            <!-- D8/D13 (batch 6a): no 对话/证据/报告 tabs; the report draft is a card
+                 that app.js slots under its message and opens as a layer. -->
             <section id="reportDraftWorkspace" class="report-draft-workspace" aria-label="当前模型报告" hidden></section>
             <div id="resultScrollContent" class="result-scroll-content" aria-label="验证结果明细">
               <section
@@ -1510,88 +1807,6 @@
                 aria-label="批次模型验证字段合同"
                 aria-live="polite"
               ></section>
-              <section id="businessAcceptancePanel" class="business-acceptance-panel" aria-label="业务验收" aria-live="polite" hidden></section>
-              <section id="blindOotPanel" class="blind-oot-panel production-workspace" aria-label="盲 OOT" aria-live="polite" hidden></section>
-              <section id="historicalReplayPanel" class="historical-replay-panel" aria-label="历史决策回放" hidden></section>
-              <section id="riskContextPanel" class="historical-replay-panel" aria-label="外部数据与事件特征" hidden></section>
-              <section id="institutionAdapterPanel" class="historical-replay-panel" aria-label="机构服务接入" hidden></section>
-              <section id="operationsExtensionsPanel" class="historical-replay-panel" aria-label="周期运营与决策反馈" hidden></section>
-              <section id="collectionWorkspacePanel" class="collection-workspace" aria-label="催收参考工作台" hidden></section>
-              <section
-                id="dataWorkspacePanel"
-                class="data-workspace-panel"
-                aria-label="数据工作区"
-                hidden
-              >
-                <header class="data-workspace-head">
-                  <div class="data-workspace-identity">
-                    <span>数据工作区</span>
-                    <strong id="dataWorkspaceDataset">尚未绑定数据集</strong>
-                    <small id="dataWorkspaceDatasetHash">无内容指纹</small>
-                  </div>
-                  <div class="data-workspace-head-actions">
-                    <span id="dataWorkspaceRevision" class="data-workspace-revision">R–</span>
-                    <span id="dataWorkspaceState" class="data-workspace-state data-workspace-state-clean">已同步</span>
-                    <button
-                      id="dataWorkspaceRefreshButton"
-                      class="button compact secondary data-workspace-refresh"
-                      type="button"
-                      aria-label="刷新数据工作区"
-                      title="刷新数据工作区"
-                    >刷新</button>
-                  </div>
-                </header>
-                <div class="data-workspace-editor">
-                  <label class="data-workspace-target">
-                    <span>目标字段</span>
-                    <select id="dataWorkspaceTarget" aria-label="目标字段">
-                      <option value="">未设置目标字段</option>
-                    </select>
-                  </label>
-                  <section class="data-workspace-semantics" aria-label="字段语义">
-                    <header>
-                      <div>
-                        <strong>字段角色与业务名称</strong>
-                        <small>角色和目标字段由平台按同一语义契约保存。</small>
-                      </div>
-                      <span id="dataWorkspaceFieldCount">0 个字段 · 0 个已标注</span>
-                    </header>
-                    <div class="data-workspace-field-head" aria-hidden="true">
-                      <span>字段</span><span>角色</span><span>业务名称</span>
-                    </div>
-                    <div id="dataWorkspaceFields" class="data-workspace-fields">
-                      <p class="data-workspace-empty">绑定数据集后显示字段语义。</p>
-                    </div>
-                  </section>
-                </div>
-                <div id="sqlImportPanel" class="data-workspace-controls"></div>
-                <footer class="data-workspace-footer">
-                  <p id="dataWorkspaceStatus" class="data-workspace-status" role="status" aria-live="polite">
-                    上传或由 Agent 绑定数据集后，可在这里维护字段语义。
-                  </p>
-                  <div class="data-workspace-actions">
-                    <button id="dataWorkspaceDiscardButton" class="button compact secondary" type="button" disabled>丢弃</button>
-                    <button id="dataWorkspaceSaveButton" class="button compact primary" type="button" disabled>保存</button>
-                  </div>
-                </footer>
-              </section>
-              <details id="modelMonitoringPanel" class="model-monitoring-panel" hidden>
-                <summary>模型监控 <span>用本期数据检查已选模型的变化</span></summary>
-                <form id="modelMonitoringForm" novalidate>
-                  <div class="model-monitoring-tools">
-                    <label>上传本期数据<input id="modelMonitoringFile" type="file" accept=".csv,.parquet,.xlsx,.xls" /></label>
-                    <button id="modelMonitoringRefresh" class="button compact secondary" type="button">刷新选项</button>
-                  </div>
-                  <div class="model-monitoring-fields">
-                    <label>已选模型<select id="modelMonitoringModel" aria-label="监控模型"></select></label>
-                    <label>本期数据<select id="modelMonitoringDataset" aria-label="监控数据"></select></label>
-                    <label>可选标签<select id="modelMonitoringTarget" aria-label="监控标签"></select></label>
-                  </div>
-                  <p id="modelMonitoringLimits" class="model-monitoring-limits">缺少标签时仅检查漂移；标签成熟度未知，默认技术阈值不代表业务验收目标。</p>
-                  <small>选中的本期数据将设为当前数据集。生成计划不会执行评分；请在对话中审阅并确认计划。</small>
-                  <footer><p id="modelMonitoringStatus" class="model-monitoring-status" role="status" aria-live="polite"></p><button id="modelMonitoringSubmit" class="button compact primary" type="submit">生成监控计划</button></footer>
-                </form>
-              </details>
               <section
                 id="labelingSetupPanel"
                 class="labeling-setup-panel"
@@ -1600,10 +1815,10 @@
               >
                 <header class="labeling-setup-head">
                   <div>
-                    <span>标签构造口径</span>
-                    <strong>把数据切点、表现窗与坏样本定义固定为可审计合同</strong>
+                    <span>构造标签（可选）</span>
+                    <strong>需要从还款表现生成坏样本标签时，在这里固定截止日、表现期和定坏规则</strong>
                   </div>
-                  <span class="labeling-setup-badge">人工确认</span>
+                  <button id="labelingSetupToggle" class="button compact secondary" type="button" aria-expanded="false" aria-controls="labelingSetupForm">填写口径</button>
                 </header>
                 <form id="labelingSetupForm" class="labeling-setup-form" novalidate>
                   <p class="labeling-setup-guidance">
@@ -1669,19 +1884,19 @@
                     平台会校验字段是否真实存在；不会用笔数代替余额，也不会猜测损失态、LGD 或预测期限。
                   </p>
                   <div class="portfolio-setup-grid">
-                    <label><span>贷款 ID 列</span><input id="portfolioIdCol" autocomplete="off" placeholder="loan_id" required /></label>
-                    <label><span>快照月列</span><input id="portfolioSnapshotCol" autocomplete="off" placeholder="snapshot_month" required /></label>
-                    <label><span>逾期桶列</span><input id="portfolioBucketCol" autocomplete="off" placeholder="bucket" required /></label>
-                    <label><span>余额 / EAD 列</span><input id="portfolioBalanceCol" autocomplete="off" placeholder="balance" required /></label>
-                    <label><span>业务分群列</span><input id="portfolioSegmentCol" autocomplete="off" placeholder="segment" required /></label>
-                    <label><span>损失态</span><input id="portfolioLossState" autocomplete="off" placeholder="charged_off" required /></label>
+                    <label><span>贷款 ID 列</span><input id="portfolioIdCol" autocomplete="off" placeholder="例如 loan_id" required /></label>
+                    <label><span>快照月列</span><input id="portfolioSnapshotCol" autocomplete="off" placeholder="例如 snapshot_month" required /></label>
+                    <label><span>逾期桶列</span><input id="portfolioBucketCol" autocomplete="off" placeholder="例如 bucket" required /></label>
+                    <label><span>余额 / EAD 列</span><input id="portfolioBalanceCol" autocomplete="off" placeholder="例如 balance" required /></label>
+                    <label><span>业务分群列</span><input id="portfolioSegmentCol" autocomplete="off" placeholder="例如 segment" required /></label>
+                    <label><span>损失态</span><input id="portfolioLossState" autocomplete="off" placeholder="例如 charged_off" required /></label>
                     <label><span>LGD</span><input id="portfolioLgd" type="number" min="0" max="1" step="0.01" value="0.45" required /></label>
                     <label><span>预测期限（月）</span><input id="portfolioHorizonMonths" type="number" min="1" step="1" value="12" required /></label>
                   </div>
                   <details class="portfolio-trend-contract">
                     <summary>可选：模型分趋势分析</summary>
                     <div class="portfolio-setup-grid portfolio-setup-grid-optional">
-                      <label><span>分数列</span><input id="portfolioScoreCol" autocomplete="off" placeholder="score" /></label>
+                      <label><span>分数列</span><input id="portfolioScoreCol" autocomplete="off" placeholder="例如 score" /></label>
                       <label><span>实验 ID</span><input id="portfolioExperimentId" autocomplete="off" placeholder="experiment_id" /></label>
                     </div>
                     <small>两项必须同时填写；留空则使用不含模型趋势的组合分析流程。</small>
@@ -1732,19 +1947,35 @@
               >
                 <header class="candidate-lab-head">
                   <div>
-                    <h3>策略候选分析</h3>
-                    <p>从项目背景开始，按阶段查找操作。已有候选可直接查看证据、比较或加入策略池。</p>
+                    <h3>策略工作台</h3>
+                    <p>策略候选分析：从项目背景开始，按阶段查找操作。已有候选可直接查看证据、比较或加入策略池。</p>
                   </div>
-                  <button type="button" class="button compact secondary" data-candidate-lab-retry="1">
-                    刷新证据
-                  </button>
+                  <div class="candidate-lab-head-actions">
+                    <button type="button" class="button compact secondary" data-candidate-lab-retry="1">
+                      刷新证据
+                    </button>
+                    <button
+                      type="button"
+                      id="strategyCandidateLabToggle"
+                      class="button compact secondary candidate-lab-fold-toggle"
+                      data-candidate-lab-fold-toggle
+                      aria-expanded="false"
+                      aria-controls="strategyCandidateLabBody"
+                    >打开工作台</button>
+                  </div>
                 </header>
+                <!-- 2026-10-14 redesign (batch 4): collapsed, the workbench reads as
+                     this summary card so the conversation shows on the first screen. -->
+                <div id="strategyCandidateLabSummary" class="candidate-lab-summary" aria-live="off"></div>
                 <p
                   id="strategyCandidateLabStatus"
                   class="candidate-lab-status"
                   role="status"
                   aria-live="polite"
                 ></p>
+                <!-- The body (draft bar, preferences, launchers and results) keeps its
+                     original indentation inside this fold wrapper. -->
+                <div id="strategyCandidateLabBody" class="candidate-lab-body" hidden>
                 <div id="strategyWorkbenchState" class="candidate-lab-status" aria-live="polite"></div>
                 <form data-candidate-lab-form data-candidate-lab-workflow="strategy_workbench_preferences" class="candidate-lab-form-grid">
                   <label class="candidate-lab-field">字段显示
@@ -3570,12 +3801,14 @@
                     <div id="strategyAssetStabilityPanel" class="candidate-lab-launcher"></div>
                   </section>
                 </div>
+                </div><!-- /#strategyCandidateLabBody -->
               </section>
               <section id="agentConversationPanel" class="agent-conversation hidden" aria-label="Agent 对话" aria-hidden="true">
                 <div id="agentMessages" class="agent-messages"></div>
               </section>
             </div>
             <div id="agentComposer" class="agent-composer hidden" aria-hidden="true">
+              <div id="agentQuickReplies" class="agent-quick-replies" role="group" aria-label="快捷回复" hidden></div>
               <div class="agent-composer-bar">
                 <textarea id="agentComposerInput" rows="1" placeholder="输入执行步骤或问题"></textarea>
                 <div class="agent-composer-toolbar">
@@ -3682,11 +3915,28 @@
           <section id="progressRail" class="progress-rail step-rail" aria-label="验证步骤">
             <header class="step-rail-head">
               <h3>验证步骤</h3>
+              <div id="railSummary" class="rail-summary" hidden></div>
+              <button
+                type="button"
+                id="progressRailCollapse"
+                class="step-rail-collapse"
+                aria-controls="progressRail"
+                aria-expanded="true"
+                aria-label="收起步骤"
+                title="收起步骤"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path class="rail-fold-chevron" d="M7 14.5l5-5 5 5" />
+                </svg>
+              </button>
             </header>
             <nav id="workflowStepper" class="workflow-stepper" aria-label="验证流程"></nav>
           </section>
         </div>
       </main>
+      <!-- The pet companion floats freely over the whole app (welcome screen and
+           tasks) and can be dragged anywhere; it is not docked in the sidebar,
+           whose glass would trap a fixed element (2026-10-19, user feedback). -->
       <div
         id="petCompanion"
         class="pet-companion"

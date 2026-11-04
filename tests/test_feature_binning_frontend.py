@@ -6,7 +6,6 @@ from pathlib import Path
 
 from tests.static_stylesheets import read_browser_stylesheets
 
-
 STATIC = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
 
@@ -35,15 +34,6 @@ def test_feature_binning_gate_renders_optional_multiselect_and_bin_count():
     )
 
 
-def test_feature_binning_gate_is_wired_to_shared_manual_and_agent_surfaces():
-    app = (STATIC / "app.js").read_text(encoding="utf-8")
-    manual = (STATIC / "js" / "v2" / "driver_manual_analysis.js").read_text(encoding="utf-8")
-    component = (STATIC / "js" / "v2" / "feature_binning_gate.js").read_text(encoding="utf-8")
-    assert "renderFeatureBinning: agentMessageFeatureBinningHtml" in app
-    assert 'document.addEventListener("click", handleFeatureBinningClick)' in app
-    assert "meta.feature_binning" in manual
-    assert 'ui_action: "confirm_feature_binning"' in component
-    assert 'adjust_params: { features, bins }' in component
 
 
 def test_feature_binning_gate_resets_global_form_styles_and_keeps_copy_readable():

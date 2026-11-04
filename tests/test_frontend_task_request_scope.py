@@ -107,15 +107,16 @@ setSelectedTask({ id: "b" });
 pending[4].reject(new Error("old failure"));
 await staleFailure;
 assert.deepEqual(painted, ["new", "current-visit"]);
+// Batch 6a: loadReportFields records which model owns the metric sections.
+if ("LOADER" === "loadReportFields") assert.equal(taskSession.panels.metrics.sectionsOwnerId, "a");
 '''.replace("LOADER", loader), *IDENTITY, f"async function {loader}(")
 
 
 def test_model_projection_never_assigns_late_child_or_finishes_another_visit():
     run_node('''
 let projectedChildContentLoadVersion = 0;
-let suppressAgentAutoScrollTaskId = null;
-let activeValidationView = "metrics";
-const rememberValidationView = () => {};
+// Batch 6a: a model switch closes the report layer.
+const setReportDraftExpanded = () => {};
 const resetAgentTypingState = () => {};
 const beginTaskContentLoad = () => {};
 const finishTaskContentLoad = id => painted.push(id);
@@ -125,7 +126,6 @@ const loadAgentMessages = async () => {};
 const loadReportFields = async () => {};
 const renderAll = () => {};
 const nextAnimationFrame = async () => {};
-const selectValidationView = () => {};
 const $ = () => null;
 setSelectedTask({ id: "batch", task_type: "validation_batch" });
 const first = applyProjectedValidationChild("m1");
@@ -169,7 +169,6 @@ assert.equal(taskSession.taskId, "a");
 
 def test_contract_read_cannot_reopen_a_previous_model_visit():
     run_node('''
-let validationInputContractLoadVersion = 0;
 const usesPmmlScoringWorkflow = () => true;
 const renderValidationInputContract = value => painted.push(value.id);
 const selectedTaskIsValidationBatch = () => false;
@@ -185,6 +184,7 @@ const current = loadValidationInputContract("a");
 pending[1].resolve({ id: "current-contract" });
 await current;
 assert.deepEqual(painted, ["current-contract"]);
+assert.equal(taskSession.panels.contract.loadVersion, 2);
 ''', *IDENTITY, "async function loadValidationInputContract(")
 
 

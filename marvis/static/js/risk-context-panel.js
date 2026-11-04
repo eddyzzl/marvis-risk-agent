@@ -1,6 +1,7 @@
 import { api as defaultApi } from "./api.js";
 import { createContractForm } from "./contract-form.js";
 import { taskUsesPlanRail } from "./v2/plan_rail_controller.js";
+import { sourceText } from "./i18n.js";
 
 const id = encodeURIComponent;
 const stateLabel = (value) => ({ prepared: "已准备", running: "执行中", completed: "已完成", failed: "执行失败", unknown_effect: "待核对" }[value] || value);
@@ -32,7 +33,7 @@ export function createRiskContextPanel({ getElement, getTask, getPlan, captureVi
   async function request(owner, callback, awaitingGate = false) {
     if (!current(owner) || owner.pending || (isBusy() && !awaitingGate)) { message(owner, "当前操作尚未完成，请稍后再试。"); return; }
     owner.pending = true; message(owner, "正在读取原始状态…");
-    try { await callback(); if (current(owner) && owner.status.textContent === "正在读取原始状态…") message(owner, "状态已更新。"); }
+    try { await callback(); if (current(owner) && sourceText(owner.status) === "正在读取原始状态…") message(owner, "状态已更新。"); }
     catch (error) { message(owner, errorText(error)); }
     finally { owner.pending = false; }
   }

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
@@ -280,41 +281,48 @@ def advance_risk_analysis_setup(
     """
 
     previous = latest_risk_analysis_intake(conversation)
-    if previous is None:
-        return _ask_goal()
-
-    phase = str(previous.get("phase") or "")
     semantic_kind = (
         analysis_kind_override
         if analysis_kind_override in {VTG_TERMINAL, PROFITABILITY, STANDARD_VINTAGE}
         else None
     )
+    if previous is None:
+        # The home page sends the chosen analysis as the first message; an
+        # opening turn that already names one is an answer, not a new ask.
+        chosen = semantic_kind or parse_analysis_kind(user_text)
+        if chosen is None:
+            return _ask_goal()
+        previous = {"phase": "ask_goal"}
+
+    phase = str(previous.get("phase") or "")
     if phase == "ask_goal":
         analysis_kind = semantic_kind or parse_analysis_kind(user_text)
         if analysis_kind is None:
             return _ask_goal(clarify=True)
-        return _request_materials(
+        return _select_analysis(
+            registry,
+            backend,
+            task_id,
+            source_dir,
             analysis_kind,
-            analysis_scope=_bounded_scope(user_text),
-            label_semantics=(
-                _parse_label_semantics(user_text)
-                if analysis_kind == STANDARD_VINTAGE
-                else None
-            ),
+            user_text=user_text,
+            target_col=target_col,
+            time_col=time_col,
         )
 
     analysis_kind = str(previous.get("analysis_kind") or "")
     analysis_scope = _bounded_scope(previous.get("analysis_scope"))
     changed_kind = semantic_kind or _parse_explicit_analysis_switch(user_text)
     if changed_kind is not None and changed_kind != analysis_kind:
-        return _request_materials(
+        return _select_analysis(
+            registry,
+            backend,
+            task_id,
+            source_dir,
             changed_kind,
-            analysis_scope=_bounded_scope(user_text),
-            label_semantics=(
-                _parse_label_semantics(user_text)
-                if changed_kind == STANDARD_VINTAGE
-                else None
-            ),
+            user_text=user_text,
+            target_col=target_col,
+            time_col=time_col,
         )
     if analysis_kind not in {VTG_TERMINAL, PROFITABILITY, STANDARD_VINTAGE}:
         return _ask_goal(clarify=True)
@@ -350,6 +358,66 @@ def advance_risk_analysis_setup(
             label_semantics=label_semantics,
         )
 
+    contract = _CONTRACTS[analysis_kind]
+    match = _best_contract_match(registry, backend, datasets, contract)
+    if match["missing_columns"]:
+        return _await_missing_columns(
+            analysis_kind,
+            contract,
+            match,
+            analysis_scope=analysis_scope,
+        )
+    return _ready_report(
+        analysis_kind,
+        contract,
+        match,
+        analysis_scope=analysis_scope,
+    )
+
+
+def _select_analysis(
+    registry,
+    backend,
+    task_id: str,
+    source_dir,
+    analysis_kind: str,
+    *,
+    user_text: str | None,
+    target_col: str | None,
+    time_col: str | None,
+) -> RiskAnalysisSetupDecision:
+    """Record the chosen analysis and check materials the task already has.
+
+    Asking for an upload is only right when nothing is attached yet; tasks
+    created from the home page usually carry their table already.
+    """
+
+    analysis_scope = _bounded_scope(user_text)
+    label_semantics = (
+        _parse_label_semantics(user_text) if analysis_kind == STANDARD_VINTAGE else None
+    )
+    try:
+        datasets = _ensure_registered_datasets(registry, task_id, source_dir)
+    except Exception:  # noqa: BLE001 - the material turn reports ingest errors
+        datasets = []
+    if not datasets:
+        return _request_materials(
+            analysis_kind,
+            analysis_scope=analysis_scope,
+            label_semantics=label_semantics,
+        )
+    if analysis_kind == STANDARD_VINTAGE:
+        return _prepare_standard_vintage(
+            registry,
+            backend,
+            task_id,
+            source_dir,
+            target_col=target_col,
+            time_col=time_col,
+            analysis_scope=analysis_scope,
+            label_semantics=label_semantics,
+            ask_label_semantics=True,
+        )
     contract = _CONTRACTS[analysis_kind]
     match = _best_contract_match(registry, backend, datasets, contract)
     if match["missing_columns"]:
@@ -490,9 +558,17 @@ def _ask_goal(*, clarify: bool = False) -> RiskAnalysisSetupDecision:
         "1. **VTG终值与年化不良**：按产品/cohort 测算终值、周转与年化不良；\n"
         "2. **收益测算**：按产品和资产类型汇总收入、风险/资金/运营成本与收益；\n"
         "3. **标准 Vintage**：按 cohort × MOB 生成坏账曲线。\n"
-        "请直接回复其中一种，并补充分析范围或对比口径（如产品、观察期、基准版本）。"
+        "点一种开始，或直接说要哪一种，并补充分析范围或对比口径（如产品、观察期、基准版本）。"
     )
-    return _chat_decision(content, {"phase": "ask_goal"})
+    return _chat_decision(
+        content,
+        {"phase": "ask_goal"},
+        replies=(
+            quick_reply("VTG终值与年化不良"),
+            quick_reply("收益测算"),
+            quick_reply("标准 Vintage"),
+        ),
+    )
 
 
 def _request_materials(
@@ -531,7 +607,7 @@ def _request_materials(
             "由回收率推导的终值)。不同产品的终值方法可能不同，"
             "请用 terminal_method 说明，不会由系统猜测。"
             f"{scope_line}\n"
-            "上传后回复“材料已上传”，我会逐表检查列契约，缺列时会明确指出。"
+            "上传后点「材料已上传」，我会逐表检查列契约，缺列时会明确指出。"
         )
     elif analysis_kind == PROFITABILITY:
         content = (
@@ -566,7 +642,7 @@ def _request_materials(
             "没有发生且没有推导驱动项的成本必须显式填 0，"
             "系统不会把缺失成本静默当成 0。"
             f"{scope_line}\n"
-            "上传后回复“材料已上传”，我会逐表检查列契约，缺列时会明确指出。"
+            "上传后点「材料已上传」，我会逐表检查列契约，缺列时会明确指出。"
         )
     else:
         content = (
@@ -578,7 +654,7 @@ def _request_materials(
             "- 口径：请说明 bad 是 incremental（当期新增）还是 snapshot（截至当期状态），"
             "不能由系统猜测。\n"
             f"{scope_line}\n"
-            "上传后回复“材料已上传”，我会检查字段并生成标准 Vintage 计划。"
+            "上传后点「材料已上传」，我会检查字段并生成标准 Vintage 计划。"
         )
     state = {"phase": "request_materials", "analysis_kind": analysis_kind}
     if analysis_scope:
@@ -589,6 +665,7 @@ def _request_materials(
         content,
         state,
         contract=material_contract(analysis_kind),
+        replies=(quick_reply("材料已上传"),),
     )
 
 
@@ -605,9 +682,10 @@ def _await_no_data(
         state["label_semantics"] = label_semantics
     return _chat_decision(
         "还没有检测到已登记的数据表。请按上面的表/粒度/字段清单上传 CSV、XLSX 或 Parquet；"
-        "上传完成后回复“材料已上传”，我再做契约检查。",
+        "上传完成后点「材料已上传」，我再做契约检查。",
         state,
         contract=material_contract(analysis_kind),
+        replies=(quick_reply("材料已上传"),),
     )
 
 
@@ -703,6 +781,7 @@ def _prepare_standard_vintage(
     time_col: str | None,
     analysis_scope: str | None = None,
     label_semantics: str | None = None,
+    ask_label_semantics: bool = False,
 ) -> RiskAnalysisSetupDecision:
     try:
         proposal = build_vintage_proposal(
@@ -728,6 +807,29 @@ def _prepare_standard_vintage(
             state,
             contract=material_contract(STANDARD_VINTAGE),
         )
+    if ask_label_semantics and label_semantics is None:
+        # The table is already attached and passes the field check; the only
+        # open choice is how to read the bad column, which the platform must
+        # not guess (it decides whether the curve is accumulated).
+        state = {
+            "phase": "request_materials",
+            "analysis_kind": STANDARD_VINTAGE,
+            "awaiting": "label_semantics",
+        }
+        if analysis_scope:
+            state["analysis_scope"] = analysis_scope
+        return _chat_decision(
+            f"已找到你上传的 `{proposal.dataset_name}`，字段检查通过：cohort "
+            f"`{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。\n"
+            f"还差一个口径：`{proposal.bad_col}` 记的是每期新发生的坏（当期新增），"
+            "还是截至该期是否已坏（累计状态）？这决定曲线要不要逐期累加，平台不会猜。",
+            state,
+            contract=material_contract(STANDARD_VINTAGE),
+            replies=(
+                quick_reply("当期新增", "bad 是当期新增"),
+                quick_reply("截至当期的累计状态", "bad 是截至当期状态"),
+            ),
+        )
     state = {
         "phase": "ready",
         "analysis_kind": STANDARD_VINTAGE,
@@ -745,8 +847,11 @@ def _prepare_standard_vintage(
     slots = proposal.template_slots()
     if label_semantics is not None:
         slots["label_semantics"] = label_semantics
+    semantics_label = {"incremental": "当期新增", "snapshot": "截至当期状态"}.get(
+        str(label_semantics or ""), label_semantics
+    )
     semantics_confirmation = (
-        f"，标签语义 `{label_semantics}`" if label_semantics is not None else ""
+        f"，`{proposal.bad_col}` 按{semantics_label}计" if label_semantics is not None else ""
     )
     return RiskAnalysisSetupDecision(
         content=(
@@ -769,11 +874,12 @@ def _chat_decision(
     state: dict,
     *,
     contract: dict | None = None,
+    replies: tuple[dict[str, str], ...] = (),
 ) -> RiskAnalysisSetupDecision:
     metadata = {"intent": "vintage", RISK_ANALYSIS_INTAKE_META_KEY: dict(state)}
     if contract is not None:
         metadata["risk_analysis_contract"] = dict(contract)
-    return RiskAnalysisSetupDecision(content=content, metadata=metadata)
+    return RiskAnalysisSetupDecision(content=content, metadata=with_quick_replies(metadata, *replies))
 
 
 def _ensure_registered_datasets(registry, task_id: str, source_dir) -> list:

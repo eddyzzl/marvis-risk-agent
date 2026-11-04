@@ -28,6 +28,7 @@ from marvis.data.labels import require_labels_confirmed
 from marvis.data.workspace import (
     data_semantic_mapping_from_dict,
     data_semantic_mapping_hash,
+    data_semantic_mapping_to_dict,
 )
 from marvis.files import sha256_file
 from marvis.packs.strategy.errors import StrategyError
@@ -1002,13 +1003,9 @@ def _require_dataset_and_workspace_on_connection(
     try:
         raw_mapping = str(row["semantic_mapping_json"])
         mapping = data_semantic_mapping_from_dict(json.loads(raw_mapping))
-        canonical_mapping = _canonical_json(
-            {
-                "target_col": mapping.target_col,
-                "field_roles": dict(mapping.field_roles),
-                "business_names": dict(mapping.business_names),
-            }
-        )
+        # The repository's own canonical form, so confirmed field directions
+        # (V2.7) are part of the mapping instead of making it "non-canonical".
+        canonical_mapping = _canonical_json(data_semantic_mapping_to_dict(mapping))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise StrategyError("DataWorkspace semantic mapping is invalid") from exc
     if raw_mapping != canonical_mapping:

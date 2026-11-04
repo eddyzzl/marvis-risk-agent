@@ -664,8 +664,13 @@ def _batch_item_payload(
     task_repo: TaskRepository,
 ) -> dict:
     tasks_dir = request.app.state.settings.tasks_dir
+    child_messages = task_repo.list_agent_messages(item.child_task_id)
+    repair_records = batch_child_repair_records(child_messages)
     return {
         **asdict(item),
+        # B-line extension (2026-10-23 spec §5.4): each child's repair record.
+        "repair_records": repair_records[-5:],
+        "repair_count": len(repair_records),
         "input_contract_status": (
             contract.status
             if (contract := contract_repo.get(item.child_task_id)) is not None
@@ -698,11 +703,33 @@ def _batch_item_payload(
             else ""
         ),
         "pending_report_draft": bool(
-            latest_pending_agent_report_draft(
-                task_repo.list_agent_messages(item.child_task_id)
-            )
+            latest_pending_agent_report_draft(child_messages)
         ),
     }
+
+
+def batch_child_repair_records(messages: list[dict]) -> list[dict]:
+    """Every repair report in one child conversation, oldest first."""
+
+    undone = {
+        str((message.get("metadata") or {}).get("repair_undo", {}).get("repair_id") or "")
+        for message in messages
+        if isinstance((message.get("metadata") or {}).get("repair_undo"), dict)
+    }
+    records = []
+    for message in messages:
+        report = (message.get("metadata") or {}).get("repair_report")
+        if not isinstance(report, dict):
+            continue
+        records.append({
+            "repair_id": str(report.get("repair_id") or ""),
+            "finding": str(report.get("finding") or ""),
+            "action": str(report.get("action") or ""),
+            "verified": bool(report.get("verified")),
+            "undone": str(report.get("repair_id") or "") in undone,
+            "trigger": str(report.get("trigger") or ("auto" if report.get("tier") == "auto" else "user")),
+        })
+    return records
 
 
 def _batch_summary_path(request: Request, parent_task_id: str) -> Path:

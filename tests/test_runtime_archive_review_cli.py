@@ -33,6 +33,7 @@ def _invoke(archive, manifest_digest, binding_path, binding_digest, *extra):
     )
 
 
+@pytest.mark.pmml_runtime
 def test_real_cli_recomputes_retained_archive_without_claiming_final_runtime_or_acceptance(actual_archive, tmp_path):
     archive, manifest_digest, binding = actual_archive
     path, binding_digest = _binding_file(tmp_path, binding)
@@ -49,6 +50,7 @@ def test_real_cli_recomputes_retained_archive_without_claiming_final_runtime_or_
     assert payload["source_authentication"] == payload["acceptance_claim"] == "not_established"
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("wrong", ["manifest", "binding"])
 def test_wrong_external_digest_never_uses_archived_self_attestation(actual_archive, tmp_path, wrong):
     archive, manifest_digest, binding = actual_archive
@@ -63,6 +65,7 @@ def test_wrong_external_digest_never_uses_archived_self_attestation(actual_archi
         assert payload["checks"]["pmml_rescoring"]["status"] == "unverified"
 
 
+@pytest.mark.pmml_runtime
 def test_absent_confirmation_cannot_be_promoted_by_domain_recomputation(actual_archive, tmp_path):
     archive, manifest_digest, binding = actual_archive
     binding = binding.model_copy(update={"confirmed_draft_sha256": None, "report_revision": None,
@@ -75,6 +78,7 @@ def test_absent_confirmation_cannot_be_promoted_by_domain_recomputation(actual_a
     assert payload["checks"]["confirmation_record_binding"]["status"] == "unsupported"
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("target_kind", ["existing", "archive", "binding", "symlink"])
 def test_output_never_overwrites_or_mutates_input_evidence(actual_archive, tmp_path, target_kind):
     archive, manifest_digest, binding = actual_archive
@@ -113,6 +117,7 @@ def _run_records(archive, binding):
     return run_dir, digest((run_dir / "final-manifest.json").read_bytes())
 
 
+@pytest.mark.pmml_runtime
 def test_real_cli_binds_domain_review_to_original_final_run_records(actual_archive, tmp_path):
     archive, manifest_digest, binding = actual_archive
     path, binding_digest = _binding_file(tmp_path, binding)
@@ -128,6 +133,7 @@ def test_real_cli_binds_domain_review_to_original_final_run_records(actual_archi
     assert payload["acceptance_claim"] == "not_established"
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize("change", ["case", "source", "input_contract", "confirmation", "report", "custody"])
 def test_final_run_cannot_bind_to_another_external_case_or_domain_result(actual_archive, tmp_path, change):
     archive, manifest_digest, binding = actual_archive
@@ -147,6 +153,7 @@ def test_final_run_cannot_bind_to_another_external_case_or_domain_result(actual_
     assert json.loads(result.stdout)["acceptance_claim"] == "not_established"
 
 
+@pytest.mark.pmml_runtime
 def test_old_run_without_final_manifest_stays_explicitly_unavailable(actual_archive, tmp_path):
     archive, manifest_digest, binding = actual_archive
     path, binding_digest = _binding_file(tmp_path, binding)
@@ -164,6 +171,7 @@ def test_old_run_without_final_manifest_stays_explicitly_unavailable(actual_arch
     assert not (old / "final-manifest.json").exists()
 
 
+@pytest.mark.pmml_runtime
 def test_partial_final_run_arguments_cannot_silently_select_domain_only(actual_archive, tmp_path):
     archive, manifest_digest, binding = actual_archive
     path, binding_digest = _binding_file(tmp_path, binding)
@@ -172,6 +180,7 @@ def test_partial_final_run_arguments_cannot_silently_select_domain_only(actual_a
     assert "must be supplied together" in result.stderr
 
 
+@pytest.mark.pmml_runtime
 def test_valid_binding_extensions_are_not_echoed_on_a_normal_mismatch_result(actual_archive, tmp_path):
     archive, manifest_digest, binding = actual_archive
     source = {**binding.source, "api_key": "private-accidental-credential",
@@ -190,6 +199,7 @@ def test_valid_binding_extensions_are_not_echoed_on_a_normal_mismatch_result(act
     assert "commit" not in payload["original_source_binding"]
 
 
+@pytest.mark.pmml_runtime
 def test_completed_domain_cannot_promote_an_original_scoring_interrupt(tmp_path, monkeypatch):
     from marvis.orchestrator.eval import runtime_scoring
     from marvis.orchestrator.eval.runtime_archive_validation import FrozenValidationBinding

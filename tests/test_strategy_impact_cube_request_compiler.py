@@ -237,6 +237,38 @@ def test_impact_cube_rejects_ungrounded_controls(
     assert result.draft is None
     assert result.clarification_code == "strategy_impact_cube_controls_not_grounded"
     assert missing in result.clarification_fields
+    # The raw entry stays in fields; the prose never repeats control paths.
+    for internal in (
+        "strategy_type",
+        "month_col",
+        "partitions",
+        "economics_inputs",
+        "typed",
+        "ImpactCube",
+    ):
+        assert internal not in result.clarification
+
+
+def test_impact_cube_ungrounded_controls_are_named_in_business_terms() -> None:
+    result = _compile(
+        "测算定价策略池影响，月份列 apply_month，当前策略 strategy-real，lgd=0.5",
+        {
+            "strategy_type": "pricing",
+            "month_col": "other_month",
+            "current_strategy_id": "strategy-invented",
+            "economics_inputs": {"lgd": {"kind": "scalar", "value": 0.4}},
+        },
+    )
+
+    assert result.clarification_fields == (
+        "month_col other_month",
+        "strategy-invented",
+        "economics_inputs.lgd",
+    )
+    assert (
+        "当前无法核对：月份列「other_month」、当前策略 ID「strategy-invented」、"
+        "经济参数 LGD。"
+    ) in result.clarification
 
 
 def test_impact_cube_distinguishes_pd_dimension_from_economics_control() -> None:

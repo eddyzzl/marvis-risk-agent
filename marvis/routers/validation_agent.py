@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -16,6 +17,7 @@ from marvis.agent.service import (
     summarize_stage,
 )
 from marvis.agent.plan_message_composer import PlanMessageComposer
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
 from marvis.agent.plan_driver import confirmation_is_explicitly_withheld, is_confirm
 from marvis.agent.workflow_error_diagnostics import (
     enrich_workflow_error_diagnostic,
@@ -53,6 +55,18 @@ from marvis.agent.validation_app_service import (
     review_validation_semantic_authorization,
 )
 from marvis.agent.validation_messages import format_conclusion_values
+from marvis.repositories.validation_contracts import ValidationContractRevisionConflict
+from marvis.agent.validation_repair import (
+    STALE_COMMAND_REPLY,
+    UNDO_UNAVAILABLE_REPLY,
+    RepairStale,
+    apply_repair_option,
+    enrich_repair_reports,
+    match_repair_command,
+    repair_report_content,
+    repair_undo_content,
+    undo_repair,
+)
 from marvis.agent.validation_service import (
     require_agent_rerun_stage_reached,
     reset_agent_task_for_rerun,
@@ -90,9 +104,12 @@ from marvis.validation_report_copy import (
 )
 
 
+logger = logging.getLogger(__name__)
+_UNTRUSTED_DOWNLOAD_PLANS_LOGGED: set[str] = set()
+
 router = APIRouter(prefix="/api", tags=["validation-agent"])
-REPORT_DIRECTIVE_LIMIT = 6
-REPORT_DIRECTIVE_CHARS = 1_600
+# A generic "rewrite the report" turn maps to this exact parsed operation.
+REGENERATE_REPORT_INSTRUCTION = "重新生成报告"
 
 
 def _plan_message_composer(request: Request) -> PlanMessageComposer:
@@ -342,40 +359,21 @@ def _validate_ui_action_contract(payload: AgentMessageRequest) -> None:
             raise unprocessable("refit_on_train_plus_test 必须是布尔值 true 或 false。")
 
 
-def _report_revision_instruction_context(
-    conversation: list[dict],
-    current_instruction: str,
-) -> tuple[str, int]:
-    prior: list[str] = []
-    for message in conversation:
-        if message.get("role") != "user":
-            continue
-        content = str(message.get("content") or "").strip()
-        metadata = message.get("metadata") or {}
-        is_word_rerun = metadata.get(
-            "target_stage"
-        ) == "word_conclusion_draft" and metadata.get("intent") in {
-            "rerun_stage",
-            "regenerate_report_draft",
-        }
-        if not content or not (
-            is_word_rerun or is_agent_report_revision_intent(content)
-        ):
-            continue
-        prior.append(content[:REPORT_DIRECTIVE_CHARS])
-    prior = prior[-(REPORT_DIRECTIVE_LIMIT - 1) :]
-    if not prior:
-        return current_instruction, 1
-    directives = [*prior, current_instruction[:REPORT_DIRECTIVE_CHARS]]
-    lines = "\n".join(
-        f"{index}. {directive}" for index, directive in enumerate(directives, 1)
-    )
-    return (
-        "以下是本任务按时间顺序记录的报告修改指令；后出现的指令覆盖与其冲突的旧指令，"
-        "其余要求继续有效：\n"
-        f"{lines}",
-        len(directives),
-    )
+def _report_revision_clarification(content: str) -> tuple[str, str] | None:
+    """Reject an unparseable revision before any reset, job or new draft card.
+
+    The background stage parses the same approved instruction; refusing here
+    keeps the current draft and report fields untouched.
+    """
+    from marvis.llm_outbound import OutboundContextError
+    from marvis.llm_outbound_instructions import user_instruction
+    from marvis.llm_outbound_revision import report_revision_request
+
+    try:
+        report_revision_request(user_instruction(content))
+    except OutboundContextError as exc:
+        return str(exc), str(getattr(exc, "code", "") or "unapproved_instruction")
+    return None
 
 
 @router.get("/tasks/{task_id}/agent/messages")
@@ -394,6 +392,16 @@ def get_agent_messages(
     messages = repo.list_agent_messages(task_id, after_id=after_id, limit=query_limit)
     _enrich_historical_result_download(request, task_id, messages)
     _enrich_historical_workflow_errors(messages)
+    # Incremental pages cannot see an earlier report; the client derives the
+    # undone state from its full timeline as well.
+    enrich_repair_reports(messages)
+    # V2 workflow repair reports: whether the newest one can still be undone
+    # (marvis/agent/workflow_repair.py; computed on read, never persisted).
+    from marvis.agent.workflow_repair import annotate_workflow_repair_reports
+
+    annotate_workflow_repair_reports(
+        request.app.state.settings, request.app.state.plan_repo, task_id, messages
+    )
     _enrich_current_plan_gate(request, task_id, messages)
     has_more = False
     if bounded_limit is not None and len(messages) > bounded_limit:
@@ -558,7 +566,21 @@ def _enrich_historical_result_download(
             continue
         if composer is None:
             composer = _plan_message_composer(request)
-        recovered = composer.latest_result_dataset_metadata(plan)
+        try:
+            recovered = composer.latest_result_dataset_metadata(plan)
+        except ConflictError:
+            # An untrusted result binding means no download is offered for
+            # that plan; it must not take the whole conversation down (500).
+            # The client polls this list, so the warning is logged once per plan.
+            if plan_id not in _UNTRUSTED_DOWNLOAD_PLANS_LOGGED:
+                _UNTRUSTED_DOWNLOAD_PLANS_LOGGED.add(plan_id)
+                logger.warning(
+                    "historical result download skipped: untrusted binding task_id=%s plan_id=%s",
+                    task_id,
+                    plan_id,
+                    exc_info=True,
+                )
+            continue
         if recovered is None:
             continue
         completion["metadata"] = {
@@ -620,6 +642,120 @@ def start_agent_task(
         acceptance_mode=payload.acceptance_mode,
         background_tasks=background_tasks,
     )
+
+
+def _handle_validation_repair_command(
+    request: Request,
+    repo,
+    task,
+    *,
+    content: str,
+    payload: AgentMessageRequest,
+    background_tasks: BackgroundTasks,
+) -> dict | None:
+    """Run a repair the latest failure card offered, or undo the last one.
+
+    Only the exact offered command counts (``match_repair_command``); free
+    text never triggers a repair. B-line spec 2026-10-16 §5.5.
+    """
+
+    matched = match_repair_command(repo.list_agent_messages(task.id), content)
+    if matched is None:
+        return None
+    if matched[0] != "stale":
+        reject_if_task_has_active_job(repo, task.id)
+    settings = request.app.state.settings
+    model_profile = resolve_agent_model(request, payload.model_id, payload.effort)
+    kind = matched[0]
+    user_message = repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=content,
+        metadata={
+            **model_metadata(model_profile),
+            "intent": "validation_repair_undo" if kind == "undo" else "validation_repair",
+        },
+    )
+    capture_user_preference_memory(request, task.id, user_message)
+
+    def reply(content: str) -> dict:
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=content,
+            metadata={**model_metadata(model_profile), "intent": "validation_repair"},
+        )
+        return {
+            "task_id": task.id,
+            "status": "message_saved",
+            "messages": repo.list_agent_messages(task.id),
+        }
+
+    if kind == "stale":
+        # Never fall through: the words name a repair nothing will execute.
+        return reply(UNDO_UNAVAILABLE_REPLY if matched[1] == "undo" else STALE_COMMAND_REPLY)
+
+    def rerun(stage: str | None) -> dict:
+        latest = repo.get_task(task.id)
+        if stage is not None:
+            latest = reset_agent_task_for_rerun(repo, task.id, stage)
+        return dispatch_agent_validation_job(
+            repo_=repo,
+            task=latest,
+            settings=settings,
+            model_profile=model_profile,
+            acceptance_mode=payload.acceptance_mode,
+            background_tasks=background_tasks,
+            forced_stage=stage,
+        )
+
+    if kind == "undo":
+        undo = undo_repair(settings, task, matched[1])
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="scan",
+            content=repair_undo_content(undo),
+            metadata={**model_metadata(model_profile), "repair_undo": undo},
+        )
+        return rerun("scan")
+
+    option, source = matched[1], matched[2]
+    if option.get("id") == "rerun_pmml_scoring":
+        return rerun("reproducibility")
+    diagnostic = (source.get("metadata") or {}).get("error_diagnostic") or {}
+    try:
+        report = apply_repair_option(
+            settings,
+            task,
+            option,
+            finding=str(diagnostic.get("summary") or ""),
+            source_message_id=str(source.get("id") or "") or None,
+        )
+    except (RepairStale, ValidationContractRevisionConflict):
+        return reply(
+            "字段确认已经变了，这个办法不再适用，平台没有做任何改动；请按最新的字段确认卡操作。"
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return reply(f"这个办法没能执行，平台没有做任何改动：{str(exc)[:300]}")
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage=str(diagnostic.get("stage") or "scan"),
+        content=repair_report_content(report),
+        metadata={**model_metadata(model_profile), "repair_report": report},
+    )
+    if not report["verified"]:
+        return {
+            "task_id": task.id,
+            "status": "message_saved",
+            "messages": repo.list_agent_messages(task.id),
+        }
+    # A field alias changes the scanned contract; a time-column switch
+    # already confirmed it, so the next stage (PMML scoring) follows.
+    return rerun("scan" if option.get("id") == "map_fields" else None)
 
 
 @router.post("/tasks/{task_id}/agent/messages", status_code=202)
@@ -710,18 +846,22 @@ def post_agent_message(
         elif outcome["skipped"] or outcome["failed"]:
             parts.append("无冲突的模型不必再逐项点选；表单仍可展开核对。")
         else:
-            parts.append("无冲突合同已确认。回复「继续」即可启动批次。")
+            parts.append("无冲突合同已确认。点「继续」启动批次。")
+        all_confirmed = bool(outcome["confirmed"]) and not (outcome["skipped"] or outcome["failed"])
         repo.add_agent_message(
             task_id,
             role="assistant",
             stage="input_confirmation",
             content="\n".join(parts),
-            metadata={
-                "intent": "accept_suggested_contracts",
-                "confirmed": outcome["confirmed"],
-                "skipped": outcome["skipped"],
-                "failed": outcome["failed"],
-            },
+            metadata=with_quick_replies(
+                {
+                    "intent": "accept_suggested_contracts",
+                    "confirmed": outcome["confirmed"],
+                    "skipped": outcome["skipped"],
+                    "failed": outcome["failed"],
+                },
+                *([quick_reply("继续")] if all_confirmed else []),
+            ),
         )
         return {
             "task_id": task_id,
@@ -966,6 +1106,17 @@ def post_agent_message(
             recovery_model_id=payload.model_id,
             recovery_effort=payload.effort,
         )
+    if task.task_type == TASK_TYPE_VALIDATION:
+        repaired = _handle_validation_repair_command(
+            request,
+            repo,
+            task,
+            content=content,
+            payload=payload,
+            background_tasks=background_tasks,
+        )
+        if repaired is not None:
+            return repaired
     if is_agent_material_reselection_intent(content):
         reject_if_task_has_active_job(repo, task_id)
         ui_action = {"type": "select_validation_materials"}
@@ -983,7 +1134,8 @@ def post_agent_message(
             stage="chat",
             content=(
                 "请在随后弹出的“重新选择验证材料”窗口中重新绑定 Notebook、样本数据、"
-                "PMML 和数据字典；保存后再重新扫描材料。"
+                "PMML 和数据字典；补好的文件可以在窗口里用「上传补充文件」传入。"
+                "保存后我会重新扫描材料。"
             ),
             metadata={"intent": "select_materials", "ui_action": ui_action},
         )
@@ -1026,6 +1178,10 @@ def post_agent_message(
             "reproducibility",
             "metrics",
         } and is_continue_validation_intent(content)
+        regenerate_report = rerun_stage == "word_conclusion_draft" and (
+            is_agent_report_regenerate_intent(content)
+            or not is_agent_report_revision_intent(content)
+        )
         rerun_intent = (
             "regenerate_report_draft"
             if rerun_stage == "word_conclusion_draft"
@@ -1033,12 +1189,48 @@ def post_agent_message(
             else "rerun_stage"
         )
         stage_instruction = content
-        directive_count = 0
-        if rerun_stage == "word_conclusion_draft":
-            stage_instruction, directive_count = _report_revision_instruction_context(
-                conversation,
-                content,
-            )
+        if regenerate_report:
+            # "帮我重新写一下报告草稿" asks for a fresh measured draft; the
+            # free wording is kept in the transcript, not parsed as an edit.
+            stage_instruction = REGENERATE_REPORT_INSTRUCTION
+        elif rerun_stage == "word_conclusion_draft":
+            # Each revision applies to the current draft, which already holds
+            # earlier edits; replaying old directives would make the exact
+            # field-operation parser refuse every follow-up revision.
+            clarification = _report_revision_clarification(content)
+            if clarification is not None:
+                reason, code = clarification
+                user_message = repo.add_agent_message(
+                    task_id,
+                    role="user",
+                    stage="chat",
+                    content=content,
+                    metadata={
+                        **model_metadata(model_profile),
+                        "intent": "report_revision",
+                        "target_stage": rerun_stage,
+                        "revision_error_code": code,
+                    },
+                )
+                capture_user_preference_memory(request, task_id, user_message)
+                repo.add_agent_message(
+                    task_id,
+                    role="assistant",
+                    stage="chat",
+                    content=f"报告修订需要澄清：{reason}",
+                    metadata={
+                        **model_metadata(model_profile),
+                        "intent": "report_revision",
+                        "outbound_context_status": "clarification_required",
+                        "revision_error_code": code,
+                        "report_fields_unchanged": True,
+                    },
+                )
+                return {
+                    "task_id": task_id,
+                    "status": "message_saved",
+                    "messages": repo.list_agent_messages(task_id),
+                }
         user_message = repo.add_agent_message(
             task_id,
             role="user",
@@ -1049,11 +1241,6 @@ def post_agent_message(
                 "intent": rerun_intent,
                 "target_stage": rerun_stage,
                 "continue_after_rerun": continue_after_rerun,
-                **(
-                    {"active_report_directive_count": directive_count}
-                    if directive_count
-                    else {}
-                ),
             },
         )
         capture_user_preference_memory(request, task_id, user_message)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from marvis.data.contracts import (
     KeyAlternative,
     KeyDtypeDivergence,
     KeyPair,
+    key_selection_token,
 )
 from marvis.data.dedup import two_level_dedup
 from marvis.data.errors import (
@@ -73,19 +75,31 @@ class JoinEngine:
         for feature_id in feature_ids:
             feature = self._registry.get(feature_id)
             feature_path = self._registry.resolve_path(feature_id)
-            key_pairs = self._aligner.align(
+            proposal = self._aligner.propose_keys(
                 anchor,
                 anchor_path,
                 feature,
                 feature_path,
                 seed=seed,
             )
-            diagnostics = self.diagnose_join(
+            key_pairs = proposal.key_pairs
+            diagnostics = self._with_key_choices(
                 anchor,
                 anchor_path,
                 feature,
                 feature_path,
+                self.diagnose_join(
+                    anchor,
+                    anchor_path,
+                    feature,
+                    feature_path,
+                    key_pairs,
+                    seed=seed,
+                ),
                 key_pairs,
+                key_sets=proposal.alternatives,
+                candidates=proposal.candidates,
+                choice=proposal.choice,
                 seed=seed,
             )
             specs.append(
@@ -236,6 +250,147 @@ class JoinEngine:
             key_dtype_divergences=key_dtype_divergences,
         )
 
+    def select_key_pairs(
+        self,
+        anchor: Dataset,
+        anchor_path: Path,
+        feature: Dataset,
+        feature_path: Path,
+        spec: JoinSpec,
+        selection: list[str],
+        *,
+        seed: int,
+    ) -> None:
+        """Re-key a freshly proposed ``spec`` to the user's C2 key choice.
+
+        ``selection`` items are resolved by :func:`resolve_key_selection` against the spec's
+        data-resolved candidates (unknown items raise). The new key is re-measured and
+        re-diagnosed (uniqueness, fan-out, dtype) like any proposal, the replaced key stays a
+        switch-back alternative, and the spec stays unconfirmed — confirmation and the 1:1
+        execute gate still apply."""
+        candidates = list(spec.diagnostics.key_candidates) or list(spec.key_pairs)
+        chosen = resolve_key_selection(candidates, spec.key_pairs, selection)
+        by_cols = {(pair.anchor_col, pair.feature_col): pair for pair in candidates}
+        key_sets = [tuple(spec.key_pairs)] + [
+            tuple(by_cols[tuple(cols)] for cols in alt.key_pairs if tuple(cols) in by_cols)
+            for alt in spec.diagnostics.key_alternatives
+            if getattr(alt, "kind", "") == "switch"
+        ]
+        spec.key_pairs = self.recompute_key_pairs(
+            anchor, anchor_path, feature, feature_path, chosen, seed=seed,
+        )
+        spec.diagnostics = self._with_key_choices(
+            anchor,
+            anchor_path,
+            feature,
+            feature_path,
+            self.diagnose_join(
+                anchor,
+                anchor_path,
+                feature,
+                feature_path,
+                spec.key_pairs,
+                seed=seed,
+                recompute_match=True,
+            ),
+            spec.key_pairs,
+            key_sets=key_sets,
+            candidates=candidates,
+            choice="user",
+            seed=seed,
+        )
+
+    def _with_key_choices(
+        self,
+        anchor: Dataset,
+        anchor_path: Path,
+        feature: Dataset,
+        feature_path: Path,
+        diagnostics: JoinDiagnostics,
+        key_pairs: list[KeyPair],
+        *,
+        key_sets: Iterable[Sequence[KeyPair]],
+        candidates: Sequence[KeyPair],
+        choice: str,
+        seed: int,
+    ) -> JoinDiagnostics:
+        """Attach the key candidates, why the key was chosen, and one "switch" alternative per
+        other candidate key set — each with its own re-checked match / uniqueness / fan-out."""
+        seen = {frozenset((pair.anchor_col, pair.feature_col) for pair in key_pairs)}
+        seen.update(frozenset(alt.key_pairs) for alt in diagnostics.key_alternatives)
+        current_cols = {pair.anchor_col for pair in key_pairs}
+        switches: list[KeyAlternative] = []
+        for key_set in key_sets:
+            pairs = list(key_set)
+            signature = frozenset((pair.anchor_col, pair.feature_col) for pair in pairs)
+            if not pairs or signature in seen:
+                continue
+            seen.add(signature)
+            match_rate = self._key_match_rate(
+                anchor, anchor_path, feature, feature_path, pairs, seed=seed,
+            )
+            key_unique, fan_out = self._key_fan_out(anchor, feature, feature_path, pairs, match_rate)
+            switches.append(KeyAlternative(
+                key_pairs=tuple((pair.anchor_col, pair.feature_col) for pair in pairs),
+                dropped=",".join(sorted(current_cols - {pair.anchor_col for pair in pairs})),
+                match_rate=round(match_rate, 4),
+                feature_key_unique=key_unique,
+                fan_out_detected=fan_out,
+                kind="switch",
+            ))
+        switches.sort(key=lambda alt: alt.match_rate, reverse=True)
+        return replace(
+            diagnostics,
+            key_alternatives=tuple(diagnostics.key_alternatives) + tuple(switches),
+            key_candidates=tuple(candidates),
+            key_choice=choice,
+        )
+
+    def _key_match_rate(
+        self,
+        anchor: Dataset,
+        anchor_path: Path,
+        feature: Dataset,
+        feature_path: Path,
+        key_pairs: list[KeyPair],
+        *,
+        seed: int,
+    ) -> float:
+        if len(key_pairs) == 1:
+            return key_pairs[0].match_rate
+        matched, sampled = self._backend.match_rate_for_method(
+            anchor_path,
+            [pair.anchor_col for pair in key_pairs],
+            feature_path,
+            [pair.feature_col for pair in key_pairs],
+            method=[pair.match_method for pair in key_pairs],
+            key_fingerprints=_key_fps(anchor, feature, key_pairs),
+            sample_n=SMALL_SAMPLE_N,
+            seed=seed,
+        )
+        return matched / sampled if sampled else 0.0
+
+    def _key_fan_out(
+        self,
+        anchor: Dataset,
+        feature: Dataset,
+        feature_path: Path,
+        key_pairs: list[KeyPair],
+        match_rate: float,
+    ) -> tuple[bool, bool]:
+        """(feature_key_unique, fan_out_detected) for a candidate key, with the same
+        duplicate-factor row estimate diagnose_join uses."""
+        feature_keys = [pair.feature_col for pair in key_pairs]
+        if self._backend.is_key_unique(feature_path, feature_keys, key_pairs=key_pairs):
+            return True, False
+        distinct_keys = self._backend.distinct_count(feature_path, feature_keys, key_pairs=key_pairs)
+        duplicate_factor = feature.row_count / max(1, distinct_keys)
+        preview = int(
+            anchor.row_count * match_rate * duplicate_factor
+            + anchor.row_count * (1 - match_rate),
+        )
+        return False, preview > anchor.row_count
+
     def recompute_key_pairs(
         self,
         anchor: Dataset,
@@ -335,38 +490,13 @@ class JoinEngine:
         alternatives: list[KeyAlternative] = []
         for i in range(len(key_pairs)):
             reduced = key_pairs[:i] + key_pairs[i + 1:]
-            anchor_keys = [pair.anchor_col for pair in reduced]
-            feature_keys = [pair.feature_col for pair in reduced]
-            if len(reduced) == 1:
-                match_rate = reduced[0].match_rate
-            else:
-                matched, sampled = self._backend.match_rate_for_method(
-                    anchor_path,
-                    anchor_keys,
-                    feature_path,
-                    feature_keys,
-                    method=[pair.match_method for pair in reduced],
-                    key_fingerprints=_key_fps(anchor, feature, reduced),
-                    sample_n=SMALL_SAMPLE_N,
-                    seed=seed,
-                )
-                match_rate = matched / sampled if sampled else 0.0
+            match_rate = self._key_match_rate(
+                anchor, anchor_path, feature, feature_path, reduced, seed=seed,
+            )
             # Only propose a relaxation that actually raises the match (else it is strictly worse).
             if match_rate <= current_match_rate:
                 continue
-            key_unique = self._backend.is_key_unique(feature_path, feature_keys, key_pairs=reduced)
-            if key_unique:
-                fan_out = False
-            else:
-                distinct_keys = self._backend.distinct_count(
-                    feature_path, feature_keys, key_pairs=reduced
-                )
-                duplicate_factor = feature.row_count / max(1, distinct_keys)
-                preview = int(
-                    anchor.row_count * match_rate * duplicate_factor
-                    + anchor.row_count * (1 - match_rate),
-                )
-                fan_out = preview > anchor.row_count
+            key_unique, fan_out = self._key_fan_out(anchor, feature, feature_path, reduced, match_rate)
             alternatives.append(KeyAlternative(
                 key_pairs=tuple((pair.anchor_col, pair.feature_col) for pair in reduced),
                 dropped=key_pairs[i].anchor_col,
@@ -722,6 +852,49 @@ def _find_spec(plan: JoinPlan, feature_dataset_id: str) -> JoinSpec:
     raise KeyError(f"join spec not found for feature dataset: {feature_dataset_id}")
 
 
+class KeySelectionError(ValueError):
+    """A C2 key choice that does not map onto the data-resolved candidates."""
+
+    def __init__(self, message: str, *, unknown: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.unknown = unknown
+
+
+def resolve_key_selection(
+    candidates: Sequence[KeyPair],
+    current: Sequence[KeyPair],
+    selection: Sequence[str],
+) -> list[KeyPair]:
+    """Map a C2 key choice onto data-resolved candidate pairs.
+
+    An item is either an anchor column name — its pair in the current key, else its
+    best-matching candidate (the historical one-option-per-column form) — or one candidate
+    pair written as ``key_selection_token(anchor_col, feature_col)``, because one anchor
+    column may have several feature-column candidates. Raises KeySelectionError for items
+    that name no candidate and for a key that uses one anchor column twice."""
+    by_anchor: dict[str, KeyPair] = {}
+    for pair in current:
+        by_anchor.setdefault(pair.anchor_col, pair)
+    for pair in sorted(candidates, key=lambda item: -item.match_rate):
+        by_anchor.setdefault(pair.anchor_col, pair)
+    by_token = {key_selection_token(pair.anchor_col, pair.feature_col): pair for pair in candidates}
+    chosen: list[KeyPair] = []
+    unknown: list[str] = []
+    for item in selection:
+        pair = by_anchor.get(item) or by_token.get(item)
+        if pair is None:
+            unknown.append(item)
+        else:
+            chosen.append(pair)
+    if unknown:
+        raise KeySelectionError(
+            f"拼接键不在候选范围内：{'、'.join(sorted(unknown))}", unknown=tuple(sorted(unknown)),
+        )
+    if len({pair.anchor_col for pair in chosen}) != len(chosen):
+        raise KeySelectionError("同一主表列只能选一个特征表列作拼接键。")
+    return sorted(chosen, key=lambda pair: (pair.anchor_col, pair.feature_col))
+
+
 def _key_fps(
     anchor: Dataset,
     feature: Dataset,
@@ -794,4 +967,4 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-__all__ = ["JoinEngine"]
+__all__ = ["JoinEngine", "KeySelectionError", "resolve_key_selection"]

@@ -253,6 +253,42 @@ class ValidationBatchRepository:
             for row in rows
         }
 
+    def status_summaries_for_parents(
+        self,
+        parent_task_ids: Sequence[str],
+    ) -> dict[str, dict]:
+        """Batch status plus each item's status/outcome, keyed by parent.
+
+        Feeds the task list so every batch parent row resolves the same
+        worst-first status word as the selected batch (2026-10-14 redesign,
+        batch 4). A batch has at most 10 items, so the payload stays small.
+        """
+        ids = [
+            str(task_id).strip()
+            for task_id in parent_task_ids
+            if str(task_id).strip()
+        ]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        # Only generated '?' placeholders are interpolated; IDs stay bound.
+        batch_query = f"SELECT parent_task_id, status FROM validation_batches WHERE parent_task_id IN ({placeholders})"  # nosec B608
+        item_query = f"SELECT parent_task_id, status, outcome FROM validation_batch_items WHERE parent_task_id IN ({placeholders}) ORDER BY parent_task_id, ordinal"  # nosec B608
+        with connect(self.db_path) as conn:
+            batch_rows = conn.execute(batch_query, ids).fetchall()
+            item_rows = conn.execute(item_query, ids).fetchall()
+        summaries = {
+            str(row["parent_task_id"]): {"status": str(row["status"]), "items": []}
+            for row in batch_rows
+        }
+        for row in item_rows:
+            summary = summaries.get(str(row["parent_task_id"]))
+            if summary is not None:
+                summary["items"].append(
+                    {"status": str(row["status"]), "outcome": str(row["outcome"] or "")}
+                )
+        return summaries
+
     def list_items(self, parent_task_id: str) -> list[ValidationBatchItemRecord]:
         with connect(self.db_path) as conn:
             rows = conn.execute(

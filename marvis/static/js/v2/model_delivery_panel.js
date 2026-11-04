@@ -36,6 +36,117 @@ const METRIC_ORDER = [
   "n_features",
 ];
 
+// 2026-10-19 eval: the panel reads in business words. Machine keys, ids and
+// stored paths stay in the payload (radio values, downloads, tooltips); the
+// visible text uses these labels. Display only; no value is recomputed.
+const METRIC_LABELS = {
+  feature_count: "特征数",
+  n_features: "特征数",
+  psi_test_vs_train: "PSI（测试集 vs 训练集）",
+  psi_oot_vs_train: "PSI（OOT vs 训练集）",
+  overfit_flag: "过拟合标记",
+  overfit_train_test_gap: "训练/测试 KS 相对差距",
+  ks_ci_n_boot: "置信区间抽样次数",
+};
+const SPLIT_LABELS = { train: "训练集", test: "测试集", oot: "OOT", cv: "交叉验证" };
+const MEASURE_LABELS = {
+  ks: "KS", auc: "AUC", rmse: "RMSE", mae: "MAE", r2: "R²", logloss: "Logloss",
+  accuracy: "准确率", macro_auc: "Macro-AUC", rows: "样本数", count: "样本数",
+  ks_ci_low: "KS 置信下限", ks_ci_high: "KS 置信上限", ks_ci_std: "KS 置信区间标准差",
+  lift_head_5: "头部 5% Lift", lift_head_10: "头部 10% Lift",
+  lift_tail_5: "尾部 5% Lift", lift_tail_10: "尾部 10% Lift",
+};
+const RECIPE_LABELS = {
+  lr: "逻辑回归", lgb: "LightGBM", xgb: "XGBoost", catboost: "CatBoost", scorecard: "评分卡",
+  mlp: "神经网络", lr_regressor: "线性回归", lgb_regressor: "LightGBM 回归",
+  xgb_regressor: "XGBoost 回归", mlp_regressor: "神经网络回归", lr_multiclass: "逻辑回归多分类",
+  lgb_multiclass: "LightGBM 多分类", xgb_multiclass: "XGBoost 多分类", mlp_multiclass: "神经网络多分类",
+};
+const TARGET_TYPE_LABELS = { binary: "二分类", continuous: "连续值", multiclass: "多分类" };
+const SELECTION_METRIC_LABELS = {
+  manual: "用户指定",
+  "test_ks(overfit-penalized)": "测试集 KS（扣除过拟合惩罚）",
+  "test_rmse(overfit-penalized)": "测试集 RMSE（扣除过拟合惩罚）",
+  "test_logloss(overfit-penalized)": "测试集 Logloss（扣除过拟合惩罚）",
+  cv_mean_ks_minus_std_penalty: "交叉验证 KS 均值减波动惩罚",
+  ks_auc: "KS 与 AUC",
+};
+const POLICY_RULE_LABELS = {
+  require_pmml: "要求可导出 PMML",
+  require_handoff: "要求可移交验证",
+  require_scorecard: "要求评分卡",
+  require_monotonicity: "要求单调性约束",
+  prefer_scorecard: "优先评分卡",
+  allow_policy_override: "允许人工放行",
+  disable_quality_warnings: "关闭质量提醒",
+  max_feature_count: "特征数上限",
+  max_oot_psi: "OOT PSI 上限",
+  overfit_gap_warn_threshold: "过拟合差警戒阈值",
+  min_feature_count_warning: "特征数下限提醒",
+};
+const FILE_KIND_LABELS = {
+  md: "Markdown 文档", json: "JSON 数据", pmml: "PMML 文件", xlsx: "Excel 报告", docx: "Word 报告",
+  joblib: "模型文件", pkl: "模型文件", csv: "CSV 文件", parquet: "数据文件",
+};
+
+export function metricLabel(key) {
+  const text = String(key || "");
+  if (METRIC_LABELS[text]) return METRIC_LABELS[text];
+  const weighted = text.startsWith("weighted_");
+  const body = weighted ? text.slice("weighted_".length) : text;
+  const cut = body.indexOf("_");
+  const split = cut > 0 ? body.slice(0, cut) : "";
+  const measure = cut > 0 ? body.slice(cut + 1) : "";
+  if (SPLIT_LABELS[split] && MEASURE_LABELS[measure]) {
+    const label = `${SPLIT_LABELS[split]} ${MEASURE_LABELS[measure]}`;
+    return weighted ? `加权${label}` : label;
+  }
+  return text;
+}
+
+function isCountMetric(key) {
+  const text = String(key || "");
+  return ["feature_count", "n_features", "ks_ci_n_boot"].includes(text)
+    || /_(count|rows|n_boot)$/.test(text);
+}
+
+function recipeLabel(code) {
+  const text = String(code || "").trim();
+  return RECIPE_LABELS[text] || text || "-";
+}
+
+function selectionMetricLabel(code) {
+  const text = String(code || "").trim();
+  if (!text) return "-";
+  return SELECTION_METRIC_LABELS[text] || metricLabel(text);
+}
+
+// "实验 2 · LightGBM": the candidate's position in this comparison plus its
+// algorithm. The raw experiment id only rides in the tooltip / radio value.
+function experimentLabel(id, delivery = {}, recipe = "") {
+  const value = String(id || "");
+  const candidates = Array.isArray(delivery?.candidates)
+    ? delivery.candidates.filter((item) => item && typeof item === "object")
+    : [];
+  const index = value ? candidates.findIndex((item) => String(item.id || "") === value) : -1;
+  const algorithm = recipe || (index >= 0 ? candidates[index].recipe : "") || delivery?.recipe || "";
+  const algorithmText = algorithm ? ` · ${recipeLabel(algorithm)}` : "";
+  if (index >= 0) return `实验 ${index + 1}${algorithmText}`;
+  return value ? `所选实验${algorithmText}` : "-";
+}
+
+function fileName(value) {
+  const raw = String(value || "").trim().replaceAll("\\", "/");
+  return raw.split("/").filter(Boolean).pop() || "";
+}
+
+function fileKindLabel(value) {
+  const name = fileName(value);
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return "";
+  return FILE_KIND_LABELS[name.slice(dot + 1).toLowerCase()] || "文件";
+}
+
 export function renderModelDeliveryPanel(message, options = {}) {
   const delivery = message?.metadata?.model_delivery;
   if (!delivery || typeof delivery !== "object") return "";
@@ -46,7 +157,6 @@ export function renderModelDeliveryPanel(message, options = {}) {
     || options.taskId
     || ""
   );
-  const compact = options.compact === true;
   const sourceTool = String(delivery.source_tool || "");
   const title = sourceTool === "post_training_action"
     ? "训练后交付"
@@ -60,20 +170,26 @@ export function renderModelDeliveryPanel(message, options = {}) {
   const selectionMetric = String(delivery.selection_metric || "");
   const reason = String(delivery.selection_reason || "");
   const chips = [
-    ["实验", selectedExperimentId || "-"],
-    ["算法", recipe || "-"],
-    ["目标", targetType || "-"],
-    ["指标", selectionMetric || "-"],
-    ["产物", artifactId || "-"],
-  ].filter(([, value]) => value !== "-" || !compact).map(([label, value]) => (
-    `<div class="model-delivery-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
+    ["实验", selectedExperimentId ? experimentLabel(selectedExperimentId, delivery, recipe) : "-", selectedExperimentId],
+    ["算法", recipe ? recipeLabel(recipe) : "-"],
+    ["目标", targetType ? (TARGET_TYPE_LABELS[targetType] || targetType) : "-"],
+    ["指标", selectionMetricLabel(selectionMetric)],
+    ["产物", artifactId ? "模型文件已生成" : "-", artifactId],
+  // An empty chip only reads as missing data (the comparison card had five
+  // 「-」 chips before anything was chosen), so empty facts are left out.
+  ].filter(([, value]) => value !== "-").map(([label, value, detail = ""]) => (
+    `<div class="model-delivery-chip"${detail ? ` title="${escapeHtml(detail)}"` : ""}><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
   )).join("");
   const readiness = visibleReadiness(delivery);
   const readinessHtml = readinessCards(readiness);
   const businessHtml = businessSignalSummary(delivery.business_signals);
   const policyHtml = policySignalSummary(delivery.policy_signals);
   const policyDecisionHtml = policyDecisionSummary(delivery.policy_decision);
-  const metricsHtml = metricsGrid(delivery.metrics);
+  // After a champion refit these are the delivered model's fit-only numbers;
+  // the hold-out evidence sits in its own table (review M5: two blocks both
+  // titled 「最终模型指标」 disagreed).
+  const refit = Boolean(delivery.evaluation_evidence?.refit_applied);
+  const metricsHtml = metricsGrid(delivery.metrics, refit ? "交付模型指标（train+test 重新拟合）" : "最终模型指标");
   const expectedPlanId = String(message?.metadata?.plan_id || "");
   const expectedStepId = String(message?.metadata?.step_id || "");
   const candidateSelectionGate = message?.metadata?.kind === "gate"
@@ -91,10 +207,10 @@ export function renderModelDeliveryPanel(message, options = {}) {
   return `<div class="model-delivery-panel" data-model-delivery-source="${escapeHtml(sourceTool)}">
     <div class="model-delivery-head">
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(readinessHeadline(readiness))}</small>
+      <small>${readinessHeadlineHtml(readiness)}</small>
     </div>
     ${chips ? `<div class="model-delivery-chip-grid">${chips}</div>` : ""}
-    ${reason ? `<div class="model-delivery-reason">${escapeHtml(reason)}</div>` : ""}
+    ${reason ? `<div class="model-delivery-reason">${escapeHtml(readableReason(reason))}</div>` : ""}
     ${readinessHtml}
     ${businessHtml}
     ${policyHtml}
@@ -135,20 +251,20 @@ function readinessCards(items) {
     return `<div class="model-delivery-readiness-card" data-readiness-kind="${escapeHtml(kind)}" data-readiness-id="${escapeHtml(String(item.id || ""))}">
       <span>${escapeHtml(String(item.label || item.id || "交付项"))}</span>
       <strong>${signalGlyph(kind)}${escapeHtml(statusLabel(status))}</strong>
-      ${artifact ? `<code>${escapeHtml(shortArtifact(artifact))}</code>` : ""}
+      ${artifact ? `<small title="${escapeHtml(fileName(artifact))}">${escapeHtml(artifactText(artifact))}</small>` : ""}
       ${reason ? `<small>${escapeHtml(reason)}</small>` : ""}
     </div>`;
   }).join("")}</div>`;
 }
 
-function metricsGrid(metrics) {
+function metricsGrid(metrics, title = "最终模型指标") {
   const metricObject = metrics && typeof metrics === "object" ? metrics : {};
   const keys = sortedMetricKeys(Object.keys(metricObject)).slice(0, 10);
   if (!keys.length) return "";
   return `<div class="model-delivery-metrics">
-    <div class="modeling-section-label">最终模型指标</div>
+    <div class="modeling-section-label">${escapeHtml(title)}</div>
     <div class="model-delivery-metric-grid">${keys.map((key) => (
-      `<div class="model-delivery-metric"><span>${escapeHtml(key)}</span><strong>${escapeHtml(formatMetric(metricObject[key]))}</strong></div>`
+      `<div class="model-delivery-metric" title="${escapeHtml(key)}"><span>${escapeHtml(metricLabel(key))}</span><strong>${escapeHtml(formatMetric(metricObject[key], key))}</strong></div>`
     )).join("")}</div>
   </div>`;
 }
@@ -198,7 +314,7 @@ function candidateTable(candidates, options = {}) {
     <div class="modeling-section-label">候选实验</div>
     ${selectionNote}
     <table class="model-delivery-table">
-      <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+      <thead><tr>${headers.map((header) => `<th>${escapeHtml(metricLabel(header))}</th>`).join("")}</tr></thead>
       <tbody>${rows.map((row) => {
         const caps = row.capabilities && typeof row.capabilities === "object" ? row.capabilities : {};
         const metrics = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
@@ -209,7 +325,7 @@ function candidateTable(candidates, options = {}) {
         const recommended = candidateId && candidateId === recommendedExperimentId;
         const checked = interactive && candidateId === defaultExperimentId;
         const choiceCell = interactive
-          ? `<td><input type="radio" data-model-candidate-choice="1" data-expected-plan-id="${escapeHtml(expectedPlanId)}" data-expected-step-id="${escapeHtml(expectedStepId)}" name="${escapeHtml(radioName)}" value="${escapeHtml(candidateId)}" aria-label="选择候选实验 ${escapeHtml(candidateId || "未知")}"${checked ? " checked" : ""}${candidateId ? "" : " disabled"}></td>`
+          ? `<td><input type="radio" data-model-candidate-choice="1" data-expected-plan-id="${escapeHtml(expectedPlanId)}" data-expected-step-id="${escapeHtml(expectedStepId)}" name="${escapeHtml(radioName)}" value="${escapeHtml(candidateId)}" aria-label="选择候选${escapeHtml(experimentLabel(candidateId, { candidates: rows }, row.recipe))}"${checked ? " checked" : ""}${candidateId ? "" : " disabled"}></td>`
           : "";
         const badges = [
           selected ? '<span class="model-delivery-selected">已选</span>' : "",
@@ -217,11 +333,11 @@ function candidateTable(candidates, options = {}) {
         ].filter(Boolean).join(" ");
         return `<tr${selected ? ' class="is-selected"' : ""}>
           ${choiceCell}
-          <td>${escapeHtml(String(row.recipe || "-"))}${badges ? ` ${badges}` : ""}</td>
-          <td><code>${escapeHtml(String(row.id || "-"))}</code></td>
-          ${metricKeys.map((key) => `<td class="model-delivery-num">${escapeHtml(formatMetric(metrics[key]))}</td>`).join("")}
+          <td>${escapeHtml(recipeLabel(row.recipe))}${badges ? ` ${badges}` : ""}</td>
+          <td title="${escapeHtml(candidateId)}">${escapeHtml(experimentLabel(candidateId, { candidates: rows }, row.recipe))}</td>
+          ${metricKeys.map((key) => `<td class="model-delivery-num">${escapeHtml(formatMetric(metrics[key], key))}</td>`).join("")}
           <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(signals.stability))}">${signalGlyph(signalKind(signals.stability))}${escapeHtml(String(signals.stability || "-"))}</span></td>
-          <td class="model-delivery-num">${escapeHtml(formatMetric(signals.feature_count))}</td>
+          <td class="model-delivery-num">${escapeHtml(formatMetric(signals.feature_count, "feature_count"))}</td>
           <td>${escapeHtml(String(signals.calibration || "-"))}</td>
           <td>${escapeHtml(String(signals.delivery || (caps.pmml_supported && caps.handoff_supported ? "可移交" : "仅原生")))}</td>
           <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.monotonicity_status || policy.monotonicity))}">${signalGlyph(signalKind(policy.monotonicity_status || policy.monotonicity))}${escapeHtml(String(policy.monotonicity || "-"))}</span></td>
@@ -236,7 +352,7 @@ function businessSignalSummary(signals) {
   const data = signals && typeof signals === "object" ? signals : {};
   const items = [
     ["稳定性", data.stability || "待评估", signalKind(data.stability)],
-    ["特征数", data.feature_count === null || data.feature_count === undefined ? "-" : formatMetric(data.feature_count), "neutral"],
+    ["特征数", data.feature_count === null || data.feature_count === undefined ? "-" : formatMetric(data.feature_count, "feature_count"), "neutral"],
     ["校准", data.calibration || "未校准", data.calibration === "需说明" ? "warning" : "neutral"],
     ["交付", data.delivery || "待确认", data.delivery === "可移交" ? "ready" : "warning"],
   ];
@@ -282,7 +398,7 @@ function policyDecisionSummary(decision) {
     : [];
   const enabledRules = Object.entries(policy)
     .filter(([, value]) => value === true || typeof value === "number" || (typeof value === "string" && value.trim()))
-    .map(([key, value]) => `${key}: ${value}`)
+    .map(([key, value]) => policyRuleText(key, value))
     .slice(0, 4);
   const items = [
     ["执行结果", policyDecisionLabel(status), policyDecisionKind(status)],
@@ -316,18 +432,16 @@ function actionTable(actions) {
     <table class="model-delivery-table">
       <thead><tr><th>动作</th><th>状态</th><th>产物/任务</th><th>说明</th></tr></thead>
       <tbody>${rows.map((row) => {
-        const artifact = String(
-          row.pmml_path
-          || row.validation_task_id
-          || row.challenger_task_id
-          || row.markdown_path
-          || row.package_path
-          || ""
-        );
+        const artifact = row.validation_task_id
+          ? "已创建验证任务"
+          : row.challenger_task_id
+            ? "已创建挑战者回测任务"
+            : fileKindLabel(row.pmml_path || row.markdown_path || row.package_path);
+        const artifactName = fileName(row.pmml_path || row.markdown_path || row.package_path);
         return `<tr>
           <td>${escapeHtml(actionLabel(row.action))}</td>
           <td><span class="model-delivery-status" data-readiness-kind="${escapeHtml(statusKind(row.status))}">${signalGlyph(statusKind(row.status))}${escapeHtml(statusLabel(row.status))}</span></td>
-          <td>${artifact ? `<code>${escapeHtml(shortArtifact(artifact))}</code>` : "-"}</td>
+          <td${artifactName ? ` title="${escapeHtml(artifactName)}"` : ""}>${escapeHtml(artifact || "-")}</td>
           <td>${escapeHtml(String(row.reason || ""))}</td>
         </tr>`;
       }).join("")}</tbody>
@@ -338,33 +452,34 @@ function actionTable(actions) {
 function actionLabel(action) {
   const key = String(action || "");
   return {
-    export_pmml: "导出PMML",
+    export_pmml: "导出 PMML",
     handoff_to_validation: "移交验证",
-    create_challenger_backtest: "创建Challenger/Backtest",
+    create_challenger_backtest: "创建挑战者回测",
   }[key] || key || "-";
 }
 
 function artifactList(delivery, { taskId = "" } = {}) {
   const artifacts = [
-    ["原生模型", delivery.native_model_path, "native_model"],
+    ["模型文件", delivery.native_model_path, "native_model"],
     ["PMML", delivery.pmml_path, "pmml"],
     ["模型卡", delivery.model_card_markdown_path || delivery.model_card_path, "model_card"],
-    ["审批包", delivery.approval_package_markdown_path || delivery.approval_package_path, "approval_package"],
+    ["审批材料包", delivery.approval_package_markdown_path || delivery.approval_package_path, "approval_package"],
     ...(delivery.approval_package_markdown_path && delivery.approval_package_path
-      ? [["审批包JSON", delivery.approval_package_path]]
+      ? [["审批材料包（JSON）", delivery.approval_package_path]]
       : []),
     ["模型报告", delivery.report?.report_path],
     ["监控策略", delivery.monitoring_policy_markdown_path || delivery.monitoring_policy_path],
-    ["Champion对比", delivery.challenger_comparison_markdown_path || delivery.challenger_comparison_path],
-    ["Challenger/Backtest", delivery.challenger_task_id],
-    ["Challenger/Backtest包", delivery.challenger_package_markdown_path || delivery.challenger_package_path],
-    ["验证任务", delivery.validation_task_id],
+    ["冠军/挑战者对比", delivery.challenger_comparison_markdown_path || delivery.challenger_comparison_path],
+    ["挑战者回测任务", delivery.challenger_task_id, "", "已创建"],
+    ["挑战者回测计划", delivery.challenger_package_markdown_path || delivery.challenger_package_path],
+    ["验证任务", delivery.validation_task_id, "", "已创建"],
   ].filter(([, value]) => String(value || ""));
   if (!artifacts.length) return "";
-  return `<div class="model-delivery-artifacts">${artifacts.map(([label, value, downloadKind]) => {
+  return `<div class="model-delivery-artifacts">${artifacts.map(([label, value, downloadKind, shown]) => {
     const href = downloadKind ? taskArtifactDownloadUrl(value, taskId) : "";
     const downloadLabel = label === "PMML" ? "下载 PMML" : `下载${label}`;
-    return `<div><span>${escapeHtml(label)}</span><code>${escapeHtml(String(value))}</code>${href ? (
+    const name = shown ? "" : fileName(value);
+    return `<div><span>${escapeHtml(label)}</span><strong${name ? ` title="${escapeHtml(name)}"` : ""}>${escapeHtml(shown || fileKindLabel(value) || "已生成")}</strong>${href ? (
       `<a class="button compact secondary" data-model-delivery-download="${escapeHtml(downloadKind)}" href="${escapeHtml(href)}" download>${escapeHtml(downloadLabel)}</a>`
     ) : ""}</div>`;
   }).join("")}</div>`;
@@ -401,6 +516,16 @@ function taskArtifactRelativePath(value, taskId) {
   return relativePath;
 }
 
+// Section codes are the report contract; the reader sees the chapter names.
+const REPORT_SECTION_LABELS = Object.freeze({
+  sample_analysis: "样本分析",
+  vintage: "Vintage 分析",
+  amount_bin: "金额分箱",
+  low_pricing: "低定价压力测试",
+  product_list: "使用产品清单",
+  development_refit_scope: "重新拟合说明",
+});
+
 function reportSummary(report) {
   if (!report || typeof report !== "object") return "";
   const total = Number(report.total_sections || 0);
@@ -411,7 +536,7 @@ function reportSummary(report) {
     : [];
   const sectionHtml = sections.map((item) => (
     `<div class="model-delivery-report-section" data-available="${item.available ? "true" : "false"}">
-      <span>${escapeHtml(String(item.section || "未命名章节"))}</span>
+      <span>${escapeHtml(REPORT_SECTION_LABELS[item.section] || String(item.section || "未命名章节"))}</span>
       <strong>${item.available ? "可生成" : "缺输入/跳过"}</strong>
       ${item.reason ? `<small>${escapeHtml(String(item.reason))}</small>` : ""}
     </div>`
@@ -426,14 +551,15 @@ function reportSummary(report) {
   </div>`;
 }
 
-function readinessHeadline(items) {
+function readinessHeadlineHtml(items) {
   const rows = Array.isArray(items) ? items : [];
-  if (!rows.length) return "等待交付状态";
+  if (!rows.length) return "<span>等待交付状态</span>";
   const bad = rows.filter((item) => (
     ["unsupported", "skipped", "missing", "failed", "partial", "warn", "fail", "error", "needs_policy", "inferred", "exploration"].includes(String(item?.status || "").toLowerCase())
   )).length;
   const unknown = rows.filter((item) => String(item?.status || "").toLowerCase() === "unknown").length;
-  return [unknown ? `${unknown} 项证据未知` : "", bad ? `${bad} 项需处理/不支持` : "", !unknown && !bad ? "交付产物已就绪" : "", "业务验收未在此确认"].filter(Boolean).join("；");
+  return [unknown ? `${unknown} 项证据未知` : "", bad ? `${bad} 项需处理/不支持` : "", !unknown && !bad ? "交付产物已就绪" : "", "业务验收未在此确认"]
+    .filter(Boolean).map((part) => `<span>${escapeHtml(part)}</span>`).join("；");
 }
 
 function sortedMetricKeys(keys) {
@@ -445,22 +571,42 @@ function sortedMetricKeys(keys) {
   });
 }
 
-function formatMetric(value) {
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) return Math.abs(numeric) >= 100 ? numeric.toFixed(2) : numeric.toFixed(4);
+function formatMetric(value, key = "") {
+  if (typeof value === "boolean") return value ? "是" : "否";
+  const numeric = value === null || value === "" ? Number.NaN : Number(value);
+  if (Number.isFinite(numeric)) {
+    if (isCountMetric(key) && Number.isInteger(numeric)) return String(numeric);
+    return Math.abs(numeric) >= 100 ? numeric.toFixed(2) : numeric.toFixed(4);
+  }
   return value === undefined || value === null || value === "" ? "-" : String(value);
 }
 
-function shortArtifact(value) {
-  const raw = String(value || "");
-  if (raw.length <= 72) return raw;
-  return `...${raw.slice(-69)}`;
+// A readiness artifact is either a stored file (named by its kind) or a
+// created task (validation / backtest).
+function artifactText(value) {
+  return fileKindLabel(value) || "已创建";
+}
+
+function readableReason(text) {
+  let value = String(text || "")
+    .replace(/平台推荐为\s*`?experiment_[0-9a-f]{8,}`?/g, "平台推荐的是另一个实验")
+    .replace(/\s*`?(?:experiment|artifact)_[0-9a-f]{8,}`?\s*/g, "");
+  for (const [code, label] of Object.entries(SELECTION_METRIC_LABELS)) {
+    if (code !== "manual") value = value.split(code).join(label);
+  }
+  return value.replace(/\b(?:weighted_)?(?:train|test|oot|cv)_[a-z0-9_]+\b/g, (code) => metricLabel(code));
+}
+
+function policyRuleText(key, value) {
+  const label = POLICY_RULE_LABELS[key] || key;
+  if (value === true) return label;
+  return `${label}: ${value}`;
 }
 
 function statusKind(status) {
   const normalized = String(status || "").toLowerCase();
   if (["succeeded", "ready", "supported", "pass"].includes(normalized)) return "ready";
-  if (["skipped", "unsupported", "missing", "partial", "warn", "needs_policy", "unknown", "inferred", "exploration"].includes(normalized)) return "warning";
+  if (["skipped", "unsupported", "missing", "partial", "warn", "warning", "needs_policy", "unknown", "inferred", "exploration"].includes(normalized)) return "warning";
   if (["failed", "error", "fail"].includes(normalized)) return "error";
   return "neutral";
 }
@@ -502,6 +648,7 @@ function statusLabel(status) {
     supported: "支持",
     pass: "通过",
     warn: "需复核",
+    warning: "需复核",
     skipped: "已跳过",
     unsupported: "不支持",
     partial: "部分完成",

@@ -31,6 +31,27 @@ PORTFOLIO_REPORT_SHEETS = [
 ]
 
 
+# Red-flag kinds and producing steps as the report reader sees them; the raw
+# kind codes stay in the step outputs (renderers share this table).
+PORTFOLIO_FLAG_LABELS = {
+    "sparse_month": "月度样本稀疏",
+    "month_gap": "快照月份不连续",
+    "unobserved_state": "迁徙行无观测",
+    "high_concentration": "细分集中度高",
+    "sparse_segment": "小细分已归并",
+    "matrix_not_absorbing": "损失态非吸收",
+    "short_history": "历史月份不足",
+    "unestimated_state": "损失概率无法估计",
+}
+PORTFOLIO_STEP_LABELS = {
+    "flow_rate": "流量分析",
+    "bucket_migration": "迁徙热力",
+    "segment_profile": "细分画像",
+    "score_stability_trend": "稳定性趋势",
+    "expected_loss_estimate": "损失估计",
+}
+
+
 @dataclass(frozen=True)
 class PortfolioReportPayload:
     project_meta: dict = field(default_factory=dict)
@@ -108,7 +129,11 @@ def _write_migration(workbook: Workbook, migration: dict | None) -> None:
         sheet["A1"] = "无数据"
         return
     heat_table = migration.get("heat_table") or []
-    _write_dict_table(sheet, heat_table)
+    # The row label column reads as 起始状态; to-state columns keep their labels.
+    _write_dict_table(sheet, [
+        {("起始状态" if key == "from" else key): value for key, value in row.items()}
+        for row in heat_table
+    ])
 
 
 def _write_flow(workbook: Workbook, flow: dict | None) -> None:
@@ -151,7 +176,17 @@ def _write_red_flags(workbook: Workbook, red_flags: list[dict]) -> None:
     if not red_flags:
         sheet["A1"] = "无红旗"
         return
-    _write_dict_table(sheet, red_flags)
+    rows = [
+        {
+            "说明": flag.get("message") or "",
+            "类型": PORTFOLIO_FLAG_LABELS.get(str(flag.get("kind") or ""), "数据质量提示"),
+            "来源步骤": PORTFOLIO_STEP_LABELS.get(
+                str(flag.get("source") or ""), str(flag.get("source") or "")
+            ),
+        }
+        for flag in red_flags
+    ]
+    _write_dict_table(sheet, rows)
 
 
 def _write_rows(sheet, rows: list[tuple]) -> None:
@@ -210,7 +245,9 @@ def payload_to_dict(payload: PortfolioReportPayload) -> dict:
 
 
 __all__ = [
+    "PORTFOLIO_FLAG_LABELS",
     "PORTFOLIO_REPORT_SHEETS",
+    "PORTFOLIO_STEP_LABELS",
     "PortfolioReportPayload",
     "payload_to_dict",
     "render_portfolio_report",

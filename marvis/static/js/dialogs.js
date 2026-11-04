@@ -44,6 +44,54 @@ export function renderMaterialUploadSelection({
   status.title = files.length ? selectionText : "";
 }
 
+// Dropped files and folders as {file, relativePath} items (folders are walked
+// through webkitGetAsEntry). Shared by the create dialog's dropzone and the
+// home composer (2026-10-14 redesign, batch 5).
+function fileFromEntry(entry) {
+  return new Promise((resolve, reject) => {
+    entry.file(resolve, reject);
+  });
+}
+
+function readDirectoryEntries(reader) {
+  return new Promise((resolve, reject) => {
+    reader.readEntries(resolve, reject);
+  });
+}
+
+async function walkDroppedEntry(entry, parentPath = "") {
+  if (!entry) return [];
+  if (entry.isFile) {
+    const file = await fileFromEntry(entry);
+    return [{ file, relativePath: `${parentPath}${file.name || entry.name}` }];
+  }
+  if (!entry.isDirectory) return [];
+  const reader = entry.createReader();
+  const children = [];
+  while (true) {
+    const batch = await readDirectoryEntries(reader);
+    if (!batch.length) break;
+    children.push(...batch);
+  }
+  const nextPath = `${parentPath}${entry.name}/`;
+  const nested = await Promise.all(children.map((child) => walkDroppedEntry(child, nextPath)));
+  return nested.flat();
+}
+
+export async function droppedFileItems(dataTransfer) {
+  const entries = Array.from(dataTransfer?.items || [])
+    .map((item) => (
+      typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null
+    ))
+    .filter(Boolean);
+  if (entries.length) {
+    const nested = await Promise.all(entries.map((entry) => walkDroppedEntry(entry)));
+    const entryFiles = nested.flat();
+    if (entryFiles.length) return entryFiles;
+  }
+  return Array.from(dataTransfer?.files || []).map((file) => ({ file }));
+}
+
 export function createMaterialSourceController({ $, onFilesChanged }) {
   let mode = "path";
   let files = [];
@@ -101,51 +149,6 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
     captureFileItems(Array.from(fileList || []).map((file) => ({ file })));
   }
 
-  function fileFromEntry(entry) {
-    return new Promise((resolve, reject) => {
-      entry.file(resolve, reject);
-    });
-  }
-
-  function readDirectoryEntries(reader) {
-    return new Promise((resolve, reject) => {
-      reader.readEntries(resolve, reject);
-    });
-  }
-
-  async function walkDroppedEntry(entry, parentPath = "") {
-    if (!entry) return [];
-    if (entry.isFile) {
-      const file = await fileFromEntry(entry);
-      return [{ file, relativePath: `${parentPath}${file.name || entry.name}` }];
-    }
-    if (!entry.isDirectory) return [];
-    const reader = entry.createReader();
-    const children = [];
-    while (true) {
-      const batch = await readDirectoryEntries(reader);
-      if (!batch.length) break;
-      children.push(...batch);
-    }
-    const nextPath = `${parentPath}${entry.name}/`;
-    const nested = await Promise.all(children.map((child) => walkDroppedEntry(child, nextPath)));
-    return nested.flat();
-  }
-
-  async function droppedFileItems(dataTransfer) {
-    const entries = Array.from(dataTransfer?.items || [])
-      .map((item) => (
-        typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null
-      ))
-      .filter(Boolean);
-    if (entries.length) {
-      const nested = await Promise.all(entries.map((entry) => walkDroppedEntry(entry)));
-      const entryFiles = nested.flat();
-      if (entryFiles.length) return entryFiles;
-    }
-    return Array.from(dataTransfer?.files || []).map((file) => ({ file }));
-  }
-
   function selectedFiles() {
     return [...files];
   }
@@ -198,6 +201,7 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
   return {
     bindDropzone,
     bindTabs,
+    captureFileItems,
     captureFiles,
     mode: () => mode,
     reset,

@@ -32,7 +32,7 @@ from marvis.agent.join_setup import (
 )
 from marvis.agent.sample_setup import detect_setup
 from marvis.data.errors import DatasetContentDriftError
-from marvis.domain import FileRole
+from marvis.domain import FileRole, TaskCreate
 from marvis.modeling_limits import normalize_n_trials
 from marvis.modeling_split import SplitConfigurationError, validate_split_configuration
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
@@ -434,10 +434,14 @@ def build_modeling_proposal(
         # D12 conflict policy: a detected split column wins (conservative — no change
         # for existing-split datasets). When the user explicitly requested a DIFFERENT
         # time_col, tell them the detected split shadowed the requested time-OOT.
-        if not blind and effective_time_col and effective_time_col != split_col:
+        # Only a column the task actually asked for is named here: the task-schema
+        # default (`apply_month`) and the alias-detected month column are not
+        # requests, so mentioning them would invent a user instruction.
+        requested_time_col = _explicitly_requested_time_col(time_col, effective_time_col)
+        if not blind and requested_time_col and requested_time_col != split_col:
             notes.append(
-                f"检测到切分列 `{split_col}`，将按其切分（未按请求的时间列 `{effective_time_col}` "
-                "做时间外推 OOT）；如需时间外推 OOT，请移除切分列或改用日期列切分。"
+                f"检测到切分列 `{split_col}`，将按其切分（未按请求的时间列 `{requested_time_col}` "
+                "做时间外推 OOT）；如需时间外推 OOT，可在建模协作台第 1 步改选按时间字段切分。"
             )
     elif joined:
         dataset_id = dataset.id
@@ -479,10 +483,27 @@ def build_modeling_proposal(
             time_col=None if blind else effective_time_col,
         )
         notes.append(note)
+    # Algorithm names, and only the ones for this target (eval S4 listed every
+    # recipe code, regressors included, for a binary A card).
+    from marvis.agent.presenters.display_labels import recipe_label
+
     if len(recipe_list) > 1:
-        notes.append(f"算法:{'/'.join(recipe_list)}（多算法训练后按 {_selection_metric_label(target_type)} 取最优）。")
+        notes.append(
+            f"算法：{'、'.join(recipe_label(item) for item in recipe_list)}"
+            f"（多算法训练后按 {_selection_metric_label(target_type)} 取最优）。"
+        )
     else:
-        notes.append(f"算法:`{recipe_list[0]}`（可选 {'/'.join(_SUPPORTED_RECIPES)}）。")
+        others = [
+            recipe_label(item)
+            for item in _SUPPORTED_RECIPES
+            # ensemble combines trained candidates; it is not a first choice.
+            if item not in {recipe_list[0], "ensemble"} and _derive_target_type([item]) == target_type
+        ]
+        notes.append(
+            f"算法：{recipe_label(recipe_list[0])}"
+            + (f"（也可以改用 {'、'.join(others)}）" if others else "")
+            + "。"
+        )
     feature_dictionary_id = resolve_data_dictionary_id(registry, task_id, source_dir)
     if business_columns:
         notes.append("已识别建模报告业务列，将生成样本分析/Vintage/金额分箱/低定价等可用章节。")
@@ -635,6 +656,28 @@ def _resolve_effective_time_col(
         # requested but absent -> do not fabricate; fall through to alias
     alias = business_columns.get("loan_month_col")
     return alias if isinstance(alias, str) and alias else None
+
+
+# Every task row carries a time column: the task schema fills `apply_month` when
+# the creator never named one, so that value alone is not a user request.
+_TASK_DEFAULT_TIME_COL = TaskCreate.__dataclass_fields__["time_col"].default
+
+
+def _explicitly_requested_time_col(
+    requested: str | None,
+    effective_time_col: str | None,
+) -> str | None:
+    """The real column name of a time column the task explicitly asked for.
+
+    ``None`` when the task only carries the schema default, or when the request
+    did not resolve and ``effective_time_col`` came from the alias heuristic.
+    """
+    req = str(requested or "").strip()
+    if not req or not effective_time_col:
+        return None
+    if req.lower() == str(_TASK_DEFAULT_TIME_COL).lower():
+        return None
+    return effective_time_col if effective_time_col.lower() == req.lower() else None
 
 
 def _is_mob_observe_column(column: str) -> bool:

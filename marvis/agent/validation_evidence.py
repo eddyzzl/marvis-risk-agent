@@ -19,7 +19,7 @@ def agent_evidence_from_settings(settings, task_id: str) -> dict:
     pmml_scoring = _read_pmml_scoring_result(
         task_dir / "outputs" / "pmml_scoring_result.json"
     )
-    return {
+    evidence = {
         "scan": _read_json(task_dir / "execution" / "scan_result.json"),
         "notebook_steps": _read_json(task_dir / "execution" / "notebook_steps.json"),
         "contract": _read_json(task_dir / "execution" / "runtime_contract.json"),
@@ -27,6 +27,34 @@ def agent_evidence_from_settings(settings, task_id: str) -> dict:
         "pmml_scoring": pmml_scoring,
         "validation_results": agent_validation_results_with_overfitting_check(validation_results),
     }
+    stage = task_business_stage(settings, task_id)
+    if stage is not None:
+        evidence["business_stage"] = stage
+    return evidence
+
+
+def task_business_stage(settings, task_id: str) -> str | None:
+    """Card kind ("t"/"a"/"b") named by the model name or the user's own words.
+
+    Unknown stays unknown: narratives must not assert 授信/支用/贷中 without it.
+    """
+    from marvis.repositories.tasks import TaskRepository
+    from marvis.validation_report_copy import scorecard_business_stage
+
+    db_path = getattr(settings, "db_path", None)
+    if db_path is None:
+        return None
+    try:
+        repo = TaskRepository(db_path)
+        task = repo.get_task(task_id)
+        user_texts = [
+            str(message.get("content") or "")
+            for message in repo.list_agent_messages(task_id)
+            if message.get("role") == "user"
+        ]
+    except Exception:  # noqa: BLE001 - evidence enrichment never fails a stage
+        return None
+    return scorecard_business_stage(task.model_name, *user_texts)
 
 
 def agent_validation_results_with_overfitting_check(validation_results):
@@ -61,4 +89,5 @@ def _read_pmml_scoring_result(path: Path) -> dict:
 __all__ = [
     "agent_evidence_from_settings",
     "agent_validation_results_with_overfitting_check",
+    "task_business_stage",
 ]

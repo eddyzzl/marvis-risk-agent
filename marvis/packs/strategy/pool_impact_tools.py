@@ -24,6 +24,7 @@ from marvis.data.labels import require_labels_confirmed
 from marvis.data.workspace import (
     data_semantic_mapping_from_dict,
     data_semantic_mapping_hash,
+    data_semantic_mapping_to_dict,
 )
 from marvis.files import sha256_file
 from marvis.packs.strategy.automatic_tree_sample_design import (
@@ -80,6 +81,8 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+from marvis.packs.strategy.input_validation import expression_fields as _expression_fields
+from marvis.packs.strategy.input_validation import require_binding_connection as _require_binding_connection
 
 if TYPE_CHECKING:
     from marvis.packs.strategy.pool_tools import (
@@ -2064,20 +2067,6 @@ def _read_frame(
     return frame
 
 
-def _expression_fields(value: Any) -> set[str]:
-    fields: set[str] = set()
-    if isinstance(value, Mapping):
-        field = value.get("field")
-        if isinstance(field, str):
-            fields.add(field)
-        for item in value.values():
-            fields.update(_expression_fields(item))
-    elif isinstance(value, list | tuple):
-        for item in value:
-            fields.update(_expression_fields(item))
-    return fields
-
-
 def _require_strategy_development_columns_allowed(
     binding: StrategyRiskDevelopmentExecutionBinding,
     columns,
@@ -2321,12 +2310,9 @@ def _require_dataset_and_workspace_on_connection(
     try:
         raw_mapping = str(row["semantic_mapping_json"])
         mapping = data_semantic_mapping_from_dict(json.loads(raw_mapping))
+        # Same canonical form the workspace repository writes (incl. directions).
         canonical_mapping = json.dumps(
-            {
-                "target_col": mapping.target_col,
-                "field_roles": dict(mapping.field_roles),
-                "business_names": dict(mapping.business_names),
-            },
+            data_semantic_mapping_to_dict(mapping),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -2642,18 +2628,6 @@ def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
     return result
 
 
-def _require_binding_connection(conn, *, db_path: Path, name: str) -> None:
-    if not conn.in_transaction:
-        raise StrategyError(f"{name} binding requires a caller-owned transaction")
-    database = conn.execute(
-        "SELECT file FROM pragma_database_list WHERE name = 'main'"
-    ).fetchone()
-    if (
-        database is None
-        or not str(database["file"])
-        or Path(str(database["file"])).absolute() != db_path
-    ):
-        raise StrategyError(f"{name} binding database changed")
 
 
 __all__ = [

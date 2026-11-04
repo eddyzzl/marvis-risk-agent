@@ -640,7 +640,20 @@ def test_refit_report_uses_real_fit_scope_and_authentic_parent_test(
     cells = [
         value for row in workbook["汇总"].iter_rows(values_only=True) for value in row
     ]
-    assert "development_train_plus_test" in cells and "pre_refit_test" in cells
+    # The workbook shows the split and purpose codes in business Chinese; the
+    # structured output above keeps the codes.
+    assert "最终模型拟合集（train+test）" in cells and "所选实验测试集（重训前留出）" in cells
+    assert "所选实验 OOT（重训前留出）" in cells
+    assert "重训前的 OOT 留出证据，重训后未重新评估" in cells
+    assert not {
+        "development_train_plus_test", "pre_refit_test", "pre_refit_oot",
+        "parent_heldout_oot_before_refit", "final_fit_scope", "unknown",
+    } & set(cells)
+    bands = [
+        value for row in workbook["评分分段"].iter_rows(values_only=True) for value in row
+    ]
+    assert "评估用途" in bands and "已参与拟合，仅作诊断" in bands
+    assert "consumed_in_fit_diagnostic" not in bands
     assert any(
         isinstance(value, str) and "不能作为最终模型的独立测试" in value
         for value in cells

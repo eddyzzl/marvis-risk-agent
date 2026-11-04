@@ -157,3 +157,18 @@ assert.equal(agentSendIsStopMode(),true);
 taskActivities.release(lease);
 assert.equal(agentSendIsStopMode(),false);
 ''', "function agentSendIsStopMode(")
+
+
+def test_releasing_a_driver_turn_redraws_the_conversation():
+    # Eval S6: widget controllers render the reply before releasing the task,
+    # so the release itself redraws the conversation; otherwise the new gate
+    # stayed read-only until a page reload.
+    run_node('''
+let conversationRenders = 0;
+const renderAgentConversation = () => { conversationRenders += 1; };
+const busy = taskActivities.channel("driver_execute", renderBusyActivity);
+busy(true, "a");
+assert.equal(conversationRenders, 0);
+busy(false, "a");
+assert.equal(conversationRenders, 1);
+''', *BUSY)

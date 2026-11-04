@@ -107,7 +107,12 @@ def _selection_journey():
     )
     journey = Journey(client, case, time.monotonic() + 20)
     journey.task_id = "task"
-    journey.wait_idle = lambda **kwargs: None
+    # Match Journey.run's action identity and wait_idle's returned plan carrier.
+    journey.current_action_index = 1
+    settled = copy.deepcopy(plan)
+    settled["status"] = "done"
+    settled["steps"][0].update(status="done", output_ref="metrics:selection:v1")
+    journey.wait_idle = lambda **kwargs: [settled]
     action = RuntimeAction(
         kind="select_recommended_experiment",
         tool="modeling.select_experiment",
@@ -146,6 +151,11 @@ def test_declared_refit_policy_reaches_exact_current_selection_cas_body(refit):
     assert body["expected_plan_id"] == plan["id"] and body["expected_step_id"] == plan["steps"][0]["id"]
     assert all(body[key] == value for key, value in gate["metadata"]["confirmation_snapshot"].items())
     assert journey.approval == (path, body) and journey.interventions == 1
+    capture, = journey.model_selections
+    assert capture["case_action_index"] == 1 and capture["request"] == body
+    assert capture["plan_before"] == plan
+    assert capture["plan_after"]["steps"][0]["status"] == "done"
+    assert capture["http_ordinal"] == journey.count
 
 
 def test_omitted_refit_policy_preserves_legacy_serialized_action_and_wire():

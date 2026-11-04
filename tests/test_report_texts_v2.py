@@ -195,7 +195,7 @@ def test_pending_training_description_does_not_override_hyperparameter_text():
         _make_results(),
         report_values={
             "TEXT:model_training_description": (
-                "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
+                "待确认模型算法后自动生成模型训练说明。"
             ),
         },
     )

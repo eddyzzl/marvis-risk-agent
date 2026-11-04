@@ -24,7 +24,11 @@ _TOPICS = {
     "performance": "逐一引用已有 Train/Test/OOT KS、AUC，解释区分效果及平台过拟合检查。",
     "stability": "引用已有各样本 PSI 和逐期证据，解释样本外稳定性、变化及限制。",
     "ranking": "只按 lift_ranking_assessment 分别解释按 train 分箱和独立分箱的单调性、头尾幅度及区分度。",
-    "overall": "综合效果、稳定性和压力测试的关键风险作审慎判断，不重复各项明细；克制对比可比历史记忆，没有则明确本次未见可比历史模型。",
+    "overall": (
+        "综合效果、稳定性和压力测试的关键风险作审慎判断，不重复各项明细；克制对比可比历史记忆，没有则明确本次未见可比历史模型。"
+        "证据中的不合格或高风险项（压力测试高风险数据源、过拟合检查未通过、PSI 超阈值、排序性不合格等）必须在本段点名，"
+        "并用 !!关键短语!! 标出，不能只写效果良好。"
+    ),
     "training": "介绍实际算法和给定关键超参；仅在用户要求修改时返回可选业务叙事字段。",
 }
 _REPORT_SECTIONS = (
@@ -97,6 +101,7 @@ def has_report_revision_context(evidence, user_instruction=None, *, algorithm=No
 
 
 def _section_payload(original, topic, keys, *, repair_reason=None):
+    business_stage = (original.get("evidence") or {}).get("business_stage")
     if original.get("stage") == "metrics":
         from marvis.llm_outbound import OutboundContextError
         from marvis.llm_outbound_validation import validation_metric_section_prompt
@@ -106,7 +111,7 @@ def _section_payload(original, topic, keys, *, repair_reason=None):
         return validation_metric_section_prompt(
             _topic_metrics(original.get("evidence", {}).get("validation_results"), topic),
             topic=topic, repair_reason=repair_reason,
-            history=original.get("model_history"),
+            history=original.get("model_history"), business_stage=business_stage,
         )
     if original.get("report_revision_request") is None and not has_report_revision_context(
         original.get("evidence"), original.get("user_instruction"),
@@ -116,7 +121,7 @@ def _section_payload(original, topic, keys, *, repair_reason=None):
         return validation_report_section_prompt(
             _topic_metrics(original.get("evidence", {}).get("validation_results"), topic),
             topic=topic, repair_reason=repair_reason,
-            history=original.get("model_history"),
+            history=original.get("model_history"), business_stage=business_stage,
         )
     from marvis.llm_outbound_revision import ReportRevisionError, report_revision_prompt
     from marvis.llm_outbound_validation import validation_report_section_prompt
@@ -127,6 +132,7 @@ def _section_payload(original, topic, keys, *, repair_reason=None):
     measured = validation_report_section_prompt(
         _topic_metrics(original.get("evidence", {}).get("validation_results"), topic),
         topic=topic, repair_reason=repair_reason, history=original.get("model_history"),
+        business_stage=business_stage,
     )
     return report_revision_prompt(
         measured, request=request, provenance=original["report_provenance"], requested_fields=[keys[0]],
@@ -206,12 +212,16 @@ def generate_v2_sections(client, prompt):
 
 def generate_v2_revision_sections(client, evidence, *, request, provenance, fields, history=None):
     """Generate only authorized fields; the saved report remains with the caller."""
-    from marvis.llm_outbound_revision import ReportRevisionError, ReportRevisionRequest
+    from marvis.llm_outbound_revision import (
+        APPEND_OPERATIONS, EVIDENCE_OPERATIONS, ReportRevisionError, ReportRevisionRequest,
+    )
 
     allowed = {keys[0] for _topic, keys in _REPORT_SECTIONS}
-    if (not isinstance(request, ReportRevisionRequest) or request.operation != "regenerate_from_evidence"
+    if (not isinstance(request, ReportRevisionRequest) or request.operation not in EVIDENCE_OPERATIONS
             or not fields or not set(fields) <= allowed or not set(fields) <= set(request.target_fields)):
         raise ReportRevisionError("报告修订章节超出已核对的字段操作，未发送请求。")
+    # An addendum is one paragraph; the conclusion's synthesis topic writes it.
+    appending = request.operation in APPEND_OPERATIONS
     original = {
         "stage": "word_conclusion_draft", "evidence": evidence,
         "report_revision_request": request, "report_provenance": provenance,
@@ -219,7 +229,7 @@ def generate_v2_revision_sections(client, evidence, *, request, provenance, fiel
     }
     values, conclusion = {}, []
     for topic, keys in _REPORT_SECTIONS:
-        if keys[0] not in fields:
+        if keys[0] not in fields or (appending and keys[0] == _FINAL and topic != "overall"):
             continue
         section = _generate_section(client, original, topic, (keys[0],))
         if keys[0] == _FINAL:

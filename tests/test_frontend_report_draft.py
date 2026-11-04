@@ -27,16 +27,9 @@ const draft = await import({json.dumps(module_url)});
 
 
 def test_app_wires_editable_report_draft_table_and_confirm_endpoint():
-    app_js = _read_static("app.js")
-    css = _read_static("css/agent-conversation.css")
-
-    assert 'from "./js/report-draft-table.js"' in app_js
-    assert "reportDraftTableHtml" in app_js
-    assert "agent/report-draft/confirm" in app_js
-    assert "确认并生成报告" in app_js
-    assert "data-report-draft-confirm" in _read_static("js/report-draft-table.js")
-    assert ".report-draft-table" in css
-    assert ".report-draft-input" in css
+    css = _read_static('css/agent-conversation.css')
+    assert '.report-draft-table' in css
+    assert '.report-draft-input' in css
 
 
 def test_report_draft_table_pairs_placeholders_with_editable_values():

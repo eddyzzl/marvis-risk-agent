@@ -45,8 +45,12 @@ def segment_reference(records, *, segment_col, balance_col, top_k=20):
     if merged:
         display.append(("其他", sum(groups[key][0] for key in merged)))
     flags = []
-    if counts["top1_pct"] > 0.4 or counts["hhi"] > 0.25:
-        flags.append({"kind": "high_concentration", "top1_pct": counts["top1_pct"], "hhi": counts["hhi"]})
+    # An even split has top1 = HHI = 1/n, so thresholds scale with the segment count.
+    even_floor = 1.5 / len(groups)
+    top1_limit, hhi_limit = max(0.4, even_floor), max(0.25, even_floor)
+    if counts["top1_pct"] > top1_limit or counts["hhi"] > hhi_limit:
+        flags.append({"kind": "high_concentration", "top1_pct": counts["top1_pct"], "hhi": counts["hhi"],
+                      "segment_count": len(groups), "top1_threshold": top1_limit, "hhi_threshold": hhi_limit})
     if merged:
         flags.append({"kind": "sparse_segment", "merged_count": len(merged)})
     return {
@@ -72,8 +76,19 @@ def reference_flag_text(flag, *, top_k=20):
     if kind == "short_history":
         return f"可用快照月仅 {flag['months_available']} 个（<3），迁徙矩阵估计不稳健。"
     if kind == "high_concentration":
-        return (f"细分高度集中：top1 占比 {flag['top1_pct']:.1%}，HHI {flag['hhi']:.3f}"
-                "（阈值 top1>40% 或 HHI>0.25）。")
+        return (f"细分高度集中：{flag['segment_count']} 个细分，top1 占比 {flag['top1_pct']:.1%}，"
+                f"HHI {flag['hhi']:.3f}（阈值 top1>{flag['top1_threshold']:.1%} 或 HHI>{flag['hhi_threshold']:.3f}；"
+                f"按细分个数调整：至少为均匀分布 1/{flag['segment_count']} 的 1.5 倍，且不低于 40% / 0.25）。")
+    if kind == "unobserved_state":
+        return (f"迁徙窗口内状态 {'、'.join(flag['states'])} 没有迁出基数，该行迁徙率无法估计，"
+                "以空值（无观测）表示，不按 0% 处理。")
+    if kind == "unestimated_state":
+        text = f"状态 {'、'.join(flag['states'])} 在迁徙窗口内没有桶内迁出观测，到损失态的概率无法估计（显示为空）"
+        if flag["affected_states"]:
+            text += f"；链式计算暂按其停留原状态处理，{'、'.join(flag['affected_states'])} 的 P(损失) 是偏低下限"
+        if flag["reference_snapshot"] is not None:
+            text += f"；参考快照 {flag['reference_snapshot']} 中这些状态的余额 {flag['unestimated_balance']:,.2f} 未计入 EL"
+        return text + "。"
     if kind == "sparse_segment":
         return f"{flag['merged_count']} 个小细分已归并为「其他」（top_k={top_k}）。"
     raise _Unsupported("unrecognized independent portfolio flag")
@@ -122,7 +137,7 @@ def transition_reference(records, *, id_col, snapshot_col, bucket_col,
     if window and set(window) - set(months[:-1]):
         raise ValueError("unavailable portfolio migration window")
     destinations = states + ["exited"]
-    weighted_matrices, count_matrices, net_flows, flags = [], {}, [], []
+    weighted_matrices, month_amounts, month_counts, net_flows, flags = [], {}, {}, [], []
     for month, next_month in zip(months, months[1:]):
         year, number = map(int, month.split("-"))
         next_year, next_number = map(int, next_month.split("-"))
@@ -150,7 +165,7 @@ def transition_reference(records, *, id_col, snapshot_col, bucket_col,
                 result.append([value / total if total else 0.0 for value in row])
             return result
 
-        count_matrices[month] = normalized(counts)
+        month_amounts[month], month_counts[month] = amounts, counts
         weighted_matrices.append({
             "month": month, "to_month": next_month,
             "from_to_matrix": normalized(amounts),
@@ -160,32 +175,56 @@ def transition_reference(records, *, id_col, snapshot_col, bucket_col,
         net_flows.append({"month": month, "into_bad": into_bad, "out_of_bad": out_of_bad})
         if len(panel[month]) < 100:
             flags.append({"kind": "sparse_month", "month": month, "pair_count": len(panel[month])})
-    observed = [item["from_to_matrix"] for item in weighted_matrices if item["month"] in selected]
-    average = [[sum(matrix[i][j] for matrix in observed) / len(observed)
-                for j in range(len(destinations))] for i in range(len(states))]
-    worst = [[max(matrix[i][j] for matrix in observed)
-              for j in range(len(destinations))] for i in range(len(states))]
-    transition = []
-    for i in range(len(states)):
-        row = [sum(count_matrices[month][i][j] for month in selected) / len(selected)
-               for j in range(len(states))]
+    # Pooled over the window: summed weights / summed origin base. Months where an
+    # origin has no weight do not enter its row; an origin never weighted is undefined.
+    by_month_matrix = {item["month"]: item["from_to_matrix"] for item in weighted_matrices}
+    average, worst, unobserved = [], [], []
+    for i, origin in enumerate(states):
+        live = [m for m in selected if sum(month_amounts[m][origin, d] for d in destinations) > 0]
+        base = sum(month_amounts[m][origin, d] for m in live for d in destinations)
+        if not live or base <= 0:
+            unobserved.append(origin)
+            average.append([None] * len(destinations))
+            worst.append([None] * len(destinations))
+            continue
+        average.append([sum(month_amounts[m][origin, d] for m in live) / base for d in destinations])
+        worst.append([max(by_month_matrix[m][i][j] for m in live) for j in range(len(destinations))])
+    transition, unestimated = [], []
+    for i, origin in enumerate(states):
+        row = [sum(month_counts[m][origin, target] for m in selected) for target in states]
         total = sum(row)
-        transition.append([value / total for value in row] if total else
-                          [float(i == j) for j in range(len(states))])
+        if total:
+            transition.append([value / total for value in row])
+        else:
+            transition.append([float(i == j) for j in range(len(states))])
+            if origin != loss_state:
+                unestimated.append(origin)
     loss_index = states.index(loss_state)
     was_absorbing = transition[loss_index][loss_index] >= 1 - 1e-9
     transition[loss_index] = [float(j == loss_index) for j in range(len(states))]
     probability = [float(j == loss_index) for j in range(len(states))]
+    reach = [float(state in unestimated) for state in states]
     # Backward recurrence uses a vector; producer uses full matrix powers.
     for _ in range(horizon_months):
         probability = [sum(weight * p for weight, p in zip(row, probability)) for row in transition]
-    by_state = dict(zip(states, probability))
+        reach = [sum(weight * r for weight, r in zip(row, reach)) for row in transition]
+    by_state = {state: (None if state in unestimated else value) for state, value in zip(states, probability)}
     by_month = [{
         "month": month, "balance": sum(weight for _, weight in panel[month].values()),
-        "expected_loss": sum(weight * by_state[state] * lgd for state, weight in panel[month].values()),
+        "expected_loss": sum(weight * by_state[state] * lgd for state, weight in panel[month].values()
+                             if by_state[state] is not None),
         "is_reference": month == months[-1],
     } for month in months]
     loss_flags = []
+    if unestimated:
+        loss_flags.append({
+            "kind": "unestimated_state", "states": unestimated,
+            "affected_states": [state for state, value in zip(states, reach)
+                                if state not in unestimated and state != loss_state and value > 1e-12],
+            "reference_snapshot": months[-1],
+            "unestimated_balance": sum((weight for state, weight in panel[months[-1]].values()
+                                        if state in unestimated), 0.0),
+        })
     if not was_absorbing:
         loss_flags.append({"kind": "matrix_not_absorbing", "loss_state": loss_state})
     if len(months) < 3:
@@ -196,7 +235,10 @@ def transition_reference(records, *, id_col, snapshot_col, bucket_col,
         "migration": {"states": states, "to_states": destinations, "window_months": selected,
                       "avg_matrix": average, "worst_matrix": worst,
                       "heat_table": [{"from": state, **dict(zip(destinations, row))}
-                                     for state, row in zip(states, average)], "red_flags": flags},
+                                     for state, row in zip(states, average)],
+                      # Per-month sparsity is reported once, by the flow step.
+                      "red_flags": [flag for flag in flags if flag["kind"] == "month_gap" and flag["month"] in selected]
+                      + ([{"kind": "unobserved_state", "states": unobserved}] if unobserved else [])},
         "expected_loss": {"loss_state": loss_state, "chain": [
             {"from_state": state, "p_to_loss": by_state[state]} for state in states],
             "el_by_month": by_month, "total_el": by_month[-1]["expected_loss"],

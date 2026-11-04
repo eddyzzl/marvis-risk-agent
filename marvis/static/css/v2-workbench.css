@@ -23,8 +23,9 @@
   overflow-x: auto;
   max-width: 100%;
   scrollbar-gutter: stable;
-  border: 1px solid var(--border-color);
+  border: none;
   border-radius: var(--radius);
+  background: var(--card);
 }
 .agent-inline-table table {
   width: max-content;
@@ -43,7 +44,7 @@
   overflow-wrap: break-word;
   word-break: normal;
   vertical-align: top;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--sep);
 }
 .agent-inline-table th {
   white-space: nowrap;
@@ -63,7 +64,7 @@
   left: 0;
   z-index: 1;
   width: min(34%, 180px);
-  background: var(--surface);
+  background: var(--card);
 }
 .agent-inline-table thead th:first-child {
   z-index: 2;
@@ -138,7 +139,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 }
 
 /* Live model-tuning progress. The same renderer has a rail-sized readout and a
-   richer glass card for tool_progress messages in the chronological stream. */
+   richer flat content card for tool_progress messages in the chronological stream. */
 .model-tuning-progress {
   --model-tuning-progress-color: var(--accent);
   box-sizing: border-box;
@@ -168,9 +169,9 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   gap: 5px;
   margin-top: 4px;
   padding: 7px 8px;
-  border: 1px solid color-mix(in srgb, var(--model-tuning-progress-color) 18%, var(--border-color));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--model-tuning-progress-color) 5%, var(--surface-soft));
+  border: none;
+  border-radius: var(--radius-control);
+  background: var(--fill);
 }
 
 .model-tuning-progress__compact-head,
@@ -190,7 +191,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .model-tuning-progress__compact-head strong {
   min-width: 0;
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -199,7 +200,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .model-tuning-progress__compact-head span {
   flex: 0 0 auto;
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -207,7 +208,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   justify-content: space-between;
   gap: 6px;
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.25;
 }
 
@@ -251,14 +252,10 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   gap: 14px;
   margin-top: 10px;
   padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--model-tuning-progress-color) 24%, var(--border-color));
-  border-radius: 16px;
-  background:
-    radial-gradient(520px circle at 8% 0%, color-mix(in srgb, var(--model-tuning-progress-color) 12%, transparent), transparent 66%),
-    color-mix(in srgb, var(--surface) 82%, transparent);
-  box-shadow: 0 14px 38px color-mix(in srgb, var(--model-tuning-progress-color) 8%, transparent), var(--glass-edge, 0 1px 0 rgba(255, 255, 255, 0.4) inset);
-  backdrop-filter: blur(18px) saturate(128%);
-  -webkit-backdrop-filter: blur(18px) saturate(128%);
+  border: none;
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: none;
 }
 
 .model-tuning-progress__head {
@@ -277,7 +274,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .model-tuning-progress__metrics span,
 .model-tuning-progress__best-label {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.06em;
 }
@@ -299,7 +296,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   max-width: min(56%, 420px);
   overflow: hidden;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   display: -webkit-box;
@@ -319,9 +316,9 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   min-width: 0;
   gap: 4px;
   padding: 9px 10px;
-  border: 1px solid color-mix(in srgb, var(--border-color) 66%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
+  border: none;
+  border-radius: var(--radius-control);
+  background: var(--fill);
 }
 
 .model-tuning-progress__metrics strong {
@@ -350,7 +347,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .model-tuning-progress__test-ks {
   margin: -6px 0 0;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .model-tuning-progress__test-ks strong {
@@ -372,10 +369,10 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   max-width: 210px;
   gap: 7px;
   padding: 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--model-tuning-progress-color) 16%, var(--border-color));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--model-tuning-progress-color) 5%, var(--surface-soft));
-  font-size: 10px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: var(--fill);
+  font-size: 12px;
 }
 
 .model-tuning-progress__best-item span {
@@ -399,7 +396,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 }
 
 /* --- middle-workspace retry panel: the "编辑参数后重试" form(s) live here now,
-   with the same glass gate-card language as the other middle-region cards, and
+   with the same flat content-card language as the other middle-region cards, and
    room to breathe (no narrow-rail squeeze). --- */
 .plan-retry-panel {
   display: grid;
@@ -437,13 +434,10 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   width: 100%;
   max-width: 100%;
   padding: 14px 16px 16px 18px;
-  border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--border));
-  border-left: 3px solid var(--danger);
-  border-radius: var(--radius, 14px);
-  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
-  -webkit-backdrop-filter: blur(12px) saturate(1.4);
-  backdrop-filter: blur(12px) saturate(1.4);
-  box-shadow: var(--glass-edge);
+  border: none;
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: none;
 }
 body[data-theme="dark"] .plan-retry-card {
   background: color-mix(in srgb, var(--danger) 12%, var(--surface));
@@ -453,10 +447,7 @@ body[data-theme="dark"] .plan-retry-card {
 }
 @keyframes plan-retry-card-flash {
   0% {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 45%, transparent), var(--glass-edge);
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent, var(--glass-edge);
+    background-color: var(--option-selected);
   }
 }
 /* Open-state emphasis: when the user follows a rail locate entry into a middle
@@ -465,13 +456,13 @@ body[data-theme="dark"] .plan-retry-card {
    (Previously the .is-open class was toggled but had no CSS rule at all.) */
 .plan-retry-panel.is-open,
 .plan-driver-actions.is-open {
-  border-left: 3px solid var(--accent, var(--brand-primary));
+  border-left: 3px solid var(--border-strong);
   padding-left: 12px;
-  border-radius: var(--radius, 14px);
+  border-radius: var(--radius);
 }
 
 /* --- middle-workspace driver-actions panel: the 开始执行 / 下载报告 controls
-   live here now (moved out of the narrow rail), sharing the glass card language
+   live here now (moved out of the narrow rail), sharing the flat card language
    of the retry panel so all middle-region actions read as one family. --- */
 .plan-driver-actions {
   display: grid;
@@ -492,13 +483,10 @@ body[data-theme="dark"] .plan-retry-card {
   width: 100%;
   max-width: 100%;
   padding: 14px 16px 16px 18px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--brand-primary)) 24%, var(--border));
-  border-left: 3px solid var(--accent, var(--brand-primary));
-  border-radius: var(--radius, 14px);
-  background: color-mix(in srgb, var(--accent, var(--brand-primary)) 6%, var(--surface));
-  -webkit-backdrop-filter: blur(12px) saturate(1.4);
-  backdrop-filter: blur(12px) saturate(1.4);
-  box-shadow: var(--glass-edge);
+  border: none;
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: none;
 }
 body[data-theme="dark"] .plan-driver-action-card {
   background: color-mix(in srgb, var(--accent, var(--brand-primary)) 12%, var(--surface));
@@ -508,10 +496,7 @@ body[data-theme="dark"] .plan-driver-action-card {
 }
 @keyframes plan-driver-action-flash {
   0% {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--brand-primary)) 45%, transparent), var(--glass-edge);
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent, var(--glass-edge);
+    background-color: var(--option-selected);
   }
 }
 .plan-driver-action-head {
@@ -525,7 +510,7 @@ body[data-theme="dark"] .plan-driver-action-card {
   align-items: center;
   padding: 2px 9px;
   border-radius: var(--radius-pill);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--accent, var(--brand-primary));
@@ -552,9 +537,9 @@ body[data-theme="dark"] .plan-driver-action-card {
 }
 .strategy-artifacts-notice {
   padding: 8px 10px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--warning) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warning) 24%, transparent);
+  border: none;
 }
 .strategy-artifact-list {
   display: grid;
@@ -570,9 +555,9 @@ body[data-theme="dark"] .plan-driver-action-card {
   gap: 12px;
   min-width: 0;
   padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--fill);
 }
 .strategy-artifact-copy {
   display: grid;
@@ -587,7 +572,7 @@ body[data-theme="dark"] .plan-driver-action-card {
 .strategy-artifact-copy small,
 .strategy-artifact-unavailable {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .strategy-artifact-download {
   flex: 0 0 auto;
@@ -603,7 +588,7 @@ body[data-theme="dark"] .plan-driver-action-card {
   align-items: center;
   padding: 2px 9px;
   border-radius: var(--radius-pill);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--danger);
@@ -673,7 +658,7 @@ body[data-theme="dark"] .plan-driver-action-card {
   padding: 8px 10px;
   color: var(--warning-strong);
   background: var(--warning-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -714,8 +699,8 @@ body[data-theme="dark"] .plan-driver-action-card {
   gap: 10px;
   margin: 0 0 10px;
   padding: 9px 10px;
-  border: 1px solid var(--warning-border);
-  border-radius: 8px;
+  border: none;
+  border-radius: var(--radius-control);
   color: var(--warning-strong);
   background: var(--warning-soft);
   font-size: 12px;
@@ -760,8 +745,8 @@ body[data-theme="dark"] .plan-driver-action-card {
   width: 100%;
   font-size: 13px;
   padding: 7px 10px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-color);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
 }
@@ -782,11 +767,11 @@ body[data-theme="dark"] .plan-driver-action-card {
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 .algorithm-choice:hover {
-  border-color: var(--button-outline-border);
+  background: var(--option-hover);
 }
 .algorithm-choice:has(input:checked) {
-  border-color: var(--button-outline-border);
-  background: var(--surface-soft);
+  border-color: var(--option-selected-border);
+  background: var(--option-selected);
 }
 .algorithm-choice input {
   flex: 0 0 auto;
@@ -810,8 +795,8 @@ body[data-theme="dark"] .plan-driver-action-card {
   width: 100%;
   font-size: 13px;
   padding: 7px 10px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-color);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
 }
@@ -830,7 +815,7 @@ body[data-theme="dark"] .plan-driver-action-card {
 }
 .driver-analysis-section {
   padding: 18px 4px;
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--sep);
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-primary);
@@ -908,7 +893,7 @@ body[data-theme="dark"] .plan-driver-action-card {
 .c1-dataset-preview-body .dataset-preview {
   overflow: auto;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 .c1-dataset-preview-body .dataset-preview table {
@@ -1053,7 +1038,7 @@ body[data-theme="dark"] .plan-driver-action-card {
 }
 
 .adoption-reason-field span {
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .adoption-reason-field textarea {
@@ -1118,14 +1103,14 @@ body[data-theme="dark"] .plan-driver-action-card {
   border-radius: var(--radius-pill);
   color: var(--warning-strong);
   background: var(--warning-soft);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
 .strategy-clarification-missing {
   margin: 0;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   color: var(--warning-strong);
   background: var(--warning-soft);
   font-size: 12px;
@@ -1161,7 +1146,7 @@ body[data-theme="dark"] .plan-driver-action-card {
   color: var(--text-primary);
   background: var(--surface);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
 }
 
 .strategy-clarification-field input:disabled,
@@ -1177,7 +1162,7 @@ body[data-theme="dark"] .plan-driver-action-card {
   margin: 0;
   padding: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--surface-soft) 72%, transparent);
 }
 

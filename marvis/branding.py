@@ -13,7 +13,8 @@ DEFAULT_BRANDING: dict[str, Any] = {
     "browserTitle": "MARVIS-全能风控智能体",
     "primaryColor": "#303034",
     "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
-    "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+    # 2026-10-14 redesign batch 5 (D7): the home hero is the mascot illustration.
+    "workspaceLogoUrl": "static/brand/marvis-home-hero.png?v=20261016-hero",
     "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
     # Optional per-workspace map of real validator name -> display alias, used for
     # the agent's display name. Kept out of the public static JS so real names live
@@ -151,8 +152,8 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
         1,
     )
     html = html.replace(
-        'id="workspaceBrandLogo"\n              class="workspace-brand-logo"\n              src="static/brand/marvis-workspace-logo.png"',
-        f'id="workspaceBrandLogo"\n              class="workspace-brand-logo"\n              src="{workspace_logo_url}"',
+        'id="workspaceBrandLogo"\n                class="workspace-brand-logo"\n                src="static/brand/marvis-home-hero.png"',
+        f'id="workspaceBrandLogo"\n                class="workspace-brand-logo"\n                src="{workspace_logo_url}"',
         1,
     )
     for alt_placeholder in (
@@ -161,11 +162,28 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
     ):
         html = html.replace(alt_placeholder, f'alt="{platform_name} logo"')
     for name_placeholder in (
+        '<h1 id="platformName"><b>MARVIS</b><small>全能风控智能体</small></h1>',
         '<h1 id="platformName">MARVIS-全能风控智能体</h1>',
         '<h1 id="platformName">MARVIS-Agent</h1>',
     ):
-        html = html.replace(name_placeholder, f'<h1 id="platformName">{platform_name}</h1>', 1)
+        html = html.replace(
+            name_placeholder,
+            f'<h1 id="platformName">{_platform_name_html(current["platformName"])}</h1>',
+            1,
+        )
     return html
+
+
+def _platform_name_html(name: str) -> str:
+    """Same split as branding.js applyBranding, so the first paint already
+    shows the two-line mark: "MARVIS-全能风控智能体" -> <b>MARVIS</b><small>…</small>;
+    a name without a separator stays one line."""
+    match = re.match(r"^(.+?)\s*[-—–·]\s*(.+)$", name)
+    mark = match.group(1).strip() if match else ""
+    descriptor = match.group(2).strip() if match else ""
+    if mark and descriptor:
+        return f"<b>{escape(mark, quote=True)}</b><small>{escape(descriptor, quote=True)}</small>"
+    return escape(name, quote=True)
 
 
 def branding_config_path(workspace: str | Path) -> Path:

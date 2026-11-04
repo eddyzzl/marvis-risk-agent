@@ -1,0 +1,320 @@
+/* Conversation components (2026-10-14 redesign, batch 3a).
+   Reading width, quick-reply chips, file cards, the confirm card and the
+   "全部 / 只看结果" filter. Content stays flat; only the chips float over the
+   conversation, so only they use glass. */
+
+/* ---------- reading width: the thread and the composer share one column ---------- */
+
+.result-workspace {
+  --thread-max-width: 980px;
+  --thread-inline-inset: max(0px, calc((100% - var(--thread-max-width)) / 2));
+}
+
+.result-scroll-content {
+  padding-left: var(--thread-inline-inset);
+  padding-right: var(--thread-inline-inset);
+}
+
+/* Positioned with left/right (not padding) so the bar's corner masks stay on
+   the bar's own corners. */
+.agent-composer {
+  left: var(--thread-inline-inset);
+  right: var(--thread-inline-inset);
+}
+
+/* ---------- quick replies ---------- */
+
+.agent-quick-replies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 9px;
+}
+
+.agent-quick-replies[hidden] {
+  display: none;
+}
+
+.agent-quick-reply {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.agent-quick-reply:hover {
+  color: var(--accent);
+}
+
+.agent-quick-reply:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------- "全部 / 只看结果" ---------- */
+
+.task-thread-filter {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
+}
+
+.task-thread-filter[hidden] {
+  display: none;
+}
+
+.task-thread-filter button {
+  height: 24px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.task-thread-filter button[aria-checked="true"] {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+body[data-theme="dark"] .task-thread-filter button[aria-checked="true"] {
+  background: var(--fill-2);
+  box-shadow: none;
+}
+
+.task-thread-filter button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#resultWorkspace[data-thread-filter="results"] .agent-message:not([data-agent-result="true"]),
+#resultWorkspace[data-thread-filter="results"] .agent-timeline-heading {
+  display: none;
+}
+
+#resultWorkspace[data-thread-filter="results"] #resultScrollContent:not(:has([data-agent-result="true"]))::after {
+  content: "这项任务还没有结果，跑完的步骤产出表格、文件或报告后会出现在这里。";
+  display: block;
+  padding: 28px 0;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  text-align: center;
+}
+
+/* ---------- file cards: report, dataset and download rows ---------- */
+
+.result-dataset-download {
+  border: 0;
+  background: var(--card);
+}
+
+.result-dataset-download-copy {
+  position: relative;
+  padding-left: 30px;
+}
+
+.result-dataset-download-copy::before {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  background: var(--success);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5M9 13h6M9 17h4'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5M9 13h6M9 17h4'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* Downloads are a quiet action on the file, not the page's primary call. */
+.result-dataset-download .button.primary {
+  border-color: transparent;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.result-dataset-download .button.primary:hover:not(:disabled) {
+  background: var(--fill-2);
+}
+
+body[data-theme="dark"] .result-dataset-download .button.primary {
+  background: var(--fill-2);
+}
+
+.agent-reply-hint {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+.report-draft-superseded {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+/* ---------- confirm card (D11): one clear primary action, typing still works ---------- */
+
+.plan-driver-action-card {
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+body[data-theme="dark"] .plan-driver-action-card {
+  background: var(--card);
+}
+
+.plan-driver-action-pill {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.plan-driver-action-title {
+  font-size: var(--fs-base);
+}
+
+.plan-driver-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+}
+
+.plan-driver-action-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+/* ---------- activity list (D11): what the Agent is doing in this phase ---------- */
+
+.plan-activity-head {
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+
+.plan-activity-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan-activity-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 9px 0;
+}
+
+.plan-activity-row + .plan-activity-row {
+  border-top: 1px solid var(--sep);
+}
+
+.plan-activity-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plan-activity-title {
+  font-size: var(--fs-base);
+  font-weight: 500;
+}
+
+.plan-activity-detail {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-activity-row[data-activity-state="pending"] .plan-activity-title {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.plan-activity-mark {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  border: 1.5px solid var(--border-strong);
+}
+
+.plan-activity-row[data-activity-state="done"] .plan-activity-mark,
+.plan-activity-row[data-activity-state="skipped"] .plan-activity-mark {
+  border: 0;
+  background: var(--success);
+}
+
+.plan-activity-row[data-activity-state="skipped"] .plan-activity-mark {
+  background: var(--text-muted);
+}
+
+.plan-activity-row[data-activity-state="done"] .plan-activity-mark::after,
+.plan-activity-row[data-activity-state="skipped"] .plan-activity-mark::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 3px;
+  width: 4px;
+  height: 7px;
+  border: solid #fff;
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(45deg);
+}
+
+.plan-activity-row[data-activity-state="failed"] .plan-activity-mark {
+  border: 0;
+  background: var(--danger);
+}
+
+.plan-activity-row[data-activity-state="review"] .plan-activity-mark {
+  border-color: var(--warning);
+}
+
+.plan-activity-row[data-activity-state="stopped"] .plan-activity-mark {
+  border-color: var(--text-muted);
+  background: var(--fill);
+}
+
+.plan-activity-row[data-activity-state="running"] .plan-activity-mark {
+  border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: plan-activity-spin 0.9s linear infinite;
+}
+
+@keyframes plan-activity-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-activity-row[data-activity-state="running"] .plan-activity-mark {
+    animation: none;
+    border-color: var(--accent);
+  }
+}

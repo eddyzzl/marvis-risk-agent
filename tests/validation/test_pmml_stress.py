@@ -12,12 +12,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import marvis.validation.pmml_stress as stress_module
+import marvis.validation_services.pmml_stress as stress_module
 from marvis.job_cancellation import JobCancelled
 from marvis.validation.config import ValidationConfig
 from marvis.validation.input_contracts import TransformationSpec
-from marvis.validation.pmml_score_artifacts import run_pmml_scoring
-from marvis.validation.pmml_stress import (
+from marvis.validation_services.pmml_score_artifacts import run_pmml_scoring
+from marvis.validation_services.pmml_stress import (
     ScenarioScoreArtifact,
     load_aligned_scenario_scores,
     load_or_run_stress_scenario,

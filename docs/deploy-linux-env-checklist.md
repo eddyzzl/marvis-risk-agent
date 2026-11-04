@@ -146,7 +146,7 @@ python -m pip install -e .
 | numpy | `>=1.26,<3` |
 | pandas | `>=2.2,<4` |
 | scipy | `>=1.12,<2` |
-| scikit-learn | `>=1.4,<2` |
+| scikit-learn | `>=1.4,<1.9.1`（sklearn2pmml 0.131 内置的 JPMML 转换器不支持 1.9.1） |
 | statsmodels | `>=0.14,<1` |
 | joblib | `>=1.3,<2` |
 | pyarrow | `>=15,<25` |
@@ -394,6 +394,7 @@ marvis backup --workspace /data/marvis/workspace --out marvis-backup.tar.gz
 | `pip` 超时 / SSL 错 | PyPI 网络、代理、公司 CA |
 | `No matching distribution` / 编译失败 | Python 版本不对，或缺 `python3.12-dev` / `gcc` |
 | `pypmml` / JVM 相关报错 | 未装 JDK 17，或 `java` 不在 PATH |
+| PMML 导出报“PMML 导出环境不兼容……不支持已安装的 Scikit-Learn x.y.z” | 依赖漂移：环境里的 scikit-learn 超出 `pyproject.toml` / `uv.lock` 锁定范围（常见于批量 `pip install -U`）；在应用目录重新执行 `python -m pip install -e .`（或按 `uv.lock` 安装）把版本拉回锁定范围 |
 | `libgomp.so.1: cannot open` | 未装 `libgomp1` |
 | 导入 xgboost 拉 `nvidia-nccl-cu12` 失败 | PyPI 白名单未放行该包（不需要装 CUDA） |
 | 启动后同机别人能乱写任务 | 未设 `MARVIS_LOCAL_TOKEN` |

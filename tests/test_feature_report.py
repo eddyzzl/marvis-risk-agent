@@ -22,7 +22,7 @@ def test_render_feature_report_writes_metric_sheet(tmp_path):
     assert workbook.sheetnames == ["特征指标"]
     sheet = workbook["特征指标"]
     headers = [cell.value for cell in sheet[1]]
-    for header in ("特征", "Agent建议", "推荐原因", "IV", "KS", "AUC", "PSI", "PSI说明", "缺失率", "单一值率", "零值率"):
+    for header in ("特征", "Agent建议", "推荐原因", "IV", "KS", "AUC", "PSI", "PSI说明", "缺失率", "最常见值占比", "零值率"):
         assert header in headers
     assert sheet["A2"].value == "x1"
     assert sheet["A3"].value == "x2"

@@ -249,6 +249,23 @@ def test_pool_apply_rejects_noncurrent_ambiguous_or_ungrounded_commands(
     assert result.clarification_code == code
 
 
+def test_pool_apply_ungrounded_controls_are_named_in_business_terms() -> None:
+    prefix = _compile(
+        "把当前审批策略池应用到当前样本，输出前缀 safe_",
+        {"strategy_type": "approval", "output_prefix": "invented_"},
+    )
+    pool_type = _compile("把当前策略池应用到当前样本", {"strategy_type": "approval"})
+
+    # Raw control entries stay machine-readable; the prose uses business names.
+    assert prefix.clarification_fields == ("output_prefix invented_",)
+    assert "当前无法核对：输出前缀「invented_」。" in prefix.clarification
+    assert pool_type.clarification_fields == ("strategy_type approval",)
+    assert "当前无法核对：策略类型（审批策略）。" in pool_type.clarification
+    for result in (prefix, pool_type):
+        for internal in ("output_prefix", "strategy_type", "Strategy Pool", "ASCII", "LLM"):
+            assert internal not in result.clarification
+
+
 @pytest.mark.parametrize(
     "follow_up",
     [

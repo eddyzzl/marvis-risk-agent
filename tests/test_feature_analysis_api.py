@@ -98,8 +98,10 @@ def test_feature_analysis_end_to_end(client: TestClient, tmp_path: Path):
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "手动模式请点击「开始执行」" in overview["content"]
-    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
+    # Batch 3b (2026-10-14 redesign): plan overview copy is mode-neutral; the agent-only hint is structured.
+    assert "确认没问题就开始执行。" in overview["content"]
+    assert "请回复" not in overview["content"]
+    assert overview["metadata"]["reply_hint"] == "要先改哪一步，也可以直接说。"
     # 开始 → compute per-feature metrics → stop at the optional binning HITL gate.
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
@@ -144,7 +146,7 @@ def test_feature_analysis_end_to_end(client: TestClient, tmp_path: Path):
     bin_table = next(t for t in done["metadata"]["tables"] if t["title"] == "分箱分析")
     assert {row[0] for row in bin_table["rows"]} == {"sig1", "sig2"}
     assert all(isinstance(row[2], int) for row in bin_table["rows"])
-    for column in ("单一值率", "零值率", "缺失率"):
+    for column in ("最常见值占比", "零值率", "缺失率"):
         assert column in rendered_tables["数据质量"]["columns"]
     # VIF remains opt-in; the default metrics do not train a model.
     titles = {t["title"] for t in done["metadata"].get("tables", [])}
@@ -678,8 +680,10 @@ def test_feature_analysis_multiple_files_runs_join_then_feature_analysis(client:
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "手动模式请点击「开始执行」" in overview["content"]
-    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
+    # Batch 3b (2026-10-14 redesign): plan overview copy is mode-neutral; the agent-only hint is structured.
+    assert "确认没问题就开始执行。" in overview["content"]
+    assert "请回复" not in overview["content"]
+    assert overview["metadata"]["reply_hint"] == "要先改哪一步，也可以直接说。"
 
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert resp.status_code == 202, resp.text
@@ -821,3 +825,14 @@ def test_feature_analysis_without_target_reports_error(client: TestClient, tmp_p
     client.post(f"/api/tasks/{task_id}/agent/start", json={})
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     assert "目标列" in _last_assistant(msgs)["content"]
+
+
+def test_feature_advice_flags_suspected_leakage_like_the_modeling_screen():
+    # Eval S3: `score` (KS 0.46) was a 候选 here while modeling dropped it as
+    # suspected leakage.
+    from marvis.packs.feature.tools import _feature_recommendation
+
+    state, reason = _feature_recommendation({"valid_count": 480, "iv": 1.61, "ks": 0.46, "auc": 0.8})
+    assert state == "谨慎"
+    assert "疑似目标泄漏" in reason and "0.46" in reason
+    assert _feature_recommendation({"valid_count": 480, "iv": 0.3, "ks": 0.2, "auc": 0.65})[0] == "候选"

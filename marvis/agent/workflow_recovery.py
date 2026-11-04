@@ -610,14 +610,14 @@ def deterministic_workflow_recovery_reply(diagnostic: dict) -> str:
             [
                 "",
                 "这是平台可自动恢复的问题，无需修改或重新上传材料。"
-                "请回复“请帮我解决并重试”，我会使用当前材料重新执行。",
+                "点「请帮我解决并重试」，我会用当前材料重新执行。",
             ]
         )
     elif bool(diagnostic.get("retryable", True)):
         lines.extend(
             [
                 "",
-                "材料修正后，请明确回复“重新读取”或“重试”；其他消息只用于继续讨论，不会重新执行。",
+                "材料修正后点「重试」重新读取；其他消息只用于继续讨论，不会重新执行。",
             ]
         )
     else:

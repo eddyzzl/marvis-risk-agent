@@ -11,7 +11,7 @@ import math
 import numpy as np
 
 from .runtime_archive_reader import _Unsupported
-from .runtime_modeling_native_reference import _LinearUnpickler
+from .runtime_modeling_native_reference import _LinearUnpickler, validate_native_parameters
 
 PROFILES = {"xgb", "xgb_regressor", "xgb_multiclass", "lgb", "lgb_regressor", "lgb_multiclass"}
 
@@ -140,11 +140,12 @@ def read_tree_reference(path, algorithm, features):
     else:
         with path.open("rb") as stream:
             model = _LinearUnpickler(str(path), stream, ensure_native_byte_order=True).load()
-        import xgboost as xgb
         import lightgbm as lgb
+        import xgboost as xgb
         expected = xgb.XGBRegressor if algorithm == "xgb_regressor" else xgb.XGBClassifier if algorithm.startswith("xgb") else lgb.LGBMClassifier
         if type(model) is not expected or model.n_features_in_ != len(features):
             raise ValueError("native tree installed class mismatch")
+        validate_native_parameters(algorithm, model.get_params())
     envelope = tree_envelope(model, algorithm, features)
     return model, lambda frame: portable_prediction(envelope, frame)
 
@@ -169,7 +170,7 @@ def early_stop_membership(train, config):
         groups = np.arange(len(train))
     unique = np.unique(groups)
     np.random.RandomState(seed).shuffle(unique)
-    count = int(round(len(train) * .15))
+    count = round(len(train) * .15)
     valid, covered = set(), 0
     for group in unique:
         if covered >= count or len(valid) >= len(unique) - 1:
@@ -184,14 +185,16 @@ def early_stop_membership(train, config):
 
 
 def independent_tree_fit(model, frame, config, *, classes=(), frozen_params=None):
-    from sklearn.base import clone
     import lightgbm as lgb
+    from sklearn.base import clone
     features, target, algorithm = config["features"], config["target_col"], config["recipe_id"]
     train = frame
     valid = None
     if config["early_stopping_rounds"]:
         train, valid = early_stop_membership(frame, config)
     labels = train[target].to_numpy() if not classes else np.asarray([list(classes).index(v) for v in train[target]])
+    weight_col = config["params"].get("sample_weight_col")
+    weights = train[weight_col].to_numpy(dtype=float) if weight_col else None
     if algorithm in {"lgb_regressor", "lgb_multiclass"}:
         params = dict(frozen_params or {})
         # Text boosters do not retain constructor params. The caller must supply
@@ -199,23 +202,35 @@ def independent_tree_fit(model, frame, config, *, classes=(), frozen_params=None
         if not params:
             raise _Unsupported("native text-booster fit requires frozen parameter envelope")
         rounds = int(params.pop("num_boost_round"))
-        dtrain = lgb.Dataset(train[features], label=labels)
+        # The weight column is a platform input, never a learner parameter.
+        params.pop("sample_weight_col", None)
+        validate_native_parameters(algorithm, params)
+        dtrain = lgb.Dataset(train[features], label=labels, weight=weights)
         kwargs = {}
         if valid is not None:
             yvalid = valid[target].to_numpy() if not classes else np.asarray([list(classes).index(v) for v in valid[target]])
-            kwargs = {"valid_sets": [lgb.Dataset(valid[features], label=yvalid, reference=dtrain)],
+            kwargs = {"valid_sets": [lgb.Dataset(valid[features], label=yvalid,
+                                               weight=valid[weight_col].to_numpy(dtype=float) if weight_col else None,
+                                               reference=dtrain)],
                       "callbacks": [lgb.early_stopping(config["early_stopping_rounds"], verbose=False)]}
         rebuilt = lgb.train(params, dtrain, num_boost_round=rounds, **kwargs)
     else:
+        validate_native_parameters(algorithm, model.get_params())
         rebuilt = clone(model)
         kwargs = {}
+        if weights is not None:
+            kwargs["sample_weight"] = weights
         if valid is not None:
             yvalid = valid[target].to_numpy() if not classes else np.asarray([list(classes).index(v) for v in valid[target]])
             kwargs["eval_set"] = [(valid[features], yvalid)]
         if algorithm.startswith("xgb"):
             kwargs["verbose"] = False
+            if valid is not None and weight_col:
+                kwargs["sample_weight_eval_set"] = [valid[weight_col].to_numpy(dtype=float)]
         elif valid is not None:
             kwargs["callbacks"] = [lgb.early_stopping(config["early_stopping_rounds"], verbose=False)]
+            if weight_col:
+                kwargs["eval_sample_weight"] = [valid[weight_col].to_numpy(dtype=float)]
         rebuilt.fit(train[features], labels, **kwargs)
     original, replayed = tree_envelope(model, algorithm, features), tree_envelope(rebuilt, algorithm, features)
     if json.dumps(original, sort_keys=True, allow_nan=False) != json.dumps(replayed, sort_keys=True, allow_nan=False):

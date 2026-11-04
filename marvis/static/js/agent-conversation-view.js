@@ -143,6 +143,7 @@ export function agentMessagesHtml(messages = [], labelStage, deps = {}) {
   // than recomputed per bucket.
   const latestGateMessageId = deps.latestGateMessageId || "";
   const latestPendingReportDraftMessageId = deps.latestPendingReportDraftMessageId || "";
+  const latestReportDraftMessageId = deps.latestReportDraftMessageId || "";
   let previousAssistantLabel = "";
   return messages.map((message) => {
     const resolvedLabelStage = labelStage === undefined ? message?.stage : labelStage;
@@ -152,10 +153,16 @@ export function agentMessagesHtml(messages = [], labelStage, deps = {}) {
     const isLatestGate = Boolean(latestGateMessageId) && String(message?.id || "") === latestGateMessageId;
     const isLatestPendingReportDraft = Boolean(latestPendingReportDraftMessageId)
       && String(message?.id || "") === latestPendingReportDraftMessageId;
+    // Undefined (not false) when the caller did not resolve the latest draft,
+    // so renderers keep their single-draft behaviour.
+    const isLatestReportDraft = latestReportDraftMessageId
+      ? String(message?.id || "") === latestReportDraftMessageId
+      : undefined;
     return messageHtml(message, resolvedLabelStage, {
       hideMeta,
       isLatestGate,
       isLatestPendingReportDraft,
+      isLatestReportDraft,
     });
   }).join("");
 }

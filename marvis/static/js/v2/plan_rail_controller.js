@@ -4,6 +4,15 @@ import { createTaskRequestScope } from "../task-request-scope.js";
 import { escapeHtml } from "../ui-utils.js";
 import { safeSameOriginApiHref } from "../url-safety.js";
 import { skeletonRowsHtml } from "../skeleton.js";
+import {
+  planNeedsReconciliation,
+  planStepNeedsReconciliation,
+  planWorkflowStatus,
+  resolvePlanStepStatus,
+  rollupStatus,
+  statusPresentation,
+  workflowStatusSnapshot,
+} from "../task-status.js";
 import { listPluginTools, listStrategyArtifacts, listTaskArtifacts } from "./api_v2.js";
 import {
   confirmationSnapshotAttributes,
@@ -16,6 +25,8 @@ import {
   gateMessageForCurrentTool,
 } from "./driver_manual_analysis.js";
 import { renderModelTuningProgress } from "./model_tuning_progress.js";
+import { planActivityCardHtml } from "./plan_activity_card.js";
+import { getUiLocale, localizeHtml, localizeText } from "../i18n.js";
 
 // Wired driver task types drive the plan rail / analysis flow.
 export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio"]);
@@ -23,116 +34,15 @@ const PLAN_RETRY_REFRESH_MAX_ATTEMPTS = 300;
 const PLAN_RETRY_REFRESH_INTERVAL_MS = 1000;
 const PLAN_RECONCILIATION_MESSAGE = "执行结果尚未核对，已暂停重试。请先核对执行记录与实际产物，完成核对后再继续。";
 
-function planStepNeedsReconciliation(step) {
-  if ((step?.execution_halt === "paused" && step?.failure_envelope?.error_kind === "search_paused")
-    || (step?.execution_halt === "cancelled" && step?.failure_envelope?.error_kind === "search_cancelled")) return false;
-  return step?.status === "failed" && step?.failure_envelope?.retryable === false;
-}
-
-function planNeedsReconciliation(plan) {
-  return plan?.status === "failed" && plan?.failure_envelope?.retryable === false;
-}
-
 export function taskUsesPlanRail(task) {
   if (task?.blind_oot && task.blind_oot.viewer_role !== "develop") return false;
   return PLAN_RAIL_TASK_TYPES.has(task?.task_type);
 }
 
-export function workflowStatusSnapshot(workflowStatus) {
-  const status = String(workflowStatus || "");
-  if (status === "failed") {
-    return {
-      label: "失败", message: "计划执行失败。", kind: "error", tone: "danger",
-      detail: "请查看中间信息流中的诊断与恢复方案。",
-    };
-  }
-  if (status === "awaiting_confirm") {
-    return {
-      label: "待确认", message: "等待你的确认。", kind: "info", tone: "",
-      detail: "当前步骤：计划确认。",
-    };
-  }
-  if (["running", "confirmed"].includes(status)) {
-    return {
-      label: "执行中", message: "计划执行进行中。", kind: "busy", tone: "run",
-      detail: "当前步骤：执行计划。",
-    };
-  }
-  if (status === "validated") {
-    return { label: "待开始", message: "计划已生成。", kind: "info", tone: "", detail: "当前步骤：等待开始执行。" };
-  }
-  if (status === "done") {
-    return { label: "已完成", message: "计划执行完成。", kind: "success", tone: "success", detail: "所有计划步骤均已完成。" };
-  }
-  if (status === "review") {
-    return { label: "待复核", message: "计划执行完成，等待复核。", kind: "success", tone: "success", detail: "请在中间信息流中查看结果。" };
-  }
-  if (status === "cancelled") {
-    return { label: "已停止", message: "计划已停止。", kind: "stopped", tone: "", detail: "可在中间信息流中重新发起。" };
-  }
-  if (status === "draft") {
-    return { label: "规划中", message: "正在生成计划。", kind: "busy", tone: "run", detail: "当前步骤：生成执行计划。" };
-  }
-  return null;
-}
-
-export function planWorkflowStatus(plan) {
-  if (!plan) return null;
-  const steps = Array.isArray(plan.steps) ? plan.steps : [];
-  const findStep = (status) => steps.find((step) => String(step?.status || "") === status);
-  const status = String(plan.status || "");
-  const failedStep = findStep("failed");
-  const reconciliationStep = steps.find(planStepNeedsReconciliation);
-  if (planNeedsReconciliation(plan) || reconciliationStep) {
-    return {
-      ...workflowStatusSnapshot("failed"),
-      label: "待核对",
-      message: PLAN_RECONCILIATION_MESSAGE,
-      detail: planNeedsReconciliation(plan)
-        ? `计划完成结果待核对。${PLAN_RECONCILIATION_MESSAGE}`
-        : `待核对步骤：${reconciliationStep.title || "未命名步骤"}。${PLAN_RECONCILIATION_MESSAGE}`,
-    };
-  }
-  // A failed step is the authoritative execution state even if the plan-level
-  // status was moved to `awaiting_confirm` solely to ask whether it should be
-  // retried.  The recovery question remains in the middle conversation, but it
-  // must not turn the task header/sidebar back into a healthy confirmation
-  // gate while the failed step is still unresolved.
-  if (status === "failed" || failedStep) {
-    const halt = failedStep?.execution_halt;
-    if (halt === "paused" || halt === "cancelled") {
-      return {
-        label: halt === "paused" ? "已暂停" : "已取消", kind: "stopped", tone: "",
-        message: halt === "paused" ? "搜索已暂停，检查点已保存。" : "搜索已取消。",
-        detail: halt === "paused" ? "在策略工作台核对检查点后继续搜索。" : "在策略工作台明确发起新的搜索。",
-      };
-    }
-    return {
-      ...workflowStatusSnapshot("failed"),
-      detail: failedStep
-        ? `失败步骤：${failedStep.title || "未命名步骤"}。请在中间信息流中查看诊断与恢复方案。`
-        : "请查看中间信息流中的诊断与恢复方案。",
-    };
-  }
-  if (status === "awaiting_confirm") {
-    const step = findStep("awaiting_confirm");
-    return {
-      ...workflowStatusSnapshot(status),
-      detail: `当前步骤：${step?.title || "计划确认"}。`,
-    };
-  }
-  if (status === "running" && plan?.reconciliation?.continuation) {
-    return { label: "待继续", message: "已核对原执行结果，剩余步骤等待继续。", kind: "info", tone: "", detail: "继续后按原计划执行剩余步骤，审批要求保持有效。" };
-  }
-  if (["running", "confirmed"].includes(status)) {
-    const step = findStep("running") || findStep("checking") || findStep("pending");
-    return {
-      ...workflowStatusSnapshot(status),
-      detail: `当前步骤：${step?.title || "执行计划"}。`,
-    };
-  }
-  return workflowStatusSnapshot(status);
-}
+// D16 (2026-10-14 redesign, batch 4): the plan status words live in
+// js/task-status.js with every other surface; re-exported here so existing
+// imports of the plan rail keep resolving.
+export { planWorkflowStatus, workflowStatusSnapshot };
 
 // Short human subtitle per tool, mirroring the validation stepper's step hints.
 const PLAN_STEP_HINTS = {
@@ -148,35 +58,18 @@ const PLAN_STEP_HINTS = {
   "modeling.generate_model_reports": "生成各候选模型开发报告",
 };
 
-// Map a plan step's status to the validation stepper's status vocabulary so it
-// reuses stepCheckerHtml() (the checkmark / ring / etc.) and the .step CSS.
-export function planStepToCheckerStatus(status) {
-  switch (status) {
-    case "done":
-      return "succeeded";
-    case "skipped":
-      return "skipped";
-    case "running":
-    case "checking":
-      return "running";
-    case "failed":
-      return "failed";
-    case "awaiting_confirm":
-      return "review";
-    case "blocked":
-      return "stopped";
-    default:
-      return "pending";
-  }
+// Map a plan step to the validation stepper's status vocabulary so it reuses
+// stepCheckerHtml() (the checkmark / ring / etc.) and the .step CSS. The
+// checker comes from the shared resolver, so a native halt (paused/cancelled)
+// shows as stopped rather than failed. Accepts a step or a bare status.
+export function planStepToCheckerStatus(stepOrStatus) {
+  const step = stepOrStatus && typeof stepOrStatus === "object" ? stepOrStatus : { status: stepOrStatus };
+  return statusPresentation(resolvePlanStepStatus(step)).checker;
 }
 
+// A phase rolls its steps up with the same precedence as the task title.
 function planPhaseStatus(steps = []) {
-  const statuses = steps.map((step) => planStepToCheckerStatus(step?.status || "pending"));
-  if (statuses.includes("failed")) return "failed";
-  if (statuses.includes("review")) return "review";
-  if (statuses.includes("running")) return "running";
-  if (statuses.length && statuses.every((status) => ["succeeded", "skipped"].includes(status))) return "succeeded";
-  return "pending";
+  return statusPresentation(rollupStatus(steps.map(resolvePlanStepStatus))).checker;
 }
 
 function planStepDisplayPhase(step) {
@@ -186,8 +79,19 @@ function planStepDisplayPhase(step) {
   // below a later failed feature step. Treat it as feature preparation here;
   // new templates carry the corrected phase as well.
   if (String(step?.tool_ref?.tool || "") === "choose_modeling_spec") return "特征";
-  return String(step?.phase || "步骤");
+  if (step?.phase) return String(step.phase);
+  // Plans saved before their template named phases (eval S9: the whole
+  // portfolio rail read 「步骤」) get one from the step's tool.
+  const tool = String(step?.tool_ref?.tool || "");
+  const inferred = PHASE_BY_TOOL.find(([pattern]) => pattern.test(tool));
+  return inferred ? inferred[1] : "步骤";
 }
+
+const PHASE_BY_TOOL = [
+  [/report/i, "报告"],
+  [/flow_rate|bucket_migration|segment_profile|el_estimate|portfolio/i, "组合分析"],
+  [/vintage|vtg|profitability/i, "风险分析"],
+];
 
 export function planRailPhaseRows(plan) {
   const steps = Array.isArray(plan?.steps) ? [...plan.steps] : [];
@@ -524,6 +428,7 @@ export function createPlanRailController({
   const v2PlanViews = new Map();
   const v2PlanLastFetch = new Map();
   const v2PlanFetchErrors = new Map();
+  let planLocaleGeneration = 0;
   // LT-4: real tool input_schema, keyed by "plugin:tool", fetched lazily the
   // first time a failed step renders its retry control. Cached for the life
   // of the controller (schemas are static per pack) and merged into the
@@ -612,14 +517,15 @@ export function createPlanRailController({
   // Child steps contain only their checker, number and copy. All interactive
   // controls and status tags remain in the middle stream.
   function planSubstepHtml(step, subNumber) {
-    const checkerStatus = planStepToCheckerStatus(step?.status || "pending");
+    const checkerStatus = planStepToCheckerStatus(step);
     const ref = step.tool_ref || {};
     const description = step.description || step.summary || PLAN_STEP_HINTS[`${ref.plugin}.${ref.tool}`] || "";
     const tuningProgress = ["running", "checking"].includes(String(step?.status || ""))
       ? renderModelTuningProgress(step?.progress, { compact: true })
       : "";
     return [
-      `<div class="notebook-step ${escapeHtml(checkerStatus)}" data-step-key="${escapeHtml(String(step.id || ""))}" data-plan-step-id="${escapeHtml(String(step.id || ""))}">`,
+      // D17: finished, failed and waiting steps jump to their message.
+      `<div class="notebook-step ${escapeHtml(checkerStatus)}" data-step-key="${escapeHtml(String(step.id || ""))}" data-plan-step-id="${escapeHtml(String(step.id || ""))}"${["succeeded", "skipped", "failed", "review"].includes(checkerStatus) ? ` role="button" tabindex="0" title="跳到这一步的结果"` : ""}>`,
       renderStepChecker(checkerStatus),
       `<span class="notebook-step-no">${escapeHtml(subNumber)}</span>`,
       '<span class="plan-substep-copy">',
@@ -642,11 +548,17 @@ export function createPlanRailController({
   }
 
   function planPhaseHtml({ phase, steps, number, checkerStatus }) {
-    const titles = steps.map((step) => step?.title).filter(Boolean);
-    const hint = titles.length <= 3 ? titles.join("、") : `${titles.slice(0, 3).join("、")}等 ${titles.length} 个子任务`;
+    // D-10: titles are joined into one text node, so translate each before joining.
+    const titles = steps.map((step) => step?.title).filter(Boolean).map((title) => localizeText(title));
+    const separator = getUiLocale() === "en" ? ", " : "、";
+    const hint = titles.length <= 3
+      ? titles.join(separator)
+      : `${titles.slice(0, 3).join(separator)}等 ${titles.length} 个子任务`;
     return [
       `<div class="step plan-rail-step ${escapeHtml(checkerStatus)}" data-plan-phase-key="${escapeHtml(`${phase}:${steps[0]?.id || number}`)}">`,
       '<div class="step-head">',
+      // D6: a phase waiting on the user shows the mascot instead of the marker;
+      // substeps keep the shared review glyph.
       renderStepChecker(checkerStatus),
       `<span class="step-number">${number}</span>`,
       '<span class="step-copy">',
@@ -709,6 +621,7 @@ export function createPlanRailController({
   async function maybeFetchPlan(taskId = selectedTaskId()) {
     if (!taskId || taskId !== selectedTaskId()) return null;
     if (!requestOwner) requests.select(taskId);
+    const localeGeneration = planLocaleGeneration;
     const view = captureView();
     const last = v2PlanLastFetch.get(taskId);
     if (last && isCurrentView(last.view) && Date.now() - last.time < 900) {
@@ -718,7 +631,7 @@ export function createPlanRailController({
     const request = requests.begin("plan", { operation: "plan" });
     try {
       const data = await apiClient(`/api/tasks/${encodeURIComponent(taskId)}/plans`, { signal: request.signal });
-      if (!requests.accepts(request) || !isCurrentView(view)) return null;
+      if (localeGeneration !== planLocaleGeneration || !requests.accepts(request) || !isCurrentView(view)) return null;
       const plans = data?.plans || [];
       const next = plans.length ? plans[plans.length - 1] : null;
       const changed = v2PlanFetchErrors.has(taskId)
@@ -728,7 +641,7 @@ export function createPlanRailController({
       if (changed) renderAll?.();
       return next;
     } catch (error) {
-      if (requests.accepts(request) && isCurrentView(view)) {
+      if (localeGeneration === planLocaleGeneration && requests.accepts(request) && isCurrentView(view)) {
         v2PlanFetchErrors.set(taskId, error?.message || "network");
         renderWorkflowStepper?.({ force: true });
       }
@@ -767,6 +680,16 @@ export function createPlanRailController({
     // Any plan mutation supersedes in-flight reads, including a later visit
     // to the same task. A new GET may only publish after that mutation.
     if (invalidate) requests.advance("plan");
+  }
+
+  function invalidateLocale() {
+    // The API localizes plan labels. A response dispatched in the previous
+    // locale must not repopulate the cache after a language switch.
+    planLocaleGeneration += 1;
+    v2PlanCache.clear();
+    v2PlanViews.clear();
+    v2PlanLastFetch.clear();
+    v2PlanFetchErrors.clear();
   }
 
   async function retryPlanStep(button) {
@@ -939,7 +862,7 @@ export function createPlanRailController({
       const running = Boolean(selectedTask()?.active_job_kind);
       return running
         ? '<div class="plan-rail-empty" role="status">正在准备执行计划…</div>'
-        : '<div class="plan-rail-empty"><strong>尚未开始</strong><p>补充任务材料，在对话中说明目标后开始。需要 Agent 时，请先在设置中配置可用模型。</p></div>';
+        : `<div class="plan-rail-empty"><strong>${statusPresentation("not_started").label}</strong><p>补充任务材料，在对话中说明目标后开始。需要 Agent 时，请先在设置中配置可用模型。</p></div>`;
     }
     return planRailPhaseRows(plan).map((row) => planPhaseHtml(row)).join("");
   }
@@ -1292,6 +1215,9 @@ export function createPlanRailController({
   // no driver action to surface (the caller then hides the panel).
   function planDriverActionsHtml(plan, strategyArtifactState = null) {
     const cards = [];
+    // D11 activity list: what the Agent is doing right now, in the conversation.
+    const activityCard = planActivityCardHtml(plan);
+    if (activityCard) cards.push(activityCard);
     const agentMode = Boolean(isAgentMode?.());
     const activeJobKind = String(selectedTask()?.active_job_kind || "").trim();
     const localBusyAction = String(getTaskBusyAction?.() || "");
@@ -1333,7 +1259,10 @@ export function createPlanRailController({
         `<span class="plan-driver-action-pill">${gateActionable ? "需要人工授权" : "正在收尾"}</span>`,
         `<span class="plan-driver-action-title">${gateActionable ? "Agent 已理解你的意图；请复核并授权" : "上一步仍在收尾，完成后即可授权"}「${escapeHtml(agentGate?.title || "当前步骤")}」。</span>`,
         "</header>",
+        '<div class="plan-driver-action-row">',
         `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(planId)}" data-expected-step-id="${escapeHtml(stepId)}"${snapshotAttrs}${gateBusyAttrs}>${escapeHtml(gateConfirmLabel(toolName))}</button>`,
+        '<span class="plan-driver-action-hint">也可以直接在输入框里说要怎么改。</span>',
+        "</div>",
         "</section>",
       ].join(""));
     }
@@ -1360,7 +1289,10 @@ export function createPlanRailController({
         `<span class="plan-driver-action-pill">${agentMode ? "需要人工授权" : "开始执行"}</span>`,
         `<span class="plan-driver-action-title">${agentMode ? "Agent 已生成执行计划；请复核后授权开始。" : "计划已生成，确认后开始逐步执行。"}</span>`,
         "</header>",
+        '<div class="plan-driver-action-row">',
         `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(String(plan?.id || ""))}"${snapshotAttrs}${startBusyAttrs}>开始执行</button>`,
+        agentMode ? '<span class="plan-driver-action-hint">也可以直接说要先改哪一步。</span>' : "",
+        "</div>",
         "</section>",
       ].join(""));
     }
@@ -1435,6 +1367,7 @@ export function createPlanRailController({
       report: report && !conversationReport ? String(report.id || report.output_ref || "1") : "",
       conversationReport,
       strategy_artifacts: strategyArtifactState,
+      activity: planActivityCardHtml(plan),
     });
   }
 
@@ -1624,7 +1557,7 @@ export function createPlanRailController({
         const fresh = nodeFromHtml(html);
         const head = node.querySelector(":scope > .step-head");
         const freshHead = fresh?.querySelector(":scope > .step-head");
-        if (head && freshHead && head.innerHTML !== freshHead.innerHTML) {
+        if (head && freshHead && head.innerHTML !== localizeHtml(freshHead.innerHTML, { context: head })) {
           head.innerHTML = freshHead.innerHTML;
         }
       } else {
@@ -1771,6 +1704,7 @@ export function createPlanRailController({
     clearDriverActionsPanel,
     clearRetryPanel,
     handleClick,
+    invalidateLocale,
     maybeFetchPlan,
     nextStepAfter,
     planId,

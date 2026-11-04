@@ -12,6 +12,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.formatting import model_version_display as _model_version_display
 from marvis.formatting import period_text as _period_text
 from marvis.formatting import psi_reference_month_text as _psi_reference_month_text
 from marvis.formatting import ratio as _ratio
@@ -131,7 +132,7 @@ def _write_overview(workbook: Workbook, results: ValidationResults) -> None:
     sheet = workbook.create_sheet("验证总览")
     rows: list[tuple[object, object]] = [
         ("项目", "取值"),
-        ("模型", f"{results.model_name} {results.model_version}"),
+        ("模型", f"{results.model_name} {_model_version_display(results.model_version)}".strip()),
         ("算法", results.algorithm),
     ]
     if results.pmml_scoring is not None:

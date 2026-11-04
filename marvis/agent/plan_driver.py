@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 
 from marvis.agent.adjust_specs import (
+    FEATURE_BINNING_ADJUST_PARAMS,
     adjust_param_error,
     has_feature_binning_adjust,
     has_special_value_adjust,
@@ -34,9 +35,14 @@ from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_execution_adapter import (
     ACTION_OUTCOME_METADATA_KEY,
     ACTION_OUTCOME_REJECTED,
+    FEATURE_STABILITY_COMMAND,
     GateExecutionAdapter,
+    feature_metrics_without_stability,
+    feature_stability_gap_explanation,
+    requests_feature_stability,
 )
 from marvis.agent.gate_param_schema import gate_param_schema
+from marvis.agent.gate_payloads import split_adoption_note
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.gates.adapters import (
     GateReplyContext,
@@ -48,8 +54,11 @@ from marvis.agent.gates.adapters import (
     parse_rule_selection_instruction as _parse_rule_selection_instruction,
 )
 from marvis.agent.instruction_router import route_instruction
+from marvis.agent.plan_message_composer import DIRECTION_CONFLICT_INPUT
 from marvis.agent.plan_message_composer import PlanMessageComposer
-from marvis.agent.plan_utils import find_step
+from marvis.agent.plan_message_composer import has_pending_direction_conflict
+from marvis.agent.plan_utils import find_step, gate_depends_on_tool
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
 from marvis.agent.renderers import render_tool_output
 from marvis.agent.semantic_authorization import review_semantic_authorization
 from marvis.agent.semantic_diagnostics import diagnostic
@@ -285,6 +294,16 @@ def _is_adoption_gate(gate: PlanStep | None) -> bool:
     )
 
 
+def _is_modeling_setup_gate(plan: Plan, gate: PlanStep | None) -> bool:
+    """The feature-screen gate that renders the four-step modeling setup form."""
+    return bool(
+        gate is not None
+        and gate.tool_ref is not None
+        and gate.tool_ref.tool == "screen_features"
+        and gate_depends_on_tool(plan, gate, "choose_modeling_spec")
+    )
+
+
 class DriverError(Exception):
     pass
 
@@ -481,9 +500,16 @@ class PlanDriver:
         _expected_plan_status=None,
         _expected_plan_fingerprint=None,
         _trusted_ui_action=False,
+        _continue_after_adjust=False,
     ) -> DriverTurn:
         """Advance the plan given a user reply. Two gate kinds are handled: the
         plan-level overview gate (plan not yet started) and per-step gates.
+
+        ``_continue_after_adjust`` marks a rendered control whose one click both
+        adjusts and confirms the current gate (the modeling setup form's
+        「确认方案，开始执行」).  After the adjusted dependencies are recomputed
+        the same gate is confirmed once with that click, instead of rendering
+        the whole form again for a second confirmation.
 
         ``selection`` (optional): the user's edited feature set from the §4 interactive
         screening table. When confirming a gate that depends on a ``screen_features``
@@ -554,6 +580,18 @@ class PlanDriver:
             raise DriverError("语义授权复核期间计划快照已变化，请刷新后重试。")
         # Plan-level overview gate: nothing has run yet → 「开始」 begins execution.
         if plan.status == PlanStatus.VALIDATED:
+            if confirmed and has_pending_direction_conflict(plan):
+                # D-3: a direction the data contradicts is a business decision;
+                # only a person's start confirms it, never AUTO.
+                if confirmation_source == CONFIRMATION_SOURCE_AUTO:
+                    raise DriverError(
+                        "分数方向与样本数据相反，AUTO 不能代替人工确认，请由人工开始。"
+                    )
+                for step in plan.steps:
+                    if (step.inputs or {}).get(DIRECTION_CONFLICT_INPUT) is False:
+                        step.inputs = {**step.inputs, DIRECTION_CONFLICT_INPUT: True}
+                        self._repo.update_step(step)
+                plan = self._repo.load_plan(plan_id)
             if confirmed:
                 try:
                     self._repo.confirm_plan(
@@ -746,9 +784,24 @@ class PlanDriver:
                 raise DriverError(
                     "当前确认节点在调整前已变化，请刷新后重试。"
                 ) from exc
-            return _reject_failed_trusted_ui_action(
+            turn = _reject_failed_trusted_ui_action(
                 turn,
                 trusted_ui_action=_trusted_ui_action,
+            )
+            if _continue_after_adjust and _trusted_ui_action and confirmed:
+                return self._continue_past_setup_gate(
+                    turn,
+                    plan_before=plan,
+                    setup_gate_id=gate.id,
+                    run_seq=run_seq,
+                    reason="人工确认建模方案（含本次调整）",
+                )
+            return self._carry_forward_setup_confirmation(
+                turn,
+                plan_before=plan,
+                target_gate=gate,
+                run_seq=run_seq,
+                confirmation_source=confirmation_source,
             )
         if confirmed:
             if (
@@ -1202,6 +1255,16 @@ class PlanDriver:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
         agent mode classifies the instruction into confirm / adjust / replan / clarify
         and acts on it (spec §3 提指令→调整/重规划)."""
+        if (
+            gate is not None
+            and str(user_text or "").strip() == FEATURE_STABILITY_COMMAND
+            and confirmation_source == CONFIRMATION_SOURCE_HUMAN
+        ):
+            # The literal quick reply offered by the stability explanation:
+            # recompute only the metrics step with monthly PSI (no gate release).
+            stability = self._add_feature_stability(plan, gate, user_text, run_seq)
+            if stability is not None:
+                return stability
         if self._llm is None:
             return self._adjust_placeholder(plan.id, gate, run_seq)
         context = authorization_gate("current_step" if gate is not None else "execute_plan",
@@ -1404,6 +1467,35 @@ class PlanDriver:
                     )
                 ],
             )
+        if (
+            action in {"adjust", "replan"}
+            and gate is not None
+            and requests_feature_stability(user_text)
+            and not _GATE_QUESTION_RE.search(str(user_text or ""))
+        ):
+            # "把按 apply_month 的 PSI 加进特征分析，重新跑" is a metrics change
+            # on a finished step; an LLM replan of the remaining steps cannot
+            # express it, so apply the bounded metrics adjustment instead.
+            stability = self._add_feature_stability(plan, gate, user_text, run_seq)
+            if stability is not None:
+                return stability
+        if (
+            action == "adjust"
+            and gate is not None
+            and gate.tool_ref is not None
+            and gate.tool_ref.tool == "analyze_feature_bins"
+        ):
+            binning = self._binning_choice_turn(
+                plan,
+                gate,
+                user_text,
+                route,
+                run_seq,
+                context=context,
+                confirmation_source=confirmation_source,
+            )
+            if binning is not None:
+                return binning
         if action == "adjust" and gate is not None and gate.depends_on:
             if self._gate_execution.is_noop_adjustment(
                 plan,
@@ -1420,15 +1512,98 @@ class PlanDriver:
                             run_seq=run_seq,
                             text=(
                                 "我理解到的调整与当前参数一致，本次未执行也未放行。"
-                                "若接受当前设置，请点击当前确认控件或明确回复「确认」；"
-                                "如需调整，请说明不同的参数。"
+                                "接受当前设置就点确认；要调整的话，请说明不同的参数。"
                             ),
                         )
                     ],
                 )
-            return self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq)
+            return self._carry_forward_setup_confirmation(
+                self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq),
+                plan_before=plan,
+                target_gate=gate,
+                run_seq=run_seq,
+                confirmation_source=confirmation_source,
+            )
         if action == "replan":
             return self._gate_execution.apply_replan(plan, gate, user_text, run_seq)
+        return DriverTurn(
+            plan.id,
+            plan.status.value,
+            [self._unclear_gate_reply(plan, gate, user_text, route, run_seq)],
+        )
+
+    def _add_feature_stability(self, plan, gate, user_text, run_seq) -> DriverTurn | None:
+        try:
+            return self._gate_execution.add_feature_stability_metrics(
+                plan,
+                gate,
+                run_seq,
+                instruction=user_text,
+            )
+        except ConflictError as exc:
+            raise DriverError("当前确认节点在调整前已变化，请刷新后重试。") from exc
+
+    def _binning_choice_turn(
+        self,
+        plan,
+        gate,
+        user_text,
+        route,
+        run_seq,
+        *,
+        context,
+        confirmation_source,
+    ) -> DriverTurn | None:
+        """A features/bins "adjust" at the binning gate is a binning choice.
+
+        It selects which features to bin; it must never shrink the upstream
+        feature-metrics set.  It runs only after the independent reviewer
+        confirms an unconditional instruction, exactly like a typed confirm.
+        """
+
+        params = dict(route.get("params") or {})
+        features = [str(item) for item in params.get("features") or [] if str(item).strip()]
+        if not features or not set(params) <= FEATURE_BINNING_ADJUST_PARAMS:
+            return None
+        bins = params.get("bins", (gate.inputs or {}).get("bins", 10))
+        proposed = {"features": features, "bins": bins}
+        semantic_diagnostics = None
+        if confirmation_source == CONFIRMATION_SOURCE_HUMAN:
+            reviewed_plan_fingerprint = plan_fingerprint(plan)
+            review = review_semantic_authorization(
+                self._llm,
+                gate_context=context,
+                instruction=user_text,
+                proposed_params=proposed,
+            )
+            semantic_diagnostics = getattr(review, "diagnostics", None)
+            if review.authorized:
+                try:
+                    return self.resume(
+                        plan_id=plan.id,
+                        user_text="确认",
+                        run_seq=run_seq,
+                        adjust_params=proposed,
+                        expected_step_id=gate.id,
+                        confirmation_source=confirmation_source,
+                        _confirmation_reason=(
+                            f"语义授权原话：{str(user_text).strip()}；"
+                            f"独立复核逐字依据：{review.evidence_quote}"
+                        ),
+                        _expected_plan_revision=int(plan.replan_count),
+                        _expected_plan_status=plan.status.value,
+                        _expected_plan_fingerprint=reviewed_plan_fingerprint,
+                    )
+                except DriverError as exc:
+                    return DriverTurn(
+                        plan.id,
+                        plan.status.value,
+                        [
+                            self._composer.instruction_message(
+                                plan, gate, run_seq=run_seq, text=str(exc)
+                            )
+                        ],
+                    )
         return DriverTurn(
             plan.id,
             plan.status.value,
@@ -1437,10 +1612,49 @@ class PlanDriver:
                     plan,
                     gate,
                     run_seq=run_seq,
-                    text=route.get("reason") or "请明确指令:回复「确认」继续，或说明要调整的参数。",
+                    text=(
+                        f"我理解你想对 {'、'.join(features)} 做 {bins} 箱分箱后生成报告，"
+                        "但还不能把这句话当作对这一步的确认，因此没有执行；"
+                        "已算出的特征指标也没有改动。请在分箱卡片里勾选这些特征后点"
+                        "「分析所选特征并生成报告」。"
+                    ),
+                    semantic_diagnostics=semantic_diagnostics,
                 )
             ],
         )
+
+    def _unclear_gate_reply(self, plan, gate, user_text, route, run_seq) -> DriverMessage:
+        """Business reply when the router did not act; never its rationale."""
+
+        stability_step = (
+            feature_metrics_without_stability(plan, gate)
+            if requests_feature_stability(user_text)
+            else None
+        )
+        where = f"当前仍停在「{gate.title}」" if gate is not None else "计划还没有开始执行"
+        reason = str(route.get("reason") or "").strip()
+        if stability_step is None and reason in _PLATFORM_ROUTE_REASONS:
+            text = f"{reason}这次我没有执行任何操作，{where}。"
+        elif stability_step is not None:
+            text = (
+                feature_stability_gap_explanation(stability_step)
+                + f"这次我没有执行任何操作，{where}。"
+            )
+        else:
+            text = (
+                f"我没有执行任何操作，{where}。上方结果卡里是平台已经算出的结果；"
+                "确认没问题就点确认，要调整就直接说把什么改成什么。"
+            )
+        message = self._composer.instruction_message(plan, gate, run_seq=run_seq, text=text)
+        if reason:
+            message.metadata["route_reason"] = reason
+        if stability_step is not None:
+            message.metadata.update(
+                with_quick_replies(
+                    {}, quick_reply("补算按月 PSI", FEATURE_STABILITY_COMMAND)
+                )
+            )
+        return message
 
     def _experiment_selection_param_schema(
         self,
@@ -1895,6 +2109,119 @@ class PlanDriver:
         except (AuthorizationError, ConflictError, TypeError, ValueError) as exc:
             raise DriverError(str(exc)) from exc
 
+    def _continue_past_setup_gate(
+        self,
+        turn: DriverTurn,
+        *,
+        plan_before: Plan,
+        setup_gate_id: str,
+        run_seq,
+        reason: str,
+        note: str | None = None,
+    ) -> DriverTurn:
+        """Confirm a just re-opened modeling setup gate once and carry on.
+
+        An adjustment resets the setup gate together with the steps it
+        recomputes, so the executor pauses before it again.  When the human
+        decision behind that pause has already been made, rendering the whole
+        setup form a second time is a repeat, not a new decision.  Only the
+        expected setup gate is released, and only after the recomputation
+        reached it; failures or any other gate are returned unchanged.
+        """
+        plan = self._repo.load_plan(turn.plan_id)
+        reopened = self._awaiting_step(plan)
+        if (
+            plan.status != PlanStatus.AWAITING_CONFIRM
+            or reopened is None
+            or reopened.id != setup_gate_id
+            or not _is_modeling_setup_gate(plan, reopened)
+        ):
+            return turn
+        self._confirm_gate(plan, reopened, reason=reason)
+        continued = self._run_and_handle(plan.id, run_seq=run_seq)
+        kept = [
+            message
+            for message in turn.messages
+            if not (
+                message.stage == "gate"
+                and (message.metadata or {}).get("step_id") == setup_gate_id
+            )
+        ]
+        notes: list[DriverMessage] = []
+        if note:
+            notes.append(
+                DriverMessage(
+                    "chat",
+                    note,
+                    {"plan_id": plan.id, "step_id": reopened.id, "run_seq": run_seq},
+                )
+            )
+        for dep_id in reopened.depends_on or []:
+            dep = find_step(plan, dep_id)
+            previous = find_step(plan_before, dep_id)
+            if (
+                dep is None
+                or dep.tool_ref.tool != "make_split"
+                or (previous is not None and previous.output_ref == dep.output_ref)
+            ):
+                continue
+            split_note = split_adoption_note(self._safe_output(dep.id), dep)
+            if split_note:
+                notes.append(
+                    DriverMessage(
+                        "chat",
+                        split_note,
+                        {"plan_id": plan.id, "step_id": dep.id, "run_seq": run_seq},
+                    )
+                )
+        return DriverTurn(plan.id, continued.status, [*kept, *notes, *continued.messages])
+
+    def _carry_forward_setup_confirmation(
+        self,
+        turn: DriverTurn,
+        *,
+        plan_before: Plan,
+        target_gate: PlanStep,
+        run_seq,
+        confirmation_source: str,
+    ) -> DriverTurn:
+        """Keep an already-confirmed modeling setup when a later adjustment
+        re-runs the screen step (e.g. new leakage thresholds at the feature
+        gate) without changing the split or modeling spec it was confirmed on.
+        """
+        if confirmation_source != CONFIRMATION_SOURCE_HUMAN:
+            return turn
+        plan = self._repo.load_plan(turn.plan_id)
+        reopened = self._awaiting_step(plan)
+        if (
+            plan.status != PlanStatus.AWAITING_CONFIRM
+            or reopened is None
+            or reopened.id == target_gate.id
+            or not _is_modeling_setup_gate(plan, reopened)
+        ):
+            return turn
+        previous = find_step(plan_before, reopened.id)
+        if previous is None or previous.status != StepStatus.DONE:
+            return turn
+        for dep_id in reopened.depends_on or []:
+            dep = find_step(plan, dep_id)
+            dep_before = find_step(plan_before, dep_id)
+            if (
+                dep is None
+                or dep_before is None
+                or dep_before.status != StepStatus.DONE
+                or dep.output_ref != dep_before.output_ref
+            ):
+                return turn
+        return self._continue_past_setup_gate(
+            turn,
+            plan_before=plan_before,
+            setup_gate_id=reopened.id,
+            run_seq=run_seq,
+            reason="沿用已确认的建模方案（本次调整未改变样本切分与建模规格）",
+            note="样本切分和建模规格没有变化，沿用你之前确认的建模方案，不再重复确认。",
+        )
+
     def _requires_governed_human_decision(self, gate: PlanStep) -> bool:
         policy = getattr(gate, "policy", None)
         if getattr(policy, "human_decision_gate", "none") == "required":
@@ -1912,6 +2239,21 @@ class PlanDriver:
         if callable(latest_error_kind):
             return latest_error_kind(step_id)
         return None
+_GATE_QUESTION_RE = re.compile(r"[?？]|为什么|为何|是否|要不要|吗")
+# Router fallbacks written by the platform itself (instruction_router.py);
+# unlike a model's free-text rationale they tell the user what to do next.
+_PLATFORM_ROUTE_REASONS = frozenset(
+    {
+        "此指令包含尚未批准出站的自由文本，请使用节点的结构化控件。",
+        "当前节点不支持调整分区列；请先在任务配置中绑定正确分区列。",
+        "识别到多个样本权重候选，请明确选择一列或说明不使用权重。",
+        "未识别到明确的样本权重列，请指定一列或说明不使用权重。",
+        "当前没有可供选择的候选实验。",
+        "候选实验或采用授权不明确，请从当前候选中明确选择。",
+    }
+)
+
+
 def _ancestor_step_ids(plan: Plan, step_id: str) -> set[str]:
     by_id = {step.id: step for step in plan.steps}
     result: set[str] = set()

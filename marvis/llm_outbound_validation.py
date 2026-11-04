@@ -1,10 +1,14 @@
 """Measured validation evidence for external narrative generation.
 
 Each adapter follows a validation producer's result shape. Report text,
-individual score comparisons, fitted model parameters, category values and
-errors are deliberately absent. The original local result is never changed.
+individual score comparisons, fitted model parameters, feature-level category
+values and errors are deliberately absent. A stress-test group keeps only a
+short letters-only data-source label (e.g. 行为/负债); anything longer or
+carrying digits stays an index. The original local result is never changed.
 """
 from __future__ import annotations
+
+import re
 
 from marvis.llm_outbound import OutboundContextError, _DROP, _identifier, _mint_prompt
 from marvis.llm_outbound_reports import _feature, _labels, _numeric, _period, _rows
@@ -15,6 +19,22 @@ _PERFORMANCE = (*_COUNTS, "ks", "auc", "psi_vs_train", "head_lift_5pct", "tail_l
 _STRENGTH = {"unknown", "fail", "weak", "ok", "strong"}
 _STRESS_STATUS = {"completed", "skipped", "error", "failed", "partial"}
 _CHECK_STATUS = {"pass", "fail", "not_available"}
+# A coarse data-source label from the dictionary's category column: letters
+# only, no digits/identifiers/paths, so record-level literals never pass.
+_CATEGORY_LABEL = re.compile(r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z·/&\- ]{0,15}")
+BUSINESS_STAGE_LABELS = {
+    "t": "支用环节（T卡）",
+    "a": "授信环节（A卡）",
+    "b": "贷中环节（B卡/行为评分卡）",
+}
+_CATEGORY_INSTRUCTION = (
+    "压力测试类别有 category_name 时用该名称引用（如「行为」类），没有时用序号引用，"
+    "不猜测未提供的数据源名称，也不要评论类别名称是否披露；缺失分层明确未知。"
+)
+_STAGE_INSTRUCTION = (
+    "业务环节只依据 business_context.stage；未提供 business_context 时不得断言模型所处的授信、"
+    "支用、贷中等业务环节或申请阶段。"
+)
 
 
 def _mapping(value):
@@ -163,6 +183,9 @@ def _stress(value):
         for index, item in enumerate(_rows(row["per_category"]), start=1):
             clean = {"category_index": index, **_numeric(item, ("ks_after", "ks_delta", "psi_vs_baseline")),
                      **_labels(item, {"status": _STRESS_STATUS})}
+            name = item.get("category")
+            if isinstance(name, str) and _CATEGORY_LABEL.fullmatch(name.strip()):
+                clean["category_name"] = name.strip()
             dropped = item.get("dropped_features")
             if isinstance(dropped, list):
                 clean["dropped_feature_count"] = len(dropped)
@@ -198,7 +221,7 @@ def validation_metrics_prompt(value):
         "Explain only these measured validation aggregates. Missing evidence is unknown. "
         "The platform owns metrics and pass/fail results. Preserve sample splits, temporal gaps, "
         "and the distinction between train-aligned and independently binned assessments. "
-        "Category indexes identify groups only within this result; do not invent category names. "
+        "Refer to stress groups by category_name when present, else by index; do not invent category names. "
         "Individual scores, model bodies, historical comparisons and local report text are withheld."
     )})
 
@@ -219,7 +242,7 @@ def validation_metrics_summary_prompt(evidence, *, missing_sections=None, histor
             "称呼当前模型，不猜测未提供的模型名称、客户或机构名称。",
         ) + (
             "本次指标只使用平台计算的聚合证据，未提供已有报告文字或逐行评分。"
-            "历史比较仅依据明确提供的 historical_models；压力测试类别用本次序号引用，不猜测数据源名称。"
+            "历史比较仅依据明确提供的 historical_models。" + _CATEGORY_INSTRUCTION +
             "缺失指标和风险分层明确未知；保留时间断档及按 train 分箱与独立分箱的区别。"
         ),
     }
@@ -380,7 +403,7 @@ def validation_v1_report_prompt(evidence, *, history=None):
             "本次为首次候选文字生成，只返回指定的四项候选文字，不改写其他业务定义字段。"
             "未提供阶段总结或已有报告文字；历史比较仅依据明确提供的 historical_models。"
             "未提供报告产物状态，不能声称 Word/Excel 已生成、可预览或可下载。"
-            "压力类别用本次序号引用，不猜测数据源名称；未知风险分层明确未知。"
+            + _CATEGORY_INSTRUCTION +
             "分箱排序性须分别解释按 train 分箱和独立分箱的幅度、单调性、头尾区分。"
             "scan_interpretation 中缺少或未满足的检查不等同于文件一定缺失。"
             "一致性 summary.status 是平台结论，缺失提交分数仍可导致失败；不能因 max_abs_diff 为零写成通过。"
@@ -390,15 +413,17 @@ def validation_v1_report_prompt(evidence, *, history=None):
     return _mint_prompt(add_model_history(clean, history))
 
 
-def validation_metric_section_prompt(value, *, topic, repair_reason=None, history=None):
-    return _validation_section_prompt(value, topic=topic, kind="metrics", repair_reason=repair_reason, history=history)
+def validation_metric_section_prompt(value, *, topic, repair_reason=None, history=None, business_stage=None):
+    return _validation_section_prompt(value, topic=topic, kind="metrics", repair_reason=repair_reason,
+                                      history=history, business_stage=business_stage)
 
 
-def validation_report_section_prompt(value, *, topic, repair_reason=None, history=None):
-    return _validation_section_prompt(value, topic=topic, kind="report", repair_reason=repair_reason, history=history)
+def validation_report_section_prompt(value, *, topic, repair_reason=None, history=None, business_stage=None):
+    return _validation_section_prompt(value, topic=topic, kind="report", repair_reason=repair_reason,
+                                      history=history, business_stage=business_stage)
 
 
-def _validation_section_prompt(value, *, topic, kind, repair_reason, history=None):
+def _validation_section_prompt(value, *, topic, kind, repair_reason, history=None, business_stage=None):
     from marvis.agent.validation_narrative import _REPORT_SECTIONS, _TOPICS
     from marvis.llm_outbound_memory import add_model_history
 
@@ -418,10 +443,12 @@ def _validation_section_prompt(value, *, topic, kind, repair_reason, history=Non
             "指标与通过判断以本次平台证据为准，缺失值明确未知，不推算未测指标。"
             "保留时间断档和按 train 分箱/独立分箱的区别。"
             "未提供本地报告文字；只有 overall 主题可依据明确提供的 historical_models 作克制历史对照。"
-            "压力测试类别仅用本次序号引用，不猜测被隐藏的数据源名称；缺失分层明确未知。"
+            + _CATEGORY_INSTRUCTION + _STAGE_INSTRUCTION
             + _TOPICS[topic]
         ),
     }
+    if business_stage in BUSINESS_STAGE_LABELS:
+        clean["business_context"] = {"stage": BUSINESS_STAGE_LABELS[business_stage]}
     if repair_reason is not None:
         if repair_reason not in {"json_text_contract", "forbidden_process_narration"}:
             raise OutboundContextError("未知响应修复原因，未发送请求。")

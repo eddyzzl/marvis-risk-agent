@@ -1,5 +1,6 @@
 import { apiGet } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
+import { localizeText } from "../i18n.js";
 import { previewDataset as previewDatasetApi } from "./api_v2.js";
 
 function closest(target, selector) {
@@ -213,7 +214,7 @@ export async function renderArtifact(container, artifactRef, deps = {}) {
 
 function defaultShowError(message) {
   if (typeof alert === "function") {
-    alert(message);
+    alert(localizeText(message));
     return;
   }
   console.error(message);

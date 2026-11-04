@@ -10,16 +10,17 @@ import shutil
 import time
 import uuid
 
-import numpy as np
 import pyarrow.parquet as pq
 
 from marvis.data.authenticated_snapshot import authenticated_file_snapshot
 from marvis.db_schema import connect as ordinary_connect
-from marvis.modeling_holdout.contracts import HoldoutError
+from marvis.modeling_holdout.contracts import FACT_FIELDS, HoldoutError
 from marvis.modeling_holdout.guards import PRIVATE_DIRECTORY, cohort_tx, admission_identity, _members_reserved
 from marvis.modeling_holdout.identity import (
     MAX_SEALED_BYTES, MAX_DECODED_BYTES, MAX_SEALED_ROWS, MAX_SEALED_COLUMNS,
 )
+from marvis.modeling_holdout import sealed_worker
+from marvis import time_facts
 
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.producer_receipts import canonical, load_receipt, verify_files
@@ -138,8 +139,44 @@ class HoldoutService:
                 raise HoldoutError('prior_exposure_provenance_unknown') from exc
         return False
 
+    def _record_fact(self, conn, **values):
+        try:
+            return time_facts.record_fact_on_connection(conn, **values)
+        except time_facts.TimeFactError as exc:
+            raise HoldoutError(exc.code, exc.status) from exc
+
+    @staticmethod
+    def _blind_facts(conn, row, cutoff):
+        # Only the bound custodian (label time) and developer (task facts)
+        # can establish blind facts; any other record counts as absent.
+        return time_facts.facts_for(conn, (('blind_cohort', row['id']), ('task', row['task_id'])), cutoff=cutoff,
+                                    trust={'blind_cohort': ('holdout_custody', row['custodian_id']),
+                                           'task': ('holdout_development', row['developer_id'])})
+
+    def _time_contract(self, conn, row, *, cutoff=None, reference=None):
+        facts = self._blind_facts(conn, row, cutoff)
+        gated = time_facts.gate_conclusions(facts, time.time() if reference is None else reference)
+        return {'facts': facts, **gated}
+
+    def record_development_facts(self, task, actor, values):
+        """Developer's data-intake record of task facts; omitted facts stay unknown."""
+        values = {fact: value for fact, value in values.items() if value not in (None, '')}
+        with connect(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = self._cohort(conn, task, actor, 'develop')
+            for fact, value in values.items():
+                self._record_fact(conn, task_id=task, subject_kind='task', subject_id=task, fact=fact,
+                                  value=value, source='holdout_development', actor=actor)
+            return self._time_contract(conn, row)
+
     def intake(self, task, payload, stream, actor):
-        contract = canonical(payload.model_dump())
+        # Time facts are recorded separately; the cohort contract stays immutable.
+        contract = canonical(payload.model_dump(exclude=FACT_FIELDS))
+        if payload.label_available_at is not None:
+            try:
+                time_facts.normalize_value(time_facts.LABEL_AVAILABLE_AT, payload.label_available_at)
+            except time_facts.TimeFactError as exc:
+                raise HoldoutError(exc.code, exc.status) from exc
         with connect(self.db_path) as conn:
             conn.execute('BEGIN IMMEDIATE')
             self._actor(conn, actor, {'admin'})
@@ -155,8 +192,8 @@ class HoldoutService:
             existing = cohort_tx(conn, task)
             if existing is None:
                 if record['status'] != 'created' or any(conn.execute(
-                    f'SELECT 1 FROM {table} WHERE task_id=? LIMIT 1', (task,),  # nosec B608 -- table is from the inline fixed five-table tuple; task id is bound
-                ).fetchone() for table in ('datasets', 'experiments', 'plans', 'jobs', 'draft_tools')):
+                    f'SELECT 1 FROM {table} WHERE task_id=? LIMIT 1', (task,),  # nosec B608 -- table is from the inline fixed six-table tuple; task id is bound
+                ).fetchone() for table in ('datasets', 'experiments', 'plans', 'jobs', 'draft_tools', 'time_facts')):
                     raise HoldoutError('blind_intake_must_precede_development', 409)
             incoming = self._path('incoming', uuid.uuid4().hex)
             incoming.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -176,6 +213,7 @@ class HoldoutService:
                 if existing:
                     if (existing['contract'], existing['custodian_id'], existing['sealed_hash']) != (contract, actor, sealed_hash):
                         raise HoldoutError('holdout_identity_immutable')
+                    self._record_label_time(conn, existing, payload, actor)
                     return self._summary(conn, existing)
                 if self._was_exposed(conn, sealed_hash):
                     raise HoldoutError('already_exposed_source_cannot_be_blind')
@@ -219,17 +257,28 @@ class HoldoutService:
                     (cohort_id, task, payload.data_identity, sealed_hash, logical_hash, json.dumps(identity_columns, separators=(',', ':')), contract,
                      actor, payload.developer_id, payload.evaluator_id, time.time()))
                 conn.executemany('INSERT INTO blind_oot_row_members VALUES(?,?)', ((member, cohort_id) for member in members))
-                return self._summary(conn, cohort_tx(conn, task))
+                created = cohort_tx(conn, task)
+                self._record_label_time(conn, created, payload, actor)
+                return self._summary(conn, created)
             finally:
                 incoming.unlink(missing_ok=True)
+
+    def _record_label_time(self, conn, row, payload, actor):
+        if payload.label_available_at is not None:
+            self._record_fact(conn, task_id=row['task_id'], subject_kind='blind_cohort', subject_id=row['id'],
+                              fact=time_facts.LABEL_AVAILABLE_AT, value=payload.label_available_at,
+                              source='holdout_custody', actor=actor)
 
     def _summary(self, conn, row):
         frozen = conn.execute('SELECT freeze_hash,payload FROM blind_oot_freezes WHERE cohort_id=?', (row['id'],)).fetchone()
         evaluation = conn.execute('SELECT state,read_started_at FROM blind_oot_evaluations WHERE cohort_id=?', (row['id'],)).fetchone()
+        read_at = evaluation['read_started_at'] if evaluation else None
+        contract = self._time_contract(conn, row, cutoff=read_at, reference=read_at)
         return {'cohort_id': row['id'], 'task_id': row['task_id'],
                 'mode': 'governed_blind_oot', 'state': evaluation['state'] if evaluation else ('frozen' if frozen else 'sealed'),
                 'freeze_hash': frozen['freeze_hash'] if frozen else None,
-                'historical_availability': 'unknown', 'label_maturity': 'unknown',
+                'historical_availability': 'unknown', 'label_maturity': contract['label_maturity'],
+                'time_contract': contract,
                 'host_user_filesystem_isolated': False,
                 'model_evidence': ({'algorithm': json.loads(frozen['payload'])['artifact']['algorithm'],
                     'feature_count': len(json.loads(frozen['payload'])['artifact']['feature_list']),
@@ -352,7 +401,7 @@ class HoldoutService:
             body, result_hash = self._result(row, evaluation['freeze_hash'])
             if result_hash != evaluation['result_hash']:
                 raise HoldoutError('holdout_result_integrity_failed')
-            return body
+            return with_conclusions(body)
 
     def recover(self, task, payload, actor):
         with connect(self.db_path) as conn:
@@ -386,7 +435,7 @@ class HoldoutService:
                 body, result_hash = self._result(cohort, frozen['freeze_hash'])
                 if result_hash != old['result_hash']:
                     raise HoldoutError('holdout_result_integrity_failed')
-                return body
+                return with_conclusions(body)
             if old:
                 if not payload.recovery_id:
                     raise HoldoutError('holdout_evaluation_busy_or_recovery_required')
@@ -401,7 +450,7 @@ class HoldoutService:
                     body, result_hash = self._result(cohort, frozen['freeze_hash'])
                     conn.execute("UPDATE blind_oot_evaluations SET state='committed',result_hash=?,error_code=NULL WHERE cohort_id=?",
                                  (result_hash, cohort['id']))
-                    return body
+                    return with_conclusions(body)
                 if old['read_started_at'] is not None:
                     raise HoldoutError('holdout_cannot_repeat_sample_read')
                 conn.execute("UPDATE blind_oot_evaluations SET state='prepared',owner_token=?,error_code=NULL WHERE cohort_id=?",
@@ -431,21 +480,43 @@ class HoldoutService:
                     model_data[name] = tuple(model_data[name])
                 artifact = ModelArtifact(**model_data)
                 scorer = _ModelArtifactScorer(artifact, base_dir=runtime_dir, replay_preprocessing=True)
-                self._mark_read_started(cohort, frozen['freeze_hash'], owner, actor)
-                result = self._score_sealed(cohort, closure, scorer)
+                # Probe the isolation backend before the budget is consumed;
+                # the probe touches no sealed data.
+                self._sealed_read_boundary = sealed_worker.available_boundary()
+                self._sealed_session = None
+                if self._sealed_read_boundary == sealed_worker.ISOLATED_WORKER:
+                    # Start the worker and load the model before the budget is
+                    # spent; a failure here leaves read_started_at unset.
+                    self._sealed_session = sealed_worker.IsolatedSession(
+                        self._path('sealed', cohort['sealed_hash'], 'original.parquet'), cohort['sealed_hash'],
+                        runtime_dir, closure['artifact'], json.loads(cohort['contract']))
+                try:
+                    self._mark_read_started(cohort, frozen['freeze_hash'], owner, actor)
+                    result = self._score_sealed(cohort, closure, scorer)
+                finally:
+                    if self._sealed_session is not None:
+                        self._sealed_session.close()
             finally:
                 for path in runtime_dir.rglob('*'):
                     if path.is_file():
                         path.chmod(0o600)
                 shutil.rmtree(runtime_dir)
+            with connect(self.db_path) as conn:
+                read_at = conn.execute('SELECT read_started_at FROM blind_oot_evaluations WHERE cohort_id=?',
+                                       (cohort['id'],)).fetchone()['read_started_at']
+                # Only facts recorded before sealed rows were read can support a conclusion.
+                facts = self._blind_facts(conn, cohort, read_at)
             body = {'schema_version': 'marvis.blind_oot.result.v1', 'cohort_id': cohort['id'],
                     'task_id': task, 'freeze_hash': frozen['freeze_hash'], 'sealed_hash': cohort['sealed_hash'],
-                    'metrics': result, 'historical_availability': 'unknown', 'label_maturity': 'unknown',
+                    'metrics': result, 'historical_availability': 'unknown',
+                    'label_maturity': time_facts.label_maturity(facts, read_at),
+                    'time_facts': facts, 'read_started_at': read_at,
+                    'sealed_read_boundary': getattr(self, '_sealed_read_boundary', sealed_worker.API_PROCESS),
                     'external_authority': 'custodian_declared_not_independently_verified'}
             encoded = canonical({'body': body, 'signature': self._signature(body)}).encode()
             self._publish(self._path('results', cohort['id'] + '.json'), encoded)
             self._commit_result(cohort['id'], owner, digest(encoded))
-            return body
+            return with_conclusions(body)
         except Exception as exc:
             with connect(self.db_path) as conn:
                 conn.execute("UPDATE blind_oot_evaluations SET state='uncertain',error_code='evaluation_failed' WHERE cohort_id=? AND owner_token=? AND state!='committed'",
@@ -477,25 +548,19 @@ class HoldoutService:
     def _score_sealed(self, cohort, closure, scorer):
         contract = json.loads(cohort['contract'])
         path = self._path('sealed', cohort['sealed_hash'], 'original.parquet')
+        session = getattr(self, '_sealed_session', None)
+        if session is not None:
+            # Sealed rows are decoded only inside the OS-isolated worker.
+            return session.score()
+        # No isolation backend on this host: the documented boundary is that
+        # the API process reads the sealed file itself.
         with authenticated_file_snapshot(path, root=self.private, expected_sha256=cohort['sealed_hash']) as snapshot:
             frame = pq.read_table(snapshot).to_pandas()
-        target = frame[contract['target_col']].to_numpy()
-        if len(target) < 2 or frame[contract['target_col']].isna().any():
-            raise HoldoutError('holdout_labels_invalid')
-        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, log_loss, roc_auc_score
-        target_type = contract['target_type']
-        if target_type == 'multiclass':
-            classes = closure['artifact']['params'].get('classes')
-            probabilities = scorer.predict_proba(frame)
-            return {'rows': len(frame), 'logloss': float(log_loss(target, probabilities, labels=classes)),
-                    'macro_auc': float(roc_auc_score(target, probabilities, multi_class='ovr', average='macro', labels=classes))}
-        scores = np.asarray(scorer.score(frame), dtype=float)
-        if not np.isfinite(scores).all():
-            raise HoldoutError('holdout_scores_invalid')
-        if target_type == 'continuous':
-            return {'rows': len(frame), 'rmse': float(np.sqrt(mean_squared_error(target, scores))),
-                    'mae': float(mean_absolute_error(target, scores)), 'r2': float(r2_score(target, scores))}
-        if not set(target) == {0, 1}:
-            raise HoldoutError('holdout_binary_labels_invalid')
-        from marvis.feature.metrics import feature_ks, feature_auc
-        return {'rows': len(frame), 'ks': float(feature_ks(scores, target)), 'auc': float(feature_auc(scores, target))}
+        return sealed_worker.sealed_metrics(frame, contract, closure['artifact']['params'].get('classes'), scorer)
+
+
+def with_conclusions(body):
+    """Attach fact-gated conclusions to a signed result; metrics are untouched."""
+    reference = body.get('read_started_at')
+    gated = time_facts.gate_conclusions(body.get('time_facts'), reference if reference is not None else 0)
+    return {**body, 'conclusions': gated['conclusions']}

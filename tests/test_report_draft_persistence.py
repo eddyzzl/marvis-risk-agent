@@ -91,10 +91,10 @@ def _complete_draft(repo, task_id, *, scope="旧范围"):
     )
 
 
-def test_saved_narrative_reaches_chat_and_rewrite_prompts_without_changing_metrics(draft):
-    from marvis.agent.service import _chat_prompt, _stage_prompt
+def test_saved_narrative_reaches_chat_evidence_and_revision_baseline_without_changing_metrics(draft):
     from marvis.agent.validation_app_service import agent_chat_evidence
     from marvis.agent.validation_stages import _word_conclusion_evidence_with_stage_summaries
+    from marvis.llm_outbound_revision import report_revision_baseline
 
     client, repo, task_id, _ = draft
     message = _complete_draft(repo, task_id)
@@ -107,11 +107,7 @@ def test_saved_narrative_reaches_chat_and_rewrite_prompts_without_changing_metri
     request = SimpleNamespace(app=client.app)
     conversation = repo.list_agent_messages(task_id)
     chat_evidence = agent_chat_evidence(request, repo, task, conversation)
-    chat_prompt = json.loads(_chat_prompt(
-        task=task, user_message="解释我保存的结论", conversation=conversation,
-        evidence=chat_evidence,
-    ))
-    assert "用户保存的新结论" in json.dumps(chat_prompt, ensure_ascii=False)
+    assert chat_evidence["report_draft"]["text_values"]["TEXT:final_validation_conclusion"] == "用户保存的新结论"
     assert chat_evidence["report_draft"]["text_values"]["TEXT:model_scope"] == ""
     assert chat_evidence["report_fields"]["text_values"] != chat_evidence["report_draft"]["text_values"]
 
@@ -120,12 +116,10 @@ def test_saved_narrative_reaches_chat_and_rewrite_prompts_without_changing_metri
                            content="", metadata={"streaming": True})
     deterministic = {"validation_results": {"basic_info": {"n_samples": 17}}}
     rewrite_evidence = _word_conclusion_evidence_with_stage_summaries(repo, task_id, deterministic)
-    rewrite_prompt = json.loads(_stage_prompt(
-        task=task, stage="word_conclusion_draft", evidence=rewrite_evidence,
-        user_instruction="只调整最终结论的语气",
-    ))
-    assert rewrite_prompt["evidence"]["report_draft"]["text_values"]["TEXT:final_validation_conclusion"] == "用户保存的新结论"
-    assert rewrite_prompt["evidence"]["report_draft"]["text_values"]["TEXT:model_scope"] == ""
+    # The revision adapter starts from the saved draft, verbatim and locally.
+    baseline, _ = report_revision_baseline(rewrite_evidence, report_revision=task.report_values_revision)
+    assert baseline["TEXT:final_validation_conclusion"] == "用户保存的新结论"
+    assert baseline["TEXT:model_scope"] == ""
     assert rewrite_evidence["validation_results"] == deterministic["validation_results"]
     assert repo.get_report_values(task_id) == original_report
 

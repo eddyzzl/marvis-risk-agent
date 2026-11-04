@@ -18,6 +18,10 @@ class FetchError(DraftError):
     pass
 
 
+class OutboundQueryError(DraftError):
+    """A search query failed the outbound content boundary; nothing was sent."""
+
+
 class AuthoringError(DraftError):
     pass
 
@@ -33,5 +37,6 @@ __all__ = [
     "DraftStateError",
     "FetchError",
     "OfflineError",
+    "OutboundQueryError",
     "PromotionError",
 ]

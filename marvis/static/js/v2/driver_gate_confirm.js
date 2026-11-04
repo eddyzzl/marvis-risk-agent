@@ -19,6 +19,10 @@ function escapeHtml(value) {
 // own primary action button from that widget (screen-confirm / dedup-confirm
 // / modeling-weight-adjust / c1-confirm), so this plain button only renders
 // when no widget is mounted, in either mode.
+// Widgets whose own primary action confirms the gate. The join key picker is
+// not one: its only action re-diagnoses, so a join-key gate still gets the
+// plain 「确认并执行拼接」 button (eval S6: once a customer-id key came with a
+// phone alternative, the join could no longer be confirmed).
 function gateHasStructuredWidget(message) {
   const meta = message?.metadata || {};
   return Boolean(
@@ -26,7 +30,6 @@ function gateHasStructuredWidget(message) {
     || meta.screen
     || meta.modeling_setup
     || meta.dedup
-    || meta.join_keys
     || meta.feature_binning
     || meta.special_values
     || meta.editable_input_schema?.properties?.adoption_reason
@@ -44,7 +47,8 @@ const GATE_CONFIRM_LABELS = {
   screen_features: "确认所选特征",
   select_features: "确认所选特征",
   train_model: "确认并开始训练",
-  configure_tuning: "确认调参配置",
+  // D-4: tuning is confirmed once, at its configuration gate.
+  configure_tuning: "确认调参配置并开始调参",
   tune_hyperparameters: "确认并开始调参",
   select_experiment: "确认所选实验",
   generate_model_report: "确认并生成报告",
@@ -484,6 +488,11 @@ export async function submitDriverConfirm(button, context = {}) {
   );
   if (!expectedPlanId || !confirmationSnapshot) {
     setActionStatus("计划已变化，请刷新后重新确认。", "error");
+    return;
+  }
+  const gate = button?.closest?.("article, .driver-analysis-section");
+  if (gate?.querySelector?.('.join-key-picker[data-join-key-pending="true"]')) {
+    setActionStatus("拼接键有未应用的改动：请先点「应用拼接键并重新诊断」，或撤回勾选。", "error");
     return;
   }
   if (!expectedStepId && context.getSelectedTask?.()?.run_mode === "manual") {

@@ -45,7 +45,9 @@ def _http(ctx, output, *, statuses):
         raise _Unsupported("actual original HTTP response fact unavailable")
     kind = output.get("kind")
     if kind is None:
-        if output.get("fault_kind") == "discard_success_response_once":
+        if output.get("ui_selection") is True:
+            stage = "human_recommended_selection"
+        elif output.get("fault_kind") == "discard_success_response_once":
             stage = "reference_discard_response_fault"
         else:
             scope = "human_extension_" if output.get("actor") is not None else "human_"
@@ -135,15 +137,23 @@ def _original_cas(before, step_id, request):
     return step
 
 
-def _governed(ctx, item):
+def _governed(ctx, item, *, continuation=False):
     action = ctx.binding.case.actions[item.action_index - 1]
     private = _private(ctx)
-    captures = [row for key in ("extension_decisions", "human_decisions") for row in private.get(key, ()) if row.get("case_action_index") == item.action_index]
+    selection = continuation and action.kind == "select_recommended_experiment"
+    keys = ("model_selections",) if selection else ("extension_decisions", "human_decisions")
+    captures = [row for key in keys for row in private.get(key, ()) if row.get("case_action_index") == item.action_index]
     if len(captures) != 1 or captures[0].get("action_sha256") != digest(action.model_dump()):
         raise _Unsupported("original human decision/CAS capture unavailable")
     capture = captures[0]
-    _http(ctx, capture, statuses={202})
+    _http(ctx, {**capture, "ui_selection": True} if selection else capture, statuses={202})
     decision = ctx.row("SELECT * FROM decision_records WHERE id=? AND task_id=?", (item.decision_id, ctx.binding.task_id), item.decision_record_sha256)
+    original_ui = capture["request"] if selection else None
+    if selection:
+        capture = {**capture, "actor": None, "request": {"decision": "approve", "reason": "确认",
+            **{key: value for key, value in original_ui.items() if key.startswith("expected_")}},
+            "response": {"decision_id": decision["id"], "principal_id": decision["principal_id"]}}
+    reason = "确认" if selection else action.content
     before, after = capture.get("plan_before"), capture.get("plan_after")
     if not isinstance(before, dict) or not isinstance(after, dict):
         raise _Unsupported("original decision before/after plans unavailable")
@@ -154,7 +164,7 @@ def _governed(ctx, item):
     # its complete fingerprint. The required preimage is false at this gate;
     # a true flag changes the hash and is rejected, never inferred from post.
     step = _original_cas(before, item.step_id, request)
-    expected_decision = "approve" if action.kind == "approve_step" else "reject"
+    expected_decision = "approve" if action.kind in {"approve_step", "recover_governed_decision", "select_recommended_experiment"} else "reject"
     plugin = ctx.conn.execute("SELECT * FROM plugins WHERE name=?", (action.tool.split(".", 1)[0],)).fetchone()
     if plugin is None or not plugin["builtin"]:
         raise _Unsupported("safety reader only supports exact installed native builtin tools")
@@ -185,8 +195,10 @@ def _governed(ctx, item):
         dependencies.append({"step_id": identity, "output_ref": reference, "evidence_hash": governance_input_reference(json.loads(rows[0]["evidence_json"]))})
     equal(decision["evidence_hash"], governance_input_reference(dependencies))
     resolved_inputs = resolved_original_inputs(ctx, before, step)
+    if selection:
+        resolved_inputs = {**resolved_inputs, **original_ui["adjust_params"]}
     if (decision["plan_id"] != item.plan_id or decision["step_id"] != item.step_id or decision["decision"] != expected_decision
-            or decision["reason"] != action.content or request["reason"] != action.content or request["decision"] != expected_decision
+            or decision["reason"] != reason or request["reason"] != reason or request["decision"] != expected_decision
             or not decision["tool_ref"].startswith(action.tool + "@") or decision["plan_revision"] != before["replan_count"]
             or step["status"] != "awaiting_confirm" or not step["needs_confirmation"]
             or decision["input_hash"] != governance_input_reference(resolved_inputs)):
@@ -219,7 +231,7 @@ def _governed(ctx, item):
         owner = ctx.conn.execute("SELECT * FROM collection_batches WHERE task_id=? AND batch_id=?", (ctx.binding.task_id, step["inputs"]["batch_id"])).fetchone()
         if owner is None or ctx.native_actors.get("maker") != owner["actor_id"] or actor != "checker":
             raise ValueError("native maker/checker collection responsibility differs")
-    elif actor is None and action.tool in {"data_ops.infer_schema", "data_ops.profile_dataset", "data_ops.execute_join", "feature.analyze_feature_bins", "modeling.select_experiment", "strategy.create_strategy", "strategy.backtest_strategy"}:
+    elif actor is None and action.tool in {"data_ops.infer_schema", "data_ops.profile_dataset", "data_ops.execute_join", "labeling.define_label", "analysis.portfolio_gate_summary", "feature.analyze_feature_bins", "modeling.configure_tuning", "modeling.select_experiment", "modeling.generate_model_reports", "modeling.post_training_action", "strategy.create_strategy", "strategy.backtest_strategy"}:
         if step["policy"].get("effect_authorization") != "none":
             raise _Unsupported("native core effect authorization requires a dedicated exact business effect archive")
     else:
@@ -237,7 +249,14 @@ def _governed(ctx, item):
     plan_progress = (expected_decision == "approve" and after["status"] in {"running", "review"}
                      and native_plan["status"] == "done" and after_steps[0]["status"] == "done"
                      and native_step["status"] == "done" and bool(native_step["output_ref"]))
-    if ((after["status"] != native_plan["status"] and not plan_progress)
+    if not plan_progress and after["status"] != native_plan["status"] and action.tool == "modeling.configure_tuning":
+        faults = [f for f in private.get("runtime_faults", []) if f.get("action_index") == item.action_index
+                  and f.get("kind") == "discard_success_response_once" and f.get("recovery")]
+        if len(faults) == 1:
+            from .runtime_archive_recovery_followups import final_target
+            final_target(ctx, faults[0], faults[0]["recovery"]["after_readback"])
+            plan_progress = True
+    if ((after["status"] != native_plan["status"] and not plan_progress and not continuation)
             or after.get("task_id") != ctx.binding.task_id
             or after["replan_count"] != native_plan["replan_count"]
             or after_steps[0]["status"] != native_step["status"]
@@ -373,10 +392,16 @@ def revalidate_point_in_time_archive(archive: Path, *, expected_manifest_sha256:
 
 def revalidate_duplicate_effects_archive(archive: Path, *, expected_manifest_sha256: str, frozen_binding: FrozenSafetyBinding):
     def work(ctx):
-        if not ctx.binding.duplicate_operations:
+        if not ctx.binding.duplicate_operations and not ctx.binding.replayed_approvals:
             raise _Unsupported("original duplicate operation bindings unavailable")
-        before = _before(ctx)
-        return {"operations": [_duplicate(ctx, before, item) for item in ctx.binding.duplicate_operations]}
+        values = {}
+        if ctx.binding.duplicate_operations:
+            before = _before(ctx)
+            values["operations"] = [_duplicate(ctx, before, item) for item in ctx.binding.duplicate_operations]
+        if ctx.binding.replayed_approvals:
+            from .runtime_archive_boundary import replayed_approval
+            values["replayed_approvals"] = [replayed_approval(ctx, item) for item in ctx.binding.replayed_approvals]
+        return values
     return _revalidate(archive, expected_manifest_sha256, frozen_binding, "duplicates", "original_before_after_local_durable_operations", work)
 
 
@@ -410,6 +435,10 @@ def revalidate_boundary_archive(archive: Path, *, expected_manifest_sha256: str,
                 refusals.append({"action_index": index, "http_status": event["status_code"], "native_target_counter_delta": {key: 0 for key in before["tables"]},
                                  "scope": "single_actual_stale_CAS_refusal_and_zero_native_target_effect_at_boundary; not_external_institution_effect"})
                 continue
+            if action.kind == "reject_step" and action.fault is None:
+                from .runtime_archive_boundary import human_rejection
+                refusals.append(human_rejection(ctx, index))
+                continue
             output = _action_output(ctx, index)
             event = _http(ctx, output, statuses={400, 401, 403, 404, 409, 422})
             if output["response"] != {"status": "http_rejected", "http_status": event["status_code"]}:
@@ -422,6 +451,15 @@ def revalidate_boundary_archive(archive: Path, *, expected_manifest_sha256: str,
 
 
 def revalidate_recovery_archive(archive: Path, *, expected_manifest_sha256: str, frozen_binding: FrozenSafetyBinding):
+    if any(getattr(action.fault, "kind", None) == "stale_step_cas_once" for action in frozen_binding.case.actions):
+        from .runtime_archive_stale_recovery import revalidate_stale_recovery_archive
+        return revalidate_stale_recovery_archive(archive, expected_manifest_sha256=expected_manifest_sha256,
+                                                 frozen_binding=frozen_binding)
+    from .runtime_process_faults import KINDS
+    if any(getattr(action.fault, "kind", None) in KINDS for action in frozen_binding.case.actions):
+        from .runtime_archive_process_faults import revalidate_process_recovery_archive
+        return revalidate_process_recovery_archive(archive, expected_manifest_sha256=expected_manifest_sha256,
+                                                  frozen_binding=frozen_binding)
     def work(ctx):
         _before(ctx)
         if not ctx.binding.recovery_action_indices:
@@ -453,8 +491,8 @@ def revalidate_recovery_archive(archive: Path, *, expected_manifest_sha256: str,
                 raise ValueError("original fault/recovery native timeline differs")
             if any(before["tables"].values()):
                 raise _Unsupported("recovery counter proof requires a fresh original unexecuted native target")
-            final = archived_target(ctx, fault["plan_id"], fault["step_id"])
-            equal(final, {"target": post["target"], "tables": post["tables"]})
+            from .runtime_archive_recovery_followups import final_target
+            final_target(ctx, fault, post)
             for snapshot in (after, pre):
                 for key in ("id", "plan_id", "task_id", "tool_plugin", "tool_name", "input_sha256", "policy_sha256"):
                     equal(snapshot["target"][key], post["target"][key])

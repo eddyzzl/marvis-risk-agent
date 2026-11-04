@@ -1,4 +1,5 @@
 import { escapeHtml } from "./ui-utils.js";
+import { renderMarkdownEmphasisText } from "./render-agent.js";
 
 export const REPORT_DRAFT_FIELDS = [
   {
@@ -61,6 +62,19 @@ export function latestPendingReportDraftMessageId(messages = []) {
     if (message?.stage === "word_conclusion_confirmed") return "";
     if (message?.role !== "assistant") continue;
     if (message?.stage !== "word_conclusion_draft") continue;
+    if (!hasReportDraftValues(message?.metadata?.draft_values)) continue;
+    return String(message.id || "");
+  }
+  return "";
+}
+
+// The newest draft revision in the timeline, confirmed or not. Older revisions
+// stay as history but no longer offer the "report ready" entry point.
+export function latestReportDraftMessageId(messages = []) {
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant" || message?.stage !== "word_conclusion_draft") continue;
     if (!hasReportDraftValues(message?.metadata?.draft_values)) continue;
     return String(message.id || "");
   }
@@ -182,5 +196,100 @@ function reportDraftControlHtml(field, value, confirming) {
   return [
     `<input class="report-draft-input" data-report-draft-key="${keyAttr}"`,
     ` aria-label="${labelAttr}" placeholder="待补充" type="text" value="${valueAttr}"${confirming ? " readonly" : ""}>`,
+  ].join("");
+}
+
+// D13 (2026-10-14 redesign, batch 6a): the report draft is a card in the
+// conversation. The three required items are open; the rest fold into one
+// line. Each item shows its text (!!…!! failures in red bold) and turns into
+// its field when clicked. "展开全文" opens the same element as an editing
+// layer over the conversation, so there is one editor and one edit buffer.
+// Every data attribute of the table view is kept, so saving, conflicts and
+// confirmation (F01/F02) run through the same handlers.
+const PRIMARY_ORDER = [
+  "TEXT:final_validation_conclusion",
+  "TEXT:pressure_test_summary",
+  "TEXT:pressure_impact_recommendation",
+];
+
+export function reportDraftPreviewHtml(value) {
+  const text = String(value || "").trim();
+  if (!text) return '<span class="report-card-empty">待补充</span>';
+  return text.split(/\n+/).map((line) => `<p>${renderMarkdownEmphasisText(line)}</p>`).join("");
+}
+
+function reportCardRowHtml(field, value, editable, confirming) {
+  const keyAttr = escapeHtml(field.key);
+  return [
+    `<div class="report-card-row" data-report-card-row="${keyAttr}"${String(value).trim() ? "" : ' data-empty="true"'}>`,
+    `<div class="report-card-label"><b>${escapeHtml(field.label)}</b>`,
+    editable ? `<button type="button" class="report-draft-revise" data-report-draft-revise="${escapeHtml(field.label)}"${confirming ? " disabled" : ""}>请 Agent 修订</button>` : "",
+    "</div>",
+    editable
+      ? `<div class="report-card-preview" data-report-card-preview role="button" tabindex="0" aria-label="编辑${escapeHtml(field.label)}">${reportDraftPreviewHtml(value)}</div>`
+      : `<div class="report-card-preview report-draft-readonly">${reportDraftPreviewHtml(value)}</div>`,
+    editable ? `<div class="report-card-control">${reportDraftControlHtml(field, value, confirming)}</div>` : "",
+    "</div>",
+  ].join("");
+}
+
+export function reportDraftCardHtml(
+  values = {},
+  {
+    editable = false,
+    revision = 0,
+    messageId = "",
+    taskId = "",
+    state = null,
+    title = "",
+    expanded = false,
+  } = {},
+) {
+  const confirming = Boolean(state?.confirming);
+  const primary = PRIMARY_ORDER
+    .map((key) => REPORT_DRAFT_FIELDS.find((field) => field.key === key))
+    .filter(Boolean);
+  const rest = REPORT_DRAFT_FIELDS.filter((field) => !PRIMARY_ORDER.includes(field.key));
+  const restEmpty = rest.filter((field) => !String(values[field.key] || "").trim()).length;
+  const revisionValue = Number.isFinite(Number(revision)) ? Number(revision) : 0;
+  const messageAttr = messageId ? ` data-report-draft-message-id="${escapeHtml(String(messageId))}"` : "";
+  const row = (field) => reportCardRowHtml(field, String(values[field.key] || ""), editable, confirming);
+  return [
+    `<section class="report-draft-panel report-card" data-report-draft-table="true"${messageAttr}`,
+    ` data-report-draft-task-id="${escapeHtml(taskId)}"`,
+    ` data-report-revision="${escapeHtml(String(revisionValue))}"`,
+    ` data-report-draft-editable="${editable ? "true" : "false"}"`,
+    ` data-agent-result="true" aria-label="报告文案">`,
+    '<header class="report-card-head">',
+    `<b>${escapeHtml(title ? `${title} 的报告文案` : "报告文案")}</b>`,
+    editable
+      ? `<span class="report-draft-save-status" role="status" aria-live="polite" data-report-draft-save-status>${escapeHtml(state?.status || "已保存草稿")}</span>`
+      : '<span class="report-draft-save-status">该草稿已确认或已被更新版本替代</span>',
+    '<span class="report-card-grow"></span>',
+    `<button type="button" class="button compact" data-report-draft-expand aria-expanded="${expanded}">${expanded ? "收起" : "展开全文"}</button>`,
+    "</header>",
+    '<div data-report-draft-feedback>' + reportDraftFeedbackHtml(state) + "</div>",
+    `<div class="report-card-rows">${primary.map(row).join("")}</div>`,
+    rest.length
+      ? [
+        `<button type="button" class="report-card-more-toggle" data-report-card-more-toggle aria-expanded="${expanded}">`,
+        `<span class="report-card-grow">其余 ${rest.length} 项：${escapeHtml(rest.map((field) => field.label).join("、"))}</span>`,
+        restEmpty
+          ? `<span class="report-card-pending"${editable ? "" : ' data-readonly="true"'}>${restEmpty} 项${editable ? "还没填" : "留空"}</span>`
+          : "",
+        "</button>",
+        `<div class="report-card-rows report-card-more" data-report-card-more${expanded ? "" : " hidden"}>${rest.map(row).join("")}</div>`,
+      ].join("")
+      : "",
+    editable
+      ? [
+        '<footer class="report-draft-actions report-card-foot">',
+        '<span class="report-card-grow report-card-disclaimer">确认只表示同意生成文档，不代表模型通过验证</span>',
+        `<button type="button" class="button compact secondary" data-report-draft-save${confirming ? " disabled" : ""}>保存草稿</button>`,
+        `<button type="button" class="button compact primary" data-report-draft-confirm${state?.conflict || confirming ? " disabled" : ""}>确认并生成报告</button>`,
+        "</footer>",
+      ].join("")
+      : "",
+    "</section>",
   ].join("");
 }

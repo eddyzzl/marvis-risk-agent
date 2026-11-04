@@ -537,6 +537,10 @@ def _installed_application_schema(contract, bindings):
         from marvis.llm_outbound_sql import installed_sql_schema
 
         return installed_sql_schema(bindings)
+    if contract == "monitoring_schedule_form":
+        from marvis.llm_outbound_operations import installed_schedule_form_schema
+
+        return installed_schedule_form_schema(bindings)
     if contract in {"adhoc_slice_spec", "feature_cross_recommendations", "draft_authoring", "memory_distillation", "learning_note"}:
         from marvis.llm_outbound_noncore_schemas import installed_noncore_schema
 

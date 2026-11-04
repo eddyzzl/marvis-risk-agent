@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from marvis.agent.setup_context import dataset_file_name
 from marvis.agent.sample_setup import detect_setup
 from marvis.data.contracts import Dataset
 from marvis.data.field_aliases import field_alias_bindings
@@ -454,7 +455,7 @@ def preview_strategy_dataset_context(
             "content_hash": sha256_file(path),
         }
         dataset_id = dataset.id
-        dataset_name = _dataset_name(dataset)
+        dataset_name = dataset_file_name(dataset)
     else:
         if source_dir is None:
             raise StrategySetupError("策略分析未找到数据文件。")
@@ -575,7 +576,7 @@ def build_strategy_dataset_context(
         semantic_mapping_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
     return StrategyDatasetContext(
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         target_col=resolved_target,
         columns=tuple(columns),
         dataset_content_hash=dataset.content_hash,
@@ -608,7 +609,16 @@ class StrategyProposal:
             "strategy_type": self.strategy_type,
             "rules": self.rules,
             "default_decision": self.default_decision,
+            # The quick candidate rule was built and shown with this direction;
+            # its trade-off view uses the same one instead of a default (D-3).
+            "score_direction": _QUICK_RULE_SCORE_DIRECTIONS.get(self.direction),
         }
+
+
+_QUICK_RULE_SCORE_DIRECTIONS = {
+    "higher_score_riskier": "higher_is_riskier",
+    "lower_score_riskier": "higher_is_better",
+}
 
 
 @dataclass
@@ -738,7 +748,7 @@ def build_monitoring_setup_proposal(
     return MonitoringSetupProposal(
         strategy_id=strategy_id,
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         score_col=resolved_score,
         target_col=resolved_target,
         notes=notes,
@@ -753,7 +763,11 @@ def build_strategy_proposal(
     *,
     target_col: str | None = None,
     score_col: str | None = None,
+    score_direction: str | None = None,
 ) -> StrategyProposal:
+    """Quick candidate.  ``score_direction`` is the D-3-resolved tool direction;
+    the rule is built with it.  Without one the data-implied direction is only a
+    preview that the caller must replace with an authoritative direction."""
     dataset = _resolve_dataset(registry, task_id, source_dir)
     path = registry.resolve_path(dataset.id)
     columns = backend.column_names(path)
@@ -765,7 +779,10 @@ def build_strategy_proposal(
         )
     frame = backend.read_frame(path, columns=[resolved_target, resolved_score])
     profile = _score_profile(
-        frame, target_col=resolved_target, score_col=resolved_score
+        frame,
+        target_col=resolved_target,
+        score_col=resolved_score,
+        declared_direction=score_direction,
     )
     rule = {
         "condition": profile["condition"],
@@ -773,7 +790,7 @@ def build_strategy_proposal(
     }
     return StrategyProposal(
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         target_col=resolved_target,
         score_col=resolved_score,
         strategy_type="approval",
@@ -835,7 +852,7 @@ def build_strategy_development_proposal(
         )
     return StrategyDevelopmentProposal(
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         target_col=resolved_target,
         score_col=resolved_score,
         strategy_type=str(_input_value(strategy_input, "strategy_type") or "approval"),
@@ -884,7 +901,7 @@ def build_rule_strategy_proposal(
         )
     return RuleStrategyProposal(
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         target_col=resolved_target,
         score_col=resolved_score,
         bad_rate=bad_rate,
@@ -1099,7 +1116,13 @@ def _resolve_score_col(columns: list[str], requested: str | None) -> str:
     raise StrategySetupError("未能识别评分列；请在创建任务时指定 score_col。")
 
 
-def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> dict:
+def _score_profile(
+    frame: pd.DataFrame,
+    *,
+    target_col: str,
+    score_col: str,
+    declared_direction: str | None = None,
+) -> dict:
     clean = frame[[target_col, score_col]].copy()
     # T2-1: read finite labels via the canonical nan_label_mask so the preview
     # bad-rate uses the SAME label semantics as the resolve_labeled_frame gate that
@@ -1121,8 +1144,13 @@ def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> d
     target = clean[target_col].astype(int)
     scores = clean[score_col].astype(float)
     bad_rate = float((target == 1).mean())
-    corr = scores.rank(method="average").corr(target)
-    higher_score_riskier = bool(corr is not None and pd.notna(corr) and corr > 0)
+    if declared_direction is not None:
+        if declared_direction not in _QUICK_RULE_SCORE_DIRECTIONS.values():
+            raise StrategySetupError(f"未知的分数方向：{declared_direction}")
+        higher_score_riskier = declared_direction == "higher_is_riskier"
+    else:
+        corr = scores.rank(method="average").corr(target)
+        higher_score_riskier = bool(corr is not None and pd.notna(corr) and corr > 0)
     quantile = 0.80 if higher_score_riskier else 0.20
     cutoff = float(scores.quantile(quantile))
     cutoff_literal = _number_literal(cutoff)
@@ -1156,11 +1184,6 @@ def _number_literal(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{float(value):.6g}"
-
-
-def _dataset_name(dataset) -> str:
-    source = getattr(dataset, "source_path", None)
-    return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
 __all__ = [

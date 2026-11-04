@@ -4,7 +4,7 @@ import csv
 import json
 import shutil
 from dataclasses import asdict, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,64 @@ SCORING_NOTEBOOK_NAME = "scoring_notebook.ipynb"
 DICTIONARY_NAME = "dictionary.csv"
 CHALLENGER_BACKTEST_PLAN_JSON = "challenger_backtest_plan.json"
 CHALLENGER_BACKTEST_PLAN_MD = "challenger_backtest_plan.md"
+
+# Business names of the algorithm codes a modeling recipe stores on its artifact.
+# Kept here because packs must not import the agent presenters' label tables.
+_ALGORITHM_DISPLAY_NAMES = {
+    "lr": "逻辑回归",
+    "lgb": "LightGBM",
+    "xgb": "XGBoost",
+    "catboost": "CatBoost",
+    "scorecard": "评分卡",
+    "mlp": "神经网络",
+    "dnn": "神经网络",
+    "lr_regressor": "线性回归",
+    "lgb_regressor": "LightGBM 回归",
+    "xgb_regressor": "XGBoost 回归",
+    "mlp_regressor": "神经网络回归",
+    "lr_multiclass": "逻辑回归多分类",
+    "lgb_multiclass": "LightGBM 多分类",
+    "xgb_multiclass": "XGBoost 多分类",
+    "mlp_multiclass": "神经网络多分类",
+    "ensemble": "集成模型",
+}
+
+
+def algorithm_display_name(algorithm: str) -> str:
+    return _ALGORITHM_DISPLAY_NAMES.get(str(algorithm or "").strip().lower(), "交付模型")
+
+
+def delivery_model_version(
+    algorithm: str,
+    delivered_on: date,
+    *,
+    taken: frozenset[str] | set[str] = frozenset(),
+    suffix: str = "",
+) -> str:
+    """D-1: a delivery-created validation task is versioned 「算法名 交付日期」
+    (e.g. 「逻辑回归 20261021」); the artifact id stays in task metadata.
+
+    A second same-algorithm delivery on one day gets 「逻辑回归 20261021-2」 so
+    versions (and the memory history keyed on them) never merge.
+    """
+    base = f"{algorithm_display_name(algorithm)} {delivered_on:%Y%m%d}"
+    candidate, number = f"{base}{suffix}", 1
+    while candidate in taken:
+        number += 1
+        candidate = f"{base}-{number}{suffix}"
+    return candidate
+
+
+def _delivery_date() -> date:
+    # The platform records times in UTC; the delivery date follows it.
+    return datetime.now(UTC).date()
+
+
+def _taken_model_versions(settings) -> set[str]:
+    from marvis.db_schema import connect
+
+    with connect(settings.db_path) as conn:
+        return {str(row[0]) for row in conn.execute("SELECT model_version FROM tasks")}
 
 
 def handoff_to_validation(
@@ -88,8 +146,10 @@ def handoff_to_validation(
     source_task = _source_task(settings, experiment.task_id)
     payload = TaskCreate(
         task_type=TASK_TYPE_VALIDATION,
-        model_name=source_task.model_name if source_task else f"{experiment.recipe_id} model",
-        model_version=artifact.id,
+        model_name=_handoff_model_name(source_task, artifact),
+        model_version=delivery_model_version(
+            artifact.algorithm, _delivery_date(), taken=_taken_model_versions(settings)
+        ),
         validator=source_task.validator if source_task else "MARVIS Modeling",
         source_dir=str(material_dir.resolve()),
         algorithm=artifact.algorithm,
@@ -103,7 +163,11 @@ def handoff_to_validation(
         sample_path=sample_material_name,
         pmml_path="model.pmml",
         dictionary_path=DICTIONARY_NAME,
-        report_values={},
+        # Traceability: the readable version above no longer carries the id.
+        report_values={
+            "TEXT:source_experiment_id": artifact.experiment_id,
+            "TEXT:source_artifact_id": artifact.id,
+        },
     )
 
     task_repo = TaskRepository(settings.db_path)
@@ -223,8 +287,13 @@ def create_challenger_backtest_task(
     source_task = _source_task(settings, experiment.task_id)
     payload = TaskCreate(
         task_type=TASK_TYPE_VALIDATION,
-        model_name=source_task.model_name if source_task else f"{experiment.recipe_id} model",
-        model_version=f"{artifact.id}-challenger-backtest",
+        model_name=_handoff_model_name(source_task, artifact),
+        model_version=delivery_model_version(
+            artifact.algorithm,
+            _delivery_date(),
+            taken=_taken_model_versions(settings),
+            suffix=" 挑战者回测",
+        ),
         validator="MARVIS Challenger Backtest",
         source_dir=str(material_dir.resolve()),
         algorithm=artifact.algorithm,
@@ -377,6 +446,12 @@ def _source_task(settings, task_id: str):
         return TaskRepository(settings.db_path).get_task(task_id)
     except KeyError:
         return None
+
+
+def _handoff_model_name(source_task, artifact: ModelArtifact) -> str:
+    if source_task is not None and str(source_task.model_name or "").strip():
+        return source_task.model_name
+    return f"{algorithm_display_name(artifact.algorithm)}模型"
 
 
 def _score_col(params: dict[str, Any]) -> str:

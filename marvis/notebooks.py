@@ -36,6 +36,7 @@ from marvis.notebook_contract import (
 from marvis.notebook_io import read_notebook
 from marvis.notebook_steps import NotebookStepPlan, notebook_step_plan
 from marvis.files import write_json_atomic, write_text_atomic
+from marvis.process_timing import timed
 from marvis.local_execution import (
     LocalExecutionIsolationError, execution_capability, execution_command,
     notebook_kernel_manager_class, preflight_execution,
@@ -1142,6 +1143,7 @@ def _run_notebook_with_policy(
         session.close()
 
 
+@timed("subprocess", "notebook_process")
 def _run_notebook_in_subprocess(
     *,
     notebook_path: Path,

@@ -827,3 +827,98 @@ def test_join_diagnostics_count_collision_renamed_columns_and_exclude_differentl
     projected = "feature_balance" if value_name == "balance" else "amount"
     assert list(frame.columns) == ["id", "balance", projected]
     assert frame[projected].tolist() == [30, 40]
+
+
+def _s6_datasets(registry, tmp_path, n: int = 240):
+    """Eval S6 shape: 申请表 (cust_id, mobile, bad_flag) + 征信特征表 (cust_id, mobile_md5, ...)
+    — the same 240 unique customers on both sides, keyed by both a raw customer id and a phone."""
+    cust_ids = [f"C{i:06d}" for i in range(1, n + 1)]
+    phones = [f"138{i:08d}" for i in range(n)]
+    anchor = _write_dataset(registry, tmp_path, "applications", pd.DataFrame({
+        "cust_id": cust_ids,
+        "mobile": phones,
+        "bad_flag": [i % 2 for i in range(n)],
+    }))
+    # feature rows shuffled so a wrong key would visibly misalign the joined values
+    order = list(reversed(range(n)))
+    feature = _write_dataset(registry, tmp_path, "bureau", pd.DataFrame({
+        "cust_id": [cust_ids[i] for i in order],
+        "mobile_md5": [hashlib.md5(phones[i].encode()).hexdigest() for i in order],
+        "sig1": [float(i) for i in order],
+    }))
+    return anchor, feature
+
+
+def _anchor_ids(registry, anchor):
+    return pd.read_csv(registry.resolve_path(anchor.id))["cust_id"].tolist()
+
+
+def test_join_engine_proposes_customer_id_and_executes_s6_join_one_to_one(tmp_path):
+    engine, registry, repo = _engine(tmp_path)
+    anchor, feature = _s6_datasets(registry, tmp_path)
+
+    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    spec = plan.joins[0]
+
+    assert [(p.anchor_col, p.feature_col, p.match_method) for p in spec.key_pairs] == [
+        ("cust_id", "cust_id", "exact"),
+    ]
+    assert spec.diagnostics.key_choice == "customer_id"
+    assert spec.diagnostics.feature_key_unique is True
+    assert spec.diagnostics.key_dtype_divergences == ()
+    assert {(p.anchor_col, p.feature_col) for p in spec.diagnostics.key_candidates} == {
+        ("cust_id", "cust_id"), ("mobile", "mobile_md5"),
+    }
+    [switch] = spec.diagnostics.key_alternatives
+    assert switch.kind == "switch"
+    assert switch.key_pairs == (("mobile", "mobile_md5"),)
+    assert switch.match_rate == 1.0
+    assert switch.feature_key_unique is True
+    assert switch.fan_out_detected is False
+
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+    assert repo.audits[0]["detail"]["key_pairs"][0]["anchor_col"] == "cust_id"
+    result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
+
+    assert anchor.row_count == 240
+    assert result.row_count == 240
+    joined = pd.read_parquet(registry.resolve_path(result.id))
+    # every anchor customer got its OWN bureau row (no misalignment, no nulls)
+    assert sorted(joined["cust_id"]) == sorted(_anchor_ids(registry, anchor))
+    assert (joined["sig1"] == joined["cust_id"].str[1:].astype(int) - 1).all()
+
+
+def test_join_engine_switch_to_hashed_phone_keeps_alternative_and_one_to_one(tmp_path):
+    engine, registry, repo = _engine(tmp_path)
+    anchor, feature = _s6_datasets(registry, tmp_path)
+    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    spec = plan.joins[0]
+
+    engine.select_key_pairs(
+        anchor, registry.resolve_path(anchor.id),
+        feature, registry.resolve_path(feature.id),
+        spec, ["mobile"], seed=0,
+    )
+    repo.update_join_spec(plan.id, spec)
+
+    assert [(p.anchor_col, p.feature_col, p.match_method, p.transform_side) for p in spec.key_pairs] == [
+        ("mobile", "mobile_md5", "hash:md5", "anchor"),
+    ]
+    assert spec.key_pairs[0].resolved_by == "user"
+    assert spec.confirmed is False
+    assert spec.diagnostics.key_choice == "user"
+    assert spec.diagnostics.match_rate == 1.0
+    assert spec.diagnostics.feature_key_unique is True
+    # the replaced customer-id key stays available to switch back to
+    assert [(alt.kind, alt.key_pairs) for alt in spec.diagnostics.key_alternatives] == [
+        ("switch", (("cust_id", "cust_id"),)),
+    ]
+
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+    result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
+
+    assert result.row_count == anchor.row_count == 240
+    joined = pd.read_parquet(registry.resolve_path(result.id))
+    # every anchor customer got its OWN bureau row (no misalignment, no nulls)
+    assert sorted(joined["cust_id"]) == sorted(_anchor_ids(registry, anchor))
+    assert (joined["sig1"] == joined["cust_id"].str[1:].astype(int) - 1).all()

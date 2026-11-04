@@ -3,7 +3,8 @@ import {
   agentMessagesHtml,
   agentTimelineItems,
 } from "./agent-conversation-view.js";
-import { latestPendingReportDraftMessageId } from "./report-draft-table.js";
+import { latestPendingReportDraftMessageId, latestReportDraftMessageId } from "./report-draft-table.js";
+import { localizeHtml } from "./i18n.js";
 
 // UX-2: same "only the latest assistant gate is interactive" rule manual mode
 // uses (driver_manual_analysis.js's lastAssistantMessageId), narrowed to
@@ -13,13 +14,32 @@ import { latestPendingReportDraftMessageId } from "./report-draft-table.js";
 // here since this module has no dependency on the v2 driver modules, and the
 // timeline bucketing needs it computed once over the FULL message list,
 // before messages are split into per-bucket chunks below.
-function lastGateMessageId(messages = []) {
+// Answers to questions asked while a gate waits stay on the gate's step and
+// carry no kind (or are plain chat with no plan). Acks, results and progress
+// mean the plan moved on.
+function gateConversationReply(meta, stepId) {
+  if (meta.kind || meta.ui_action || meta.execution_completed || meta.tool_call) {
+    return false;
+  }
+  const replyStep = String(meta.step_id || "");
+  return replyStep ? replyStep === stepId : !meta.plan_id;
+}
+
+// The gate whose controls stay live: the newest gate message, also when the
+// user asked questions after it (eval round 1: two questions at the binning
+// gate removed its buttons). Whether it can still act is decided against the
+// current plan step and confirmation snapshot, not here.
+export function lastGateMessageId(messages = []) {
+  const later = [];
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
     if (message?.role !== "assistant") continue;
     const meta = message?.metadata || {};
-    if (meta.kind === "gate" || meta.join_c1) return String(message.id || "");
-    return "";
+    if (meta.kind === "gate" || meta.join_c1) {
+      const stepId = String(meta.step_id || "");
+      return later.every((other) => gateConversationReply(other, stepId)) ? String(message.id || "") : "";
+    }
+    later.push(meta);
   }
   return "";
 }
@@ -53,6 +73,9 @@ export function updateAgentMessageContentsInPlace(messages = [], deps = {}) {
     if (!article) return false;
     const contentNode = article.querySelector(".agent-message-content");
     if (!contentNode) return false;
+    // Structured cards (failure / repair / ingest notices) are rebuilt by the
+    // structural render; patching them with Markdown would flatten the card.
+    if (deps.hasStructuredContent?.(message)) continue;
     const streaming = Boolean(deps.isStreaming?.(message));
     const thinking = Boolean(deps.isThinking?.(message));
     const nextHtml = thinking
@@ -61,7 +84,7 @@ export function updateAgentMessageContentsInPlace(messages = [], deps = {}) {
         deps.visibleContent?.(message) ?? String(message?.content || ""),
         { markdown: message?.role !== "user" },
       ) || "");
-    if (contentNode.innerHTML !== nextHtml) contentNode.innerHTML = nextHtml;
+    if (contentNode.innerHTML !== localizeHtml(nextHtml, { context: contentNode })) contentNode.innerHTML = nextHtml;
     contentNode.dataset.agentStreaming = streaming ? "true" : "false";
     contentNode.dataset.agentThinking = thinking ? "true" : "false";
     const referencesNode = article.querySelector(".agent-memory-references");
@@ -129,6 +152,8 @@ export function renderAgentTimeline(messages = [], deps = {}) {
   const latestGateMessageId = deps.latestGateMessageId ?? lastGateMessageId(messages);
   const pendingReportDraftMessageId = deps.latestPendingReportDraftMessageId
     ?? latestPendingReportDraftMessageId(messages);
+  const reportDraftMessageId = deps.latestReportDraftMessageId
+    ?? latestReportDraftMessageId(messages);
   const appendedSections = new Set();
   let basePanelUsed = false;
 
@@ -156,6 +181,7 @@ export function renderAgentTimeline(messages = [], deps = {}) {
       agentMessageHtml: deps.agentMessageHtml,
       latestGateMessageId,
       latestPendingReportDraftMessageId: pendingReportDraftMessageId,
+      latestReportDraftMessageId: reportDraftMessageId,
     });
     scrollContent.appendChild(bucket);
   }

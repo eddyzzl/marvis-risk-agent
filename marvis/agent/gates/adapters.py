@@ -557,7 +557,7 @@ def monitoring_plain_confirm_error(
     inputs = gate.inputs or {}
     disposition = inputs.get("disposition")
     if disposition not in _MONITORING_DISPOSITIONS:
-        return "本次监控为红灯，不能只回复「确认」。请明确选择「观察」「调阈值」或「起新版本」。"
+        return "本次监控为红灯，只确认不会执行。请明确选择怎么处理：「观察」「调阈值」或「起新版本」。"
     if disposition == "adjust_threshold" and not inputs.get("threshold_patch"):
         return "已选择调阈值，但还没有具体 warn/fail 补丁；请先说明要调整的监控项和数值。"
     return None

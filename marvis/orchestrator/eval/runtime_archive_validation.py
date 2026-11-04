@@ -36,7 +36,18 @@ _CHECKS = (
     "archive_integrity", "recomputation_snapshot", "external_bindings", "task_contract", "materials",
     "pmml_rescoring", "metrics_recomputation", "stress_recomputation",
     "confirmation_record_binding", "report_download_binding", "excel_values", "word_confirmed_text",
+    "independent_pmml_scoring", "independent_metrics",
 )
+# pmml_rescoring/metrics_recomputation/stress_recomputation rerun installed
+# production code: they prove reproducibility, not independent correctness.
+_INDEPENDENCE = {
+    "independent_recomputation": ["independent_pmml_scoring", "independent_metrics"],
+    "production_reproducibility": ["pmml_rescoring", "stress_recomputation", "metrics_recomputation", "excel_values"],
+    "not_independently_recomputed": {
+        "stress_test": "category-drop rescoring depends on PMML engine missing-value semantics",
+        "feature_importance_rows": "copied from the frozen dictionary, not a metric",
+    },
+}
 
 
 class FrozenValidationBinding(BaseModel):
@@ -182,7 +193,7 @@ def _materials(archive, manifest, binding, task, contract):
 
 def _rescore(archive, outputs, paths, contract, count, reading_contract):
     from marvis.validation.field_transformations import apply_confirmed_transformations, required_transformation_inputs, transformation_closure
-    from marvis.validation.pmml_score_artifacts import SCORING_ENGINE, build_pmml_scoring_identity, validate_pmml_score_artifact
+    from marvis.validation_services.pmml_score_artifacts import SCORING_ENGINE, build_pmml_scoring_identity, validate_pmml_score_artifact
     from marvis.validation.pmml_scoring import load_pmml_scorer
     from marvis.validation.results import pmml_scoring_result_from_dict
     from marvis.validation.sample_chunks import iter_sample_chunks
@@ -221,6 +232,67 @@ def _rescore(archive, outputs, paths, contract, count, reading_contract):
             or scoring.required_input_count != len(fields) or scoring.engine != SCORING_ENGINE):
         raise ValueError("scoring summary differs from independently recomputed finite scores")
     return scorer, scoring, score_path
+
+
+def _independent_scores(paths, contract, score_path, count):
+    """Rescore from raw bytes with the standalone module; never the PMML engine."""
+    from .runtime_validation_independent import (
+        IndependentUnsupported, independent_pmml_regression_scores, read_validation_rows,
+    )
+
+    schema = contract.require_sample_schema()
+    if contract.transformations or schema.sheet_name is not None or paths["sample"].suffix.lower() != ".csv":
+        raise _Unsupported("independent recomputation supports untransformed CSV samples only")
+    try:
+        rows = read_validation_rows(paths["sample"].read_bytes(), encoding=schema.encoding, confirmed=contract.confirmed)
+        scores = independent_pmml_regression_scores(paths["pmml"].read_bytes(), [row["raw"] for row in rows],
+                                                    contract.require_output_field())
+    except IndependentUnsupported as exc:
+        raise _Unsupported(str(exc)) from None
+    retained = pd.read_parquet(score_path, columns=["row_id", "pmml_score"])
+    if len(rows) != count or retained["row_id"].tolist() != list(range(count)):
+        raise ValueError("independent score population differs")
+    for computed, kept in zip(scores, retained["pmml_score"].tolist(), strict=True):
+        if not math.isfinite(computed) or not math.isclose(computed, kept, rel_tol=1e-9, abs_tol=1e-11):
+            raise ValueError("independently recomputed PMML scores differ")
+    return rows, scores
+
+
+def _independent_metrics(rows, scores, retained, bin_count):
+    from .runtime_validation_independent import (
+        IndependentUnsupported, independent_basic_distribution, independent_effectiveness,
+    )
+
+    try:
+        effectiveness = independent_effectiveness(rows, scores, bin_count=bin_count)
+        basic = independent_basic_distribution(rows)
+    except IndependentUnsupported as exc:
+        raise _Unsupported(str(exc)) from None
+    kept = retained["effectiveness"]
+    if set(kept) != set(effectiveness):
+        raise ValueError("retained effectiveness sections differ from independent scope")
+    for key, value in effectiveness.items():
+        if not _close(value, kept[key]):
+            raise ValueError("independently recomputed metric differs")
+    for key, value in basic.items():
+        if not _close(value, retained["basic_info"][key]):
+            raise ValueError("independently recomputed sample distribution differs")
+
+
+def _close(actual, expected):
+    """Like ``_matches`` with metric tolerance; JSON loses tuple/int-float identity."""
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and actual.keys() == expected.keys() and all(_close(actual[k], expected[k]) for k in expected)
+    if isinstance(expected, (list, tuple)):
+        return (isinstance(actual, (list, tuple)) and len(actual) == len(expected)
+                and all(_close(a, b) for a, b in zip(actual, expected, strict=True)))
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        if not math.isfinite(expected) or not math.isfinite(actual):
+            return actual == expected
+        return math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-11)
+    return actual == expected
 
 
 def _confirmation(task, messages, audits, binding):
@@ -323,9 +395,9 @@ def revalidate_validation_archive(
     from .runtime_runner import _source_identity
     from marvis.validation.config import ValidationConfig
     from marvis.validation.input_contracts import input_contract_to_dict
-    from marvis.validation.pmml_analysis import load_pmml_analysis_frame
+    from marvis.validation_services.pmml_analysis import load_pmml_analysis_frame
     from marvis.validation.platform_metrics import compute_platform_validation_results
-    from marvis.validation.pmml_stress import run_pmml_stress
+    from marvis.validation_services.pmml_stress import run_pmml_stress
     from marvis.validation.results import validation_results_from_dict
 
     if not isinstance(frozen_binding, FrozenValidationBinding):
@@ -342,7 +414,9 @@ def revalidate_validation_archive(
         "recomputation_isolation": "private_authenticated_copy; excludes_adversarial_same_uid_or_root_access",
         "source_authentication": "not_established", "acceptance_claim": "not_established",
         "checks": {key: {"status": "unverified"} for key in _CHECKS},
+        "independence": _INDEPENDENCE,
         "unsupported": {
+            "independent_stress_recomputation": "requires_an_independent_PMML_missing_value_engine",
             "native_signature_authentication": "original_key_not_available",
             "narrative_semantic_correctness": "requires_independent_review",
             "business_labels_and_training_validity": "not_established_by_recomputation",
@@ -401,6 +475,15 @@ def revalidate_validation_archive(
                 metadata_resolution=metadata, stress_test=stress)
             _require_equal(asdict(recomputed), asdict(retained))
             checks[current] = {"status": "verified", "scope": "basic_info_split_and_monthly_KS_AUC_PSI_lift_bins_curves_and_stress"}
+        current = "independent_pmml_scoring"
+        independent_rows, independent_scores = _independent_scores(paths, contract, score_path, count)
+        checks[current] = {"status": "verified", "rows_recomputed": count,
+                           "scope": "standard_library_PMML_RegressionModel_subset_without_PMML_engine"}
+        current = "independent_metrics"
+        _independent_metrics(independent_rows, independent_scores, _json(archive, outputs / "validation_results.json"),
+                             binding.bin_count)
+        checks[current] = {"status": "verified",
+                           "scope": "standard_library_KS_AUC_PSI_lift_bins_monthly_stability_curves_and_split_distribution"}
         current = "confirmation_record_binding"
         values = _confirmation(task, messages, audits, binding)
         checks[current] = {"status": "verified", "scope": "contents_revision_and_audit_consistency_not_actor_authentication"}

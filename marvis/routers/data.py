@@ -29,8 +29,8 @@ from marvis.errors import (
     conflict,
     not_found,
     payload_too_large,
+    parse_if_match_revision,
     precondition_failed,
-    precondition_required,
     unprocessable,
 )
 
@@ -345,20 +345,6 @@ def _verified_task_dataset(
     return dataset
 
 
-def _parse_if_match(if_match: str | None) -> int:
-    if if_match is None:
-        raise precondition_required("If-Match header is required")
-    if not if_match.isascii() or not if_match.isdecimal():
-        raise bad_request("If-Match must be a non-negative integer")
-    try:
-        expected_revision = int(if_match)
-    except ValueError as exc:
-        raise bad_request("If-Match must be a non-negative integer") from exc
-    if expected_revision < 0:
-        raise bad_request("If-Match must be a non-negative integer")
-    return expected_revision
-
-
 def _join_async_requested(payload: dict) -> bool:
     return any(
         _coerce_bool(payload.get(key))
@@ -458,7 +444,7 @@ def update_data_workspace(
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> DataWorkspaceSnapshotResponse:
     _require_task(request, task_id)
-    expected_revision = _parse_if_match(if_match)
+    expected_revision = parse_if_match_revision(if_match)
     if payload.active_dataset_id is not None:
         _verified_task_dataset(
             request,

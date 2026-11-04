@@ -1,4 +1,6 @@
 import { escapeHtml } from "./ui-utils.js";
+import { platformLabelSource } from "./platform-labels.js";
+import { isRawColumnHeader } from "./raw-columns.js";
 import {
   columnFractions,
   columnHeatColors,
@@ -731,7 +733,8 @@ export function renderEnhancedTableExplicit(table, options = {}) {
           const alignAttr = leftAlignCols.has(columnIndex) && (spec.kind || "text") === "text"
             ? ' data-align="left"'
             : "";
-          cells.push(`<td class="${cell.cls}"${alignAttr}>${cell.html}</td>`);
+          const rawColumn = isRawColumnHeader(headers[columnIndex]);
+          cells.push(`<td class="${cell.cls}"${alignAttr}${rawColumn ? ' translate="no"' : ""}>${cell.html}</td>`);
         }
         return `<tr>${cells.join("")}</tr>`;
       }).join("");
@@ -743,12 +746,92 @@ export function renderEnhancedTableExplicit(table, options = {}) {
     '<thead><tr>',
     ...headers.map((header, i) => {
       const alignAttr = leftAlignCols.has(i) ? ' data-align="left"' : "";
-      return `<th${alignAttr}>${escapeHtml(header)}</th>`;
+      return `<th${alignAttr}>${escapeHtml(platformLabelSource(header))}</th>`;
     }),
     '</tr></thead>',
     `<tbody>${bodyRows}</tbody>`,
     "</table>",
     "</div>",
     "</div>",
+  ].join("");
+}
+
+// U13 (2026-10-19 user feedback): Vintage cohort x MOB curves above the
+// cumulative bad-rate table. One line per cohort in a categorical palette so
+// cohorts can be told apart; x = MOB, y = the tool's own cumulative bad rate.
+// Values are plotted as given (INV-1); a cohort that has not reached a MOB
+// simply ends there.
+const VINTAGE_SERIES_COLORS = ["#0a84ff", "#ff9f0a", "#30d158", "#bf5af2", "#ff453a", "#5ac8fa", "#ff375f", "#a2845e"];
+
+function niceCeiling(value) {
+  if (!(value > 0)) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const step = [1, 2, 2.5, 5, 10].find((candidate) => candidate * magnitude >= value) || 10;
+  return step * magnitude;
+}
+
+function percentLabel(value) {
+  const percent = value * 100;
+  return `${percent >= 10 || Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
+export function renderVintageCurvesCard(chart) {
+  const mobs = Array.isArray(chart?.mob_axis) ? chart.mob_axis.map((mob) => String(mob)) : [];
+  const series = (Array.isArray(chart?.series) ? chart.series : [])
+    .filter((item) => Array.isArray(item?.values));
+  const finite = (value) => typeof value === "number" && Number.isFinite(value);
+  const values = series.flatMap((item) => item.values.filter(finite));
+  if (mobs.length < 2 || !series.length || !values.length) return "";
+  const W = 560, H = 232, PAD_L = 42, PAD_R = 26, PAD_T = 12, PAD_B = 28;
+  const plot = { x: PAD_L, y: PAD_T, w: W - PAD_L - PAD_R, h: H - PAD_T - PAD_B };
+  const top = niceCeiling(Math.max(...values));
+  const xOf = (index) => plot.x + (index / (mobs.length - 1)) * plot.w;
+  const yOf = (value) => plot.y + plot.h - (Math.max(0, value) / top) * plot.h;
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((t) => {
+    const y = yOf(t * top).toFixed(2);
+    return `<line class="vintage-grid" x1="${plot.x}" y1="${y}" x2="${plot.x + plot.w}" y2="${y}"></line>`
+      + `<text class="vintage-axis-label" x="${plot.x - 6}" y="${(Number(y) + 3).toFixed(2)}" text-anchor="end">${percentLabel(t * top)}</text>`;
+  }).join("");
+  const labelEvery = Math.max(1, Math.ceil(mobs.length / 12));
+  const xLabels = mobs.map((mob, index) => (
+    index % labelEvery === 0 || index === mobs.length - 1
+      ? `<text class="vintage-axis-label" x="${xOf(index).toFixed(2)}" y="${H - 8}" text-anchor="middle">MOB${escapeHtml(mob)}</text>`
+      : ""
+  )).join("");
+  const lines = series.map((item, seriesIndex) => {
+    const color = VINTAGE_SERIES_COLORS[seriesIndex % VINTAGE_SERIES_COLORS.length];
+    let path = "";
+    let open = false;
+    const points = [];
+    item.values.slice(0, mobs.length).forEach((value, index) => {
+      if (!finite(value)) {
+        open = false;
+        return;
+      }
+      const x = xOf(index).toFixed(2);
+      const y = yOf(value).toFixed(2);
+      path += `${open ? "L" : "M"}${x},${y} `;
+      open = true;
+      points.push(`<circle class="vintage-point" cx="${x}" cy="${y}" r="2.6" fill="${color}"><title>${escapeHtml(`${item.cohort} · MOB${mobs[index]} · ${percentLabel(value)}`)}</title></circle>`);
+    });
+    return `<g class="vintage-series" data-cohort="${escapeHtml(String(item.cohort ?? ""))}">`
+      + `<path class="vintage-line" d="${path.trim()}" stroke="${color}"></path>${points.join("")}</g>`;
+  }).join("");
+  const legend = series.map((item, seriesIndex) => {
+    const color = VINTAGE_SERIES_COLORS[seriesIndex % VINTAGE_SERIES_COLORS.length];
+    const last = [...item.values.slice(0, mobs.length)].reverse().find(finite);
+    return `<span class="vintage-legend-item"><i style="background:${color}"></i>${escapeHtml(String(item.cohort ?? ""))}`
+      + `${last === undefined ? "" : `<b>${percentLabel(last)}</b>`}</span>`;
+  }).join("");
+  return [
+    '<figure class="vintage-curves-card">',
+    `<svg class="vintage-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="各批次 Vintage 累计坏账率曲线">`,
+    grid,
+    `<line class="vintage-axis" x1="${plot.x}" y1="${plot.y + plot.h}" x2="${plot.x + plot.w}" y2="${plot.y + plot.h}"></line>`,
+    lines,
+    xLabels,
+    "</svg>",
+    `<figcaption class="vintage-legend">${legend}</figcaption>`,
+    "</figure>",
   ].join("");
 }

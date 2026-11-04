@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 import uuid
 
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
 from marvis.db_schema import connect
 from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
@@ -479,10 +480,13 @@ def _add_agent_restart_notices(
             (
                 uuid.uuid4().hex,
                 task_id,
-                "服务器重启，上一轮 Agent 执行已中断；已保留此前已写入的 Agent 对话和平台产物。你可以继续提问，或根据当前状态重新发送“继续”。",
+                "服务器重启，上一轮 Agent 执行已中断；已保留此前已写入的 Agent 对话和平台产物。你可以继续提问，或点「继续」接着跑。",
                 now,
                 json.dumps(
-                    {"interrupted_by_restart": True, "streaming": False},
+                    with_quick_replies(
+                        {"interrupted_by_restart": True, "streaming": False},
+                        quick_reply("继续"),
+                    ),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
@@ -492,7 +496,7 @@ def _add_agent_restart_notices(
 
 def _interrupted_agent_content(content: str) -> str:
     if not content.strip():
-        return "服务器重启，上一轮 Agent 输出已中断。已保留此前写入的对话和验证结果，你可以继续提问或重新发送“继续”。"
+        return "服务器重启，上一轮 Agent 输出已中断。已保留此前写入的对话和验证结果，你可以继续提问，或说「继续」接着跑。"
     return content.rstrip() + "\n\n（服务器重启，Agent 输出在此处中断。已保留当前已写入内容。）"
 
 
@@ -727,7 +731,7 @@ def _add_plan_restart_notice(
         step_title = str(getattr(failed_step, "title", "") or "当前")
         content = (
             f"服务已重启，计划已暂停在“{step_title}”步骤；中间产物已保留。"
-            "请回复“重试当前步骤”，Agent 将从失败步骤继续，不会重跑已完成步骤。"
+            "点「重试当前步骤」，Agent 会从这一步接着跑，已完成的步骤不重跑。"
         )
     else:
         content = "服务已重启，计划已暂停在当前步骤；中间产物已保留，可在中间信息流中重试失败步骤。"
@@ -811,8 +815,8 @@ def _restart_failure_payload(
             {"label": "计划", "value": plan_id},
             {"label": "失败步骤", "value": step_id},
         ],
-        "actions": ["回复“重试当前步骤”，从该失败步骤继续。"],
-        "agent_prompt": "请回复“重试当前步骤”，Agent 将复用已完成步骤和中间产物继续执行。",
+        "actions": ["点「重试当前步骤」，从该失败步骤继续。"],
+        "agent_prompt": "点「重试当前步骤」，Agent 会复用已完成步骤和中间产物继续执行。",
         "recovery_actions": [
             {"label": "重试当前步骤", "command": "重试当前步骤"}
         ],

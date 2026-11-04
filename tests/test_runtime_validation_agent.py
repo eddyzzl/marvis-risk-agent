@@ -28,6 +28,7 @@ def _v2_protocol(request, answer, payload):
     return {"summary": "仅根据实际结构化证据解释公开合成样本，不代表业务验收。"}
 
 
+@pytest.mark.pmml_runtime
 def test_standard_v2_agent_executes_pmml_stages_draft_confirmation_and_downloads(tmp_path, monkeypatch):
     import marvis.orchestrator.eval.runtime_runner as runner_module
 
@@ -207,6 +208,7 @@ def test_unidentified_validation_entry_never_fills_standard_agent_coverage():
     assert coverage["unclassified_case_ids"] == ["unknown"]
 
 
+@pytest.mark.e2e
 def test_missing_importance_stops_actual_agent_before_scoring_and_confirmation(tmp_path):
     paths = write_synthetic_suite(tmp_path / "suite", normal_validation_agent_only=True)
     dictionary = paths["dataset_root"] / "dictionary.csv"

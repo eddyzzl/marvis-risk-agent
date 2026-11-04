@@ -21,7 +21,9 @@ from marvis.domain import (
 )
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.validation_batches import ValidationBatchRepository
+from marvis.repositories.validation_contracts import ValidationContractRepository
 from marvis.safe_paths import safe_filename_component
+from marvis.validation_completion import legacy_validation_delivery_complete
 
 _UNSET = object()
 _TASK_REPORT_LABELS = {
@@ -58,6 +60,44 @@ def _latest_workflow_statuses(
         return {}
 
 
+def _latest_current_steps(
+    repo: TaskRepository,
+    task_ids: list[str],
+) -> dict[str, dict]:
+    """Current step of each task's latest plan (home 接着做 progress); a store
+    without the plan tables has none, like ``_latest_workflow_statuses``."""
+
+    try:
+        return PlanRepository(repo.db_path).latest_current_steps_for_tasks(task_ids)
+    except sqlite3.OperationalError as exc:
+        if "no such table: plan" not in str(exc).lower():
+            raise
+        return {}
+
+
+def _pending_input_confirmations(
+    repo: TaskRepository,
+    tasks: list[TaskRecord],
+) -> set[str]:
+    """Validation tasks whose input contract waits on the user's field check.
+
+    Like the plan projection, the contract table is additive: a store that
+    predates it simply has no pending confirmations.
+    """
+
+    task_ids = [task.id for task in tasks if task.task_type == TASK_TYPE_VALIDATION]
+    if not task_ids:
+        return set()
+    try:
+        return ValidationContractRepository(repo.db_path).pending_confirmation_task_ids(
+            task_ids
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table: validation_input_contracts" not in str(exc).lower():
+            raise
+        return set()
+
+
 def task_payload(
     repo: TaskRepository,
     task: TaskRecord,
@@ -66,6 +106,9 @@ def task_payload(
     active_job_kind: str | None | object = _UNSET,
     workflow_status: str | None | object = _UNSET,
     batch_item_count: int | None | object = _UNSET,
+    batch_summary: dict | None | object = _UNSET,
+    awaiting_input_confirmation: bool | object = _UNSET,
+    current_step: dict | None | object = _UNSET,
 ) -> dict:
     """``active_job_kind`` defaults to a sentinel so callers can distinguish "not
     supplied, look it up" from "supplied, and it really is None" (PERF-6: batch
@@ -82,9 +125,21 @@ def task_payload(
         if workflow_status is _UNSET
         else workflow_status
     )
+    resolved_awaiting_input_confirmation = (
+        task.id in _pending_input_confirmations(repo, [task])
+        if awaiting_input_confirmation is _UNSET
+        else bool(awaiting_input_confirmation)
+    )
+    resolved_current_step = (
+        _latest_current_steps(repo, [task.id]).get(task.id)
+        if current_step is _UNSET
+        else current_step
+    )
     payload = {
         **task_to_dict(task),
         "workflow_status": resolved_workflow_status,
+        "current_step": resolved_current_step,
+        "awaiting_input_confirmation": resolved_awaiting_input_confirmation,
         "business_objective_locked": resolved_workflow_status is not None,
         "active_job_kind": resolved_active_job_kind,
         "failure_stage": task_failure_stage(repo, task),
@@ -93,10 +148,19 @@ def task_payload(
         "stopped": task_stopped(repo, task),
         "report_available": task_report_available(tasks_dir, task.id),
     }
+    if legacy_validation_delivery_complete(
+        repo, task, tasks_dir,
+        active_job_kind=resolved_active_job_kind,
+        workflow_status=resolved_workflow_status,
+        awaiting_input_confirmation=resolved_awaiting_input_confirmation,
+    ):
+        payload["status"] = TaskStatus.SUCCEEDED
+        payload["status_message"] = "pipeline succeeded"
     return _apply_validation_batch_display_fields(
         payload,
         task,
         batch_item_count=batch_item_count,
+        batch_summary=batch_summary,
         repo=repo,
     )
 
@@ -114,14 +178,14 @@ def list_task_payloads(
     task_ids = [task.id for task in tasks]
     active_job_kinds = repo.get_active_job_kinds_for_tasks(task_ids)
     workflow_statuses = _latest_workflow_statuses(repo, task_ids)
+    current_steps = _latest_current_steps(repo, task_ids)
     batch_ids = [
         task.id for task in tasks if task.task_type == TASK_TYPE_VALIDATION_BATCH
     ]
-    batch_item_counts = (
-        ValidationBatchRepository(repo.db_path).item_counts_for_parents(batch_ids)
-        if batch_ids
-        else {}
-    )
+    batch_repo = ValidationBatchRepository(repo.db_path)
+    batch_item_counts = batch_repo.item_counts_for_parents(batch_ids) if batch_ids else {}
+    batch_summaries = batch_repo.status_summaries_for_parents(batch_ids) if batch_ids else {}
+    pending_confirmations = _pending_input_confirmations(repo, tasks)
     return [
         task_payload(
             repo,
@@ -134,9 +198,52 @@ def list_task_payloads(
                 if task.task_type == TASK_TYPE_VALIDATION_BATCH
                 else None
             ),
+            batch_summary=(
+                batch_summaries.get(task.id)
+                if task.task_type == TASK_TYPE_VALIDATION_BATCH
+                else None
+            ),
+            awaiting_input_confirmation=task.id in pending_confirmations,
+            current_step=current_steps.get(task.id),
         )
         for task in tasks
     ]
+
+
+def _counted_labels(labels: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    for label in labels:
+        if label:
+            counts[label] = counts.get(label, 0) + 1
+    return [label if n == 1 else f"{label} ×{n}" for label, n in counts.items()]
+
+
+def _short(text: str, limit: int = 24) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def purge_name_lists(names: dict) -> dict:
+    """Readable names for the delete dialog (V3 UI-4), keyed like the purge
+    summary. Plan goals keep only their template name ("模型开发: dataset_id=…"
+    -> "模型开发"); internal ids never reach the dialog."""
+    from marvis.agent.presenters.display_labels import recipe_label
+
+    plans = []
+    for goal in names.get("plan_goals") or []:
+        head = re.split(r"[:：]", str(goal), maxsplit=1)[0]
+        plans.append(_short(head))
+    return {
+        "datasets": [_short(name, 32) for name in names.get("datasets") or []],
+        "derived_datasets": int(names.get("derived_datasets") or 0),
+        "plans": _counted_labels(plans),
+        "experiments": _counted_labels(
+            [recipe_label(code) for code in names.get("experiment_recipes") or []]
+        ),
+        "strategies": _counted_labels(
+            [_short(text) for text in names.get("strategy_descriptions") or []]
+        ),
+    }
 
 
 def task_to_dict(task: TaskRecord) -> dict:
@@ -160,10 +267,18 @@ def _apply_validation_batch_display_fields(
     task: TaskRecord,
     *,
     batch_item_count: int | None | object,
+    batch_summary: dict | None | object = _UNSET,
     repo: TaskRepository,
 ) -> dict:
     if task.task_type != TASK_TYPE_VALIDATION_BATCH:
         return payload
+    summary = (
+        ValidationBatchRepository(repo.db_path).status_summaries_for_parents([task.id]).get(task.id)
+        if batch_summary is _UNSET
+        else batch_summary
+    )
+    if summary is not None:
+        payload["batch_summary"] = summary
     if batch_item_count is _UNSET:
         counts = ValidationBatchRepository(repo.db_path).item_counts_for_parents(
             [task.id]

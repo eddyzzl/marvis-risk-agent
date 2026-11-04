@@ -633,8 +633,12 @@ def test_agent_scan_pending_contract_pauses_with_atomic_candidates(
     messages = repo.list_agent_messages(task_id)
     confirmation = messages[-1]
     assert confirmation["stage"] == "input_confirmation"
-    assert "pending_confirmation" in confirmation["content"]
-    assert "revision 3" in confirmation["content"]
+    # Batch 3b (2026-10-14 redesign): the body uses business words; the raw
+    # contract state and revision stay in structured metadata.
+    assert "验证字段待确认（第 3 版）" in confirmation["content"]
+    assert "pending_confirmation" not in confirmation["content"]
+    assert confirmation["metadata"]["validation_input_contract_ref"]["status"] == "pending_confirmation"
+    assert confirmation["metadata"]["validation_input_contract_ref"]["revision"] == 3
     assert "原子候选" not in confirmation["content"]
     assert "确认验证字段" in confirmation["content"]
     assert len(confirmation["content"]) <= 1_000
@@ -1494,274 +1498,6 @@ def test_agent_word_conclusion_stage_passes_prior_stage_summaries_to_llm(
     ]
 
 
-def test_metrics_stage_evidence_drops_oversized_roc_curve_arrays():
-    # Raw roc_ks_curves points are ~12 MB on realistic tasks; if they reach
-    # the LLM the prompt is too large and the call falls back to the
-    # one-line placeholder text. The slim helper must drop them while
-    # preserving the AUC/KS summary numbers the analysis depends on.
-    from marvis.agent.service import _metrics_stage_evidence
-
-    payload_curve = [{"x": i / 100, "y": (i / 100) ** 0.5} for i in range(2000)]
-    evidence = {
-        "scan": {"checks": []},
-        "validation_results": {
-            "model_name": "demo",
-            "basic_info": {
-                "feature_importance": [
-                    {"feature": f"f{index}", "importance": index}
-                    for index in range(1_000)
-                ],
-            },
-            "effectiveness": {
-                "overall": [{"split": "train", "ks": 0.34, "auc": 0.79}],
-                "monthly_ks": [{"month": "202503", "ks": 0.33}],
-                "psi_stability_table": [{"split": "oot", "psi": 0.05}],
-                "bin_tables": {
-                    "train": [
-                        {"bin": index, "bad_rate": index / 100}
-                        for index in range(100)
-                    ]
-                },
-                "roc_ks_curves": {
-                    "train": {"roc": payload_curve, "ks": payload_curve},
-                    "oot": {"roc": payload_curve, "ks": payload_curve},
-                },
-            },
-            "stress_test": {
-                "baseline": {"ks": 0.34, "bin_table": payload_curve},
-                "per_category": [
-                    {
-                        "category": "人行",
-                        "ks_after": 0.28,
-                        "dropped_features": [f"f{index}" for index in range(1_000)],
-                        "bin_table": payload_curve,
-                    }
-                ],
-                "status": "pass",
-            },
-        },
-    }
-
-    scoped = _metrics_stage_evidence(evidence)
-
-    effectiveness = scoped["validation_results"]["effectiveness"]
-    assert "roc_ks_curves" not in effectiveness
-    assert effectiveness["overall"] == [{"split": "train", "ks": 0.34, "auc": 0.79}]
-    assert effectiveness["monthly_ks"] == [{"month": "202503", "ks": 0.33}]
-    assert effectiveness["psi_stability_table"] == [{"split": "oot", "psi": 0.05}]
-    assert len(effectiveness["bin_tables"]["train"]) == 10
-    assert "lift_ranking_assessment" in effectiveness
-    assert len(scoped["validation_results"]["basic_info"]["feature_importance"]) == 20
-    stress = scoped["validation_results"]["stress_test"]
-    assert "bin_table" not in stress["baseline"]
-    assert "bin_table" not in stress["per_category"][0]
-    assert len(stress["per_category"][0]["dropped_features"]) == 20
-
-
-def test_word_conclusion_draft_evidence_drops_oversized_roc_curves():
-    # The Word draft stage uses the global evidence dict; the same large
-    # roc_ks_curves arrays must not reach the LLM or the three drafts fall
-    # back to placeholder text.
-    from marvis.agent.service import _stage_scoped_evidence
-
-    payload_curve = [{"x": i, "y": i} for i in range(500)]
-    evidence = {
-        "scan": {"checks": []},
-        "notebook_steps": [],
-        "contract": {},
-        "reproducibility": {"summary": {}},
-        "validation_results": {
-            "effectiveness": {
-                "overall": [{"split": "train", "ks": 0.34}],
-                "roc_ks_curves": {"train": payload_curve},
-            },
-        },
-        "report_fields": {"text_values": {}},
-        "visible_stage_summaries": [],
-    }
-
-    scoped = _stage_scoped_evidence("word_conclusion_draft", evidence)
-
-    assert "roc_ks_curves" not in scoped["validation_results"]["effectiveness"]
-    assert scoped["validation_results"]["effectiveness"]["overall"] == [
-        {"split": "train", "ks": 0.34}
-    ]
-    # report_fields and other non-validation keys are kept intact.
-    assert scoped["report_fields"] == {"text_values": {}}
-
-
-def test_word_conclusion_draft_evidence_is_compact_and_keeps_business_summaries():
-    from marvis.agent.service import _stage_scoped_evidence
-
-    huge_rows = [
-        {
-            "row_index": index,
-            "score_code_model": "0." + ("1" * 600),
-            "score_submitted_pmml": "0." + ("2" * 600),
-        }
-        for index in range(80)
-    ]
-    huge_curve = [{"x": index, "y": index} for index in range(1200)]
-    huge_bin_table = [{"bin": index, "bad_rate": index / 1000} for index in range(100)]
-    evidence = {
-        "scan": {
-            "checks": [{"label": "Notebook 文件", "status": "success", "message": "已识别"}],
-            "artifacts": [{"path": "/tmp/" + ("x" * 4000)}],
-        },
-        "notebook_steps": {
-            "steps": [
-                {
-                    "id": "notebook-long",
-                    "title": "长源码步骤",
-                    "source_previews": ["print('" + ("x" * 5000) + "')"],
-                }
-            ]
-        },
-        "contract": {"source": "RMC_SAMPLE_DF = " + ("x" * 5000)},
-        "reproducibility": {
-            "summary": {"status": "pass", "max_abs_diff": 0.0, "mismatch_count": 0},
-            "rows": huge_rows,
-            "sample_size": 200,
-            "seed": 42,
-        },
-        "validation_results": {
-            "model_name": "A卡",
-            "algorithm": "lgb",
-            "reproducibility": {
-                "summary": {"status": "pass", "max_abs_diff": 0.0},
-                "rows": huge_rows,
-            },
-            "basic_info": {
-                "split_summary": [{"split": "train", "sample_count": 1000}],
-                "feature_importance": [
-                    {"rank": index, "feature": f"f{index}", "importance": index}
-                    for index in range(60)
-                ],
-            },
-            "effectiveness": {
-                "overall": [{"split": "oot", "ks": 0.33, "auc": 0.72}],
-                "monthly_ks": [{"month": f"2025{index:02d}", "ks": 0.3} for index in range(1, 30)],
-                "monthly_psi": [
-                    {"month": f"2025{index:02d}", "psi_vs_train": 0.02}
-                    for index in range(1, 30)
-                ],
-                "psi_stability_table": huge_bin_table,
-                "bin_tables": {"train": huge_bin_table},
-                "roc_ks_curves": {"train": huge_curve},
-            },
-            "stress_test": {
-                "baseline": {"ks": 0.33, "sample_count": 1000, "bin_table": huge_bin_table},
-                "per_category": [
-                    {
-                        "category": f"数据源{index}",
-                        "ks_after": 0.30,
-                        "ks_delta": -0.03,
-                        "psi_vs_baseline": 0.02,
-                        "bin_table": huge_bin_table,
-                        "dropped_features": [f"f{index}", f"g{index}"],
-                    }
-                    for index in range(30)
-                ],
-            },
-            "overfitting_check": {"status": "pass", "train_oot_abs_diff": 0.01},
-        },
-        "report_fields": {"text_values": {"TEXT:report_title": "A卡模型验证"}},
-        "visible_stage_summaries": [
-            {"stage": "reproducibility", "content": "分数一致性已通过，最大差异为 0。"},
-            {"stage": "metrics", "content": "OOT KS 约 33 个点，PSI 总体可接受。"}
-        ],
-    }
-
-    scoped = _stage_scoped_evidence("word_conclusion_draft", evidence)
-    payload = json.dumps(scoped, ensure_ascii=False)
-
-    assert len(payload) < 16000
-    assert "notebook_steps" not in scoped
-    assert "contract" not in scoped
-    assert scoped["reproducibility"]["summary"]["status"] == "pass"
-    assert "rows" not in scoped["reproducibility"]
-    validation_results = scoped["validation_results"]
-    assert "rows" not in validation_results["reproducibility"]
-    assert "roc_ks_curves" not in validation_results["effectiveness"]
-    assert "bin_tables" not in validation_results["effectiveness"]
-    assert "lift_ranking_assessment" in validation_results["effectiveness"]
-    assert len(validation_results["effectiveness"]["monthly_ks"]) <= 12
-    assert len(validation_results["basic_info"]["feature_importance"]) <= 20
-    assert "bin_table" not in validation_results["stress_test"]["baseline"]
-    assert "bin_table" not in validation_results["stress_test"]["per_category"][0]
-    assert scoped["visible_stage_summaries"][0]["stage"] == "reproducibility"
-    assert scoped["visible_stage_summaries"][1]["content"].startswith("OOT KS")
-
-
-def test_word_conclusion_prompt_requires_detailed_final_conclusion(tmp_path):
-    from marvis.agent.service import _stage_prompt
-
-    client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
-
-    prompt = json.loads(
-        _stage_prompt(
-            task=task,
-            stage="word_conclusion_draft",
-            evidence={
-                "validation_results": {
-                    "effectiveness": {
-                        "overall": [{"split": "oot", "ks": 0.33, "auc": 0.72}]
-                    }
-                },
-                "visible_stage_summaries": [
-                    {"stage": "metrics", "content": "OOT KS 约 33 个点，PSI 总体可接受。"}
-                ],
-            },
-        )
-    )
-
-    instructions = prompt["instructions"]
-    assert "TEXT:final_validation_conclusion" in instructions
-    assert "1 到 2 个自然段" in instructions
-    assert "Notebook 可复现性" in instructions
-    assert "分数一致性" in instructions
-    assert "压力测试主要发现" in instructions
-    assert "不能退化成一句泛泛结论" in instructions
-
-
-def test_scan_stage_prompt_tells_llm_completed_materials_are_not_missing(tmp_path):
-    from marvis.agent.service import _stage_prompt
-
-    client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
-
-    prompt = json.loads(
-        _stage_prompt(
-            task=task,
-            stage="scan",
-            evidence={
-                "checks": [
-                    {"label": "Notebook 文件", "status": "success", "message": "已识别：model.ipynb"},
-                    {"label": "样本数据", "status": "success", "message": "已识别：sample.feather"},
-                    {"label": "PMML 模型", "status": "success", "message": "已识别：model.pmml"},
-                    {"label": "数据字典", "status": "success", "message": "已识别：dictionary.xlsx"},
-                    {
-                        "label": "Notebook RMC 契约",
-                        "status": "success",
-                        "message": "已定义 RMC_SAMPLE_DF / RMC_SCORE_FN / RMC_TARGET_COL / RMC_ALGORITHM",
-                    },
-                ],
-            },
-        )
-    )
-
-    interpretation = prompt["evidence"]["scan_interpretation"]
-    assert interpretation["required_materials_complete"] is True
-    assert interpretation["missing_required_materials"] == []
-    assert "pickle" in prompt["instructions"]
-    assert "KS/PSI/AUC" in prompt["instructions"]
-    assert "不得说缺少" in prompt["instructions"]
-    assert "未检测到模型文件" in prompt["instructions"]
-
-
 def test_scan_stage_summary_overrides_llm_missing_claim_when_materials_complete(
     tmp_path,
     monkeypatch,
@@ -2025,115 +1761,6 @@ def test_agent_plain_chat_compacts_large_validation_evidence(
         {"split": "oot", "ks": 0.333, "auc": 0.72}
     ]
     assert evidence["reproducibility"]["summary"]["status"] == "fail"
-
-
-def test_agent_chat_prompt_keeps_read_only_notebook_contract_summary(tmp_path):
-    from marvis.agent.service import _chat_prompt
-
-    client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
-
-    prompt = json.loads(
-        _chat_prompt(
-            task=task,
-            user_message="看一下现在 notebook 里的 RMC_ALGORITHM 是等于什么",
-            conversation=[],
-            evidence={
-                "scan": {
-                    "checks": [
-                        {
-                            "id": "notebook_contract",
-                            "label": "Notebook RMC 契约",
-                            "status": "success",
-                            "message": "已定义 RMC_SAMPLE_DF / RMC_SCORE_FN / RMC_TARGET_COL / RMC_ALGORITHM",
-                        }
-                    ],
-                    "notebook_contract": {
-                        "read_only": True,
-                        "source": "notebook_static_scan",
-                        "algorithm_source": "RMC_ALGORITHM",
-                        "algorithm_raw": "xgbm",
-                        "algorithm": "xgb",
-                        "algorithm_valid": True,
-                        "target_col": "y",
-                        "source_previews": [
-                            'RMC_ALGORITHM="xgbm"\n'
-                            + "RMC_SAMPLE_DF=model_data\n"
-                            + ("x" * 2000)
-                        ],
-                    },
-                }
-            },
-        )
-    )
-
-    contract = prompt["available_evidence"]["scan"]["notebook_contract"]
-    assert contract["read_only"] is True
-    assert contract["algorithm_raw"] == "xgbm"
-    assert contract["algorithm"] == "xgb"
-    assert contract["algorithm_source"] == "RMC_ALGORITHM"
-    assert contract["source_previews"][0].startswith('RMC_ALGORITHM="xgbm"')
-    assert len(contract["source_previews"][0]) <= 510
-    assert "只读静态扫描" in prompt["instructions"]
-    assert "不得要求用户手动打开Notebook" in prompt["instructions"]
-
-
-def test_agent_chat_prompt_keeps_failed_notebook_cell_file_references(tmp_path):
-    from marvis.agent.service import _chat_prompt
-
-    client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
-
-    prompt = json.loads(
-        _chat_prompt(
-            task=task,
-            user_message="notebook 到底缺哪个文件？",
-            conversation=[],
-            evidence={
-                "notebook_steps": {
-                    "steps": [
-                        {
-                            "id": "step-2",
-                            "title": "读取数据",
-                            "status": "failed",
-                            "cell_indexes": [2],
-                        }
-                    ],
-                    "cells": [
-                        {
-                            "cell_index": 2,
-                            "step_id": "step-2",
-                            "status": "failed",
-                            "exception_name": "FileNotFoundError",
-                            "exception_value": "[WinError 2] 系统找不到指定的文件。",
-                            "source_preview": "model_feature = pd.read_csv('model_feature.py')\nfeature = pd.read_csv('feature_importance_best.csv')",
-                            "referenced_files": [
-                                "model_feature.py",
-                                "feature_importance_best.csv",
-                            ],
-                            "file_access_lines": [
-                                "model_feature = pd.read_csv('model_feature.py')",
-                                "feature = pd.read_csv('feature_importance_best.csv')",
-                            ],
-                        }
-                    ],
-                }
-            },
-        )
-    )
-
-    failure = prompt["available_evidence"]["notebook_failure"]["failed_cells"][0]
-    assert failure["cell_index"] == 2
-    assert failure["step_title"] == "读取数据"
-    assert failure["exception_name"] == "FileNotFoundError"
-    assert failure["referenced_files"] == [
-        "model_feature.py",
-        "feature_importance_best.csv",
-    ]
-    assert "pd.read_csv('model_feature.py')" in failure["source_preview"]
-    assert "失败 cell" in prompt["instructions"]
 
 
 def test_failure_summary_keeps_local_diagnostics_without_sending_notebook_source(
@@ -3767,84 +3394,6 @@ def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
     assert "整体通过或投产判断" in repro_prompt["instructions"]
 
 
-def test_agent_reproducibility_summary_prompt_compacts_large_score_rows(tmp_path):
-    from marvis.agent.service import _stage_prompt
-
-    client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
-    rows = [
-        {
-            "row_index": index,
-            "score_code_model": 0.100001 + index / 1_000_000,
-            "score_submitted_pmml": 0.100002 + index / 1_000_000,
-            "abs_diff": 0.000001,
-            "matched": False,
-        }
-        for index in range(1000)
-    ]
-
-    prompt = json.loads(
-        _stage_prompt(
-            task=task,
-            stage="reproducibility",
-            evidence={
-                "notebook_steps": {
-                    "steps": [
-                        {
-                            "id": "system-repro-compare",
-                            "title": "分数一致性对比",
-                            "status": "succeeded",
-                            "source_previews": ["very large source that should be dropped"],
-                        }
-                    ],
-                    "cells": [
-                        {
-                            "cell_index": 39,
-                            "outputs": ["large cell outputs should be dropped"],
-                        }
-                    ],
-                },
-                "contract": {
-                    "algorithm": "lgb",
-                    "target_col": "y",
-                    "pmml_output_field": "probability_1",
-                    "feature_columns": [f"x{i}" for i in range(200)],
-                },
-                "reproducibility": {
-                    "sample_size": 1000,
-                    "seed": 42,
-                    "summary": {
-                        "match_count": 0,
-                        "mismatch_count": 1000,
-                        "max_abs_diff": 0.0223,
-                        "status": "fail",
-                    },
-                    "rows": rows,
-                },
-                "validation_results": {
-                    "reproducibility": {
-                        "summary": {"status": "pass"},
-                        "rows": rows,
-                    },
-                    "effectiveness": {"overall": [{"split": "oot", "ks": 0.33}]},
-                },
-            },
-        )
-    )
-
-    evidence = prompt["evidence"]
-    assert evidence["reproducibility"]["summary"]["status"] == "fail"
-    assert evidence["reproducibility"]["sample_size"] == 1000
-    assert "rows" not in evidence["reproducibility"]
-    assert evidence["contract"]["feature_count"] == 200
-    assert len(evidence["contract"]["feature_columns_sample"]) == 20
-    assert "source_previews" not in evidence["notebook_steps"][0]
-    prompt_text = json.dumps(prompt, ensure_ascii=False)
-    assert "score_code_model" not in prompt_text
-    assert "0.3215" not in prompt_text
-
-
 def test_agent_continue_retries_notebook_stage_after_notebook_failure(
     tmp_path,
     monkeypatch,
@@ -5390,9 +4939,10 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
         metadata={},
     )
 
+    # The draft card's「请 Agent 修订」button prefix names the field exactly.
     instruction = (
-        "请修正三段结论：压力测试总结要更正风险分层，"
-        "最终验证结论只评价模型效果和稳定性"
+        "请根据当前证据修订当前模型报告的「最终验证结论」："
+        "只评价模型效果和稳定性"
     )
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -5403,23 +4953,24 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
     assert response.json()["stage"] == "word_conclusion_draft"
     assert calls[0]["stage"] == "word_conclusion_draft"
     assert calls[0]["stage_message_id"]
-    assert earlier_instruction in calls[0]["stage_instruction"]
-    assert instruction in calls[0]["stage_instruction"]
-    assert calls[0]["stage_instruction"].index(earlier_instruction) < calls[0][
-        "stage_instruction"
-    ].index(instruction)
+    # Each revision applies to the current draft; earlier directives are not
+    # replayed (the exact field parser would refuse a numbered history).
+    assert calls[0]["stage_instruction"] == instruction
+    assert earlier_instruction not in calls[0]["stage_instruction"]
     task = repo.get_task(task_id)
     assert task.status == TaskStatus.WRITING_ARTIFACTS
     assert task.status_message == "agent rerun requested: word_conclusion_draft"
+    # A report-text revision keeps the confirmed paragraphs and version as
+    # its baseline instead of wiping them before the revision even runs.
     values, revision = repo.get_report_values(task_id)
-    assert revision == 2
-    assert all(values.get(key, "") == "" for key in REQUIRED_AGENT_CONCLUSIONS)
+    assert revision == 1
+    assert all(values[key] == text for key, text in REQUIRED_AGENT_CONCLUSIONS.items())
     messages = repo.list_agent_messages(task_id)
     assert any(message["content"] == "旧草稿也要保留。" for message in messages)
     rerun_user = next(message for message in messages if message["content"] == instruction)
     assert rerun_user["metadata"]["intent"] == "rerun_stage"
     assert rerun_user["metadata"]["target_stage"] == "word_conclusion_draft"
-    assert rerun_user["metadata"]["active_report_directive_count"] == 2
+    assert "active_report_directive_count" not in rerun_user["metadata"]
 
 
 def test_agent_rerun_rejects_stage_that_has_not_been_reached(tmp_path, monkeypatch):
@@ -5489,9 +5040,11 @@ def test_agent_report_confirm_writes_three_conclusions_and_dispatches_report(
     assert calls == [task_id]
     messages = repo.list_agent_messages(task_id)
     assert messages[-1]["stage"] == "word_report_ready"
+    # 2026-10-19: the message carries its own artifact card (frontend), so
+    # the copy points there first; the button words stay the same.
     assert messages[-1]["content"] == (
-        "报告已生成。右侧步骤里的“预览”可以在线查看 Word，"
-        "“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。"
+        "报告已生成。“预览”可以在线查看 Word，“下载Word”用于下载验证报告，"
+        "“下载Excel”用于下载指标分析明细；这三个入口在这条消息的产物卡和验证步骤的“产物”里。"
     )
 
 
@@ -5558,21 +5111,13 @@ def test_agent_report_confirm_rejects_active_job_without_mutating_conclusions(tm
     )
 
 
-def test_agent_report_confirm_claims_job_before_mutating_conclusions(
-    tmp_path,
-    monkeypatch,
-):
-    start_attempts: list[tuple[str, str]] = []
-
-    def fail_start_job(_repo, task_id, kind):
-        start_attempts.append((task_id, kind))
-        raise HTTPException(status_code=409, detail="task already has an active stage")
-
-    monkeypatch.setattr("marvis.agent.validation_app_service.start_task_job", fail_start_job)
+def test_agent_report_confirm_rolls_back_job_when_revision_is_stale(tmp_path):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
+    repo.update_agent_report_conclusions(task_id, {"TEXT:final_validation_conclusion": "newer draft"}, 0)
+    before = repo.get_report_values(task_id)
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/report-draft/confirm",
@@ -5580,14 +5125,17 @@ def test_agent_report_confirm_claims_job_before_mutating_conclusions(
     )
 
     assert response.status_code == 409
-    assert start_attempts == [(task_id, "report")]
-    values, revision = repo.get_report_values(task_id)
-    assert revision == 0
-    assert not REQUIRED_AGENT_CONCLUSIONS.items() <= values.items()
+    assert repo.get_report_values(task_id) == before
+    assert repo.get_latest_job(task_id) is None
     assert not any(
         message["stage"] == "word_conclusion_confirmed"
         for message in repo.list_agent_messages(task_id)
     )
+    with repo.transaction() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit WHERE target_ref=? AND kind='report.agent_conclusions.confirm'",
+            (task_id,),
+        ).fetchone()[0] == 0
 
 
 def test_agent_report_confirm_rejects_non_reportable_status_without_mutating_conclusions(
@@ -5632,7 +5180,8 @@ def test_agent_report_generation_requires_confirmed_conclusions(tmp_path, monkey
     response = client.post(f"/api/tasks/{task_id}/report")
 
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == "请先确认三段报告结论，确认后将生成 Word 报告"
+    assert response.json()["detail"].startswith("请先确认三段报告结论，确认后将生成 Word 报告")
+    assert "最终验证结论" in response.json()["detail"]
     assert calls == []
     assert repo.get_active_job_kind(task_id) is None
 
@@ -5659,8 +5208,10 @@ def test_agent_report_preview_and_download_require_confirmed_conclusions(tmp_pat
 
     assert preview.status_code == 409, preview.text
     assert download.status_code == 409, download.text
-    assert preview.json()["detail"] == "请先确认三段报告结论，确认后将生成 Word 报告"
-    assert download.json()["detail"] == "请先确认三段报告结论，确认后将生成 Word 报告"
+    # The preview iframe gets a readable page, not a raw JSON body.
+    assert preview.headers["content-type"].startswith("text/html")
+    assert "请先确认三段报告结论" in preview.text and '"detail"' not in preview.text
+    assert download.json()["detail"].startswith("请先确认三段报告结论，确认后将生成 Word 报告")
 
 
 def test_stream_agent_message_throttles_db_writes():

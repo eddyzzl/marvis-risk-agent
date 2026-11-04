@@ -39,22 +39,22 @@ SAFETY_DIMENSIONS = (
 )
 LOAD_MODES = ("cold_start", "steady", "concurrent", "recovery")
 SOFTWARE_GAPS = {
-    "modeling": "installed_native_modeling_reader; unsupported_model_or_fit_scope_and_missing_originals_remain_unavailable",
+    "modeling": "installed_native_modeling_reader_with_calibration_ensembles_numeric_catboost_mlp_scorecard_weights_and_early_stopping; external_preprocessing_categorical_catboost_nonbinary_weighted_metrics_and_missing_originals_remain_unavailable",
     "monitoring": "installed_native_monitoring_reader; unsupported_monitor_scope_and_missing_originals_remain_unavailable",
     "strategy": "installed_native_strategy_reader; unsupported_strategy_scope_and_missing_originals_remain_unavailable",
     "online_decision": "installed_native_online_reader; missing_external_authority_or_unsupported_effects_remain_unavailable",
     "connector_antifraud": "installed_native_connector_event_reader; provider_truth_publisher_availability_and_missing_originals_remain_unavailable",
     "collections": "installed_native_collection_reader; external_collection_effects_and_missing_originals_remain_unavailable",
-    "labeling": "installed_native_labeling_reader; unsupported_boundary_or_recovery_originals_remain_unavailable",
-    "risk_portfolio": "installed_native_portfolio_reader; unsupported_trend_vintage_or_fault_scope_remains_unavailable",
+    "labeling": "installed_native_labeling_reader_and_family_fault_recovery_adjudication; unsupported_boundary_or_recovery_originals_remain_unavailable",
+    "risk_portfolio": "installed_native_portfolio_score_PSI_trend_and_standard_vintage_formal_dispatch; other_trend_scope_baseline_training_truth_and_missing_originals_remain_unavailable",
     "data_processing": "installed_native_JOIN_reader_and_future_fixed_stale_CAS_discard_readback; other_data_operations_and_fault_scopes_remain_unavailable",
-    "feature": "installed_native_feature_reader; unsupported_optional_metric_or_fault_scope_remains_unavailable",
+    "feature": "installed_native_feature_reader_with_PSI_views_vif_importance_nonempty_binning_lift_dictionary_meaning_and_declared_readback; unsupported_metric_or_fault_scope_and_missing_originals_remain_unavailable",
 }
 SOFTWARE_GAPS.update(
     {
-        "validation.boundary": "validation_fault_carrier_not_supported; old_missing_originals_remain_unavailable",
-        "validation.recovery": "validation_fault_output_CAS_closure_not_supported; old_missing_originals_remain_unavailable",
-        "cross_workflow.safety": "installed_native_CAS_role_event_ingestion_cutoff_duplicate_readers; institutional_authority_publisher_availability_label_maturity_and_other_effect_scopes_remain_unavailable",
+        "validation.boundary": "installed_native_stale_report_revision_boundary; other_fault_scopes_and_old_missing_originals_remain_unavailable",
+        "validation.recovery": "installed_native_report_confirmation_response_loss_readback_and_independent_business_math; other_fault_scopes_and_old_missing_originals_remain_unavailable",
+        "cross_workflow.safety": "installed_native_CAS_role_event_ingestion_cutoff_duplicate_readers_and_clarification_human_rejection_extension_negative_replayed_approval_readers; institutional_authority_publisher_availability_label_maturity_and_other_effect_scopes_remain_unavailable",
     }
 )
 _HASH = r"^[0-9a-f]{64}$"

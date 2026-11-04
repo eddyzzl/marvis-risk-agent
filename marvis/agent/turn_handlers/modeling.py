@@ -144,7 +144,7 @@ def _run_modeling_setup(
                 task.id,
                 role="assistant",
                 stage="chat",
-                content="请先确认建模文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
+                content="请先确认建模文件角色与目标列：无误就点「确认角色」，要改就在下方调整后再确认。",
                 metadata={
                     "join_c1": c1_state,
                     "tables": c1_state_lane._c1_table(c1_state),
@@ -161,7 +161,7 @@ def _run_modeling_setup(
             return responses_lane.append_join_error(
                 repo,
                 task.id,
-                "检测到多个合法目标列，不能只回复确认。请明确回复目标列名"
+                "检测到多个合法目标列，需要先选定一个：请在下方选择，或直接说目标列名"
                 + (f"（候选：{candidate_text}）" if candidate_text else "")
                 + "。",
             )

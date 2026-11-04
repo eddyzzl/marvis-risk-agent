@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
+from marvis.data.file_identity import stable_file_stat as _stable_file_stat
 
 
 def arrow_integer_dtype(arrow_type):
@@ -610,16 +611,6 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
     )
 
 
-def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-        int(value.st_nlink),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
 
 
 def _fail(reason: SnapshotFailureReason, message: str) -> None:

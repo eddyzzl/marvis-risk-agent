@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Request
 
 from marvis.api_schemas import ValidationInputConfirmationRequest
@@ -18,14 +20,17 @@ from marvis.repositories.validation_contracts import (
 from marvis.validation.input_confirmation import (
     validate_confirmation_against_materials,
 )
+from marvis.agent.workflow_error_diagnostics import workflow_error_content
 from marvis.validation.input_contracts import (
     ValidationInputConfirmation,
     transformation_spec_from_dict,
+    validation_confirmation_to_dict,
 )
 from marvis.validation_materials import resolve_selected_validation_materials
 
 
 router = APIRouter(prefix="/api", tags=["validation-contracts"])
+logger = logging.getLogger(__name__)
 
 
 def _task_repo(request: Request) -> TaskRepository:
@@ -42,6 +47,55 @@ def get_validation_input_contract(task_id: str, request: Request) -> dict:
     if record is None:
         raise not_found("validation input contract not found")
     return record.to_api_payload()
+
+
+def _add_confirmation_failure_card(
+    request: Request,
+    task_repo: TaskRepository,
+    task,
+    *,
+    error: str,
+    requested: ValidationInputConfirmation,
+) -> None:
+    """Put a classified confirmation failure into the Agent conversation.
+
+    The 422 response is unchanged; the card adds the diagnosis and the
+    one-click options (B-line spec 2026-10-16 §5.6). The same failure
+    submitted again does not stack a second identical card.
+    """
+
+    from marvis.agent.validation_repair import diagnose_validation_failure
+
+    # Batch children get the card too: the batch workbench shows the selected
+    # child's conversation and sends its commands to that child
+    # (2026-10-23 extension spec §5.4).
+    diagnostic = diagnose_validation_failure(
+        settings=request.app.state.settings,
+        task=task,
+        stage="input_confirmation",
+        error=error,
+        requested_confirmation=validation_confirmation_to_dict(requested),
+    )
+    if diagnostic is None:
+        return
+    messages = task_repo.list_agent_messages(task.id)
+    latest = next(
+        (item for item in reversed(messages) if item.get("role") == "assistant"),
+        None,
+    )
+    previous = ((latest or {}).get("metadata") or {}).get("error_diagnostic") or {}
+    if (
+        previous.get("code") == diagnostic.get("code")
+        and previous.get("technical_detail") == diagnostic.get("technical_detail")
+    ):
+        return
+    task_repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="failure",
+        content=workflow_error_content(diagnostic),
+        metadata={"error": True, "error_diagnostic": diagnostic},
+    )
 
 
 @router.put("/tasks/{task_id}/validation-input-contract")
@@ -73,6 +127,7 @@ def confirm_validation_input_contract(
     if current.status != "pending_confirmation":
         raise conflict("only a pending validation input contract can be confirmed")
 
+    requested: ValidationInputConfirmation | None = None
     job_id = start_task_job(task_repo, task_id, "validation_input_confirmation")
     if not task_repo.mark_job_running(job_id):
         task_repo.finish_job(job_id, status="failed")
@@ -144,6 +199,15 @@ def confirm_validation_input_contract(
             error_name=exc.__class__.__name__,
             error_value=str(exc),
         )
+        if task.run_mode == "agent" and requested is not None:
+            try:
+                _add_confirmation_failure_card(
+                    request, task_repo, task, error=str(exc), requested=requested
+                )
+            except Exception:  # noqa: BLE001 - the card must never replace the 422
+                logger.exception(
+                    "validation confirmation failure card failed task_id=%s", task_id
+                )
         raise unprocessable(str(exc)) from exc
     except Exception as exc:
         task_repo.finish_job(

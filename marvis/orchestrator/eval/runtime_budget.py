@@ -17,7 +17,7 @@ class AdmissionBudgetExceeded(ValueError):
 class AggregateBudget:
     # Synchronization is owned by AttemptObserver's existing single lock.
     def __init__(self, *, context_window, max_total_tokens=None, max_cost=None,
-                 currency=None, price=None, price_hash=None):
+                 currency=None, price=None, price_hash=None, retain_full_reservations=False):
         self.context_window = context_window
         self.max_total_tokens = max_total_tokens
         self.max_cost = None if max_cost is None else Decimal(str(max_cost))
@@ -31,6 +31,7 @@ class AggregateBudget:
         self.pending = {}
         self.unknown_attempts = 0
         self.violation = False
+        self.retain_full_reservations = retain_full_reservations
 
     @property
     def configured(self):
@@ -40,7 +41,7 @@ class AggregateBudget:
         return (prompt * self.prompt_rate + completion * self.completion_rate) / Decimal(1_000_000)
 
     def policy(self):
-        return {
+        policy = {
             "max_total_tokens": self.max_total_tokens,
             "max_cost": None if self.max_cost is None else str(self.max_cost),
             "currency": self.currency,
@@ -50,6 +51,9 @@ class AggregateBudget:
             "provider_billing_guarantee": False,
             "reasoning_assumption": "completion usage and output ceiling include reasoning",
         }
+        if self.retain_full_reservations:
+            policy["retain_full_reservations"] = True
+        return policy
 
     def reserve(self, ticket, output_cap):
         if not self.configured:
@@ -97,6 +101,8 @@ class AggregateBudget:
         if result.get("usage_final") is not True:
             self.unknown_attempts += 1
             return {"reservation_status": "retained_unconfirmed_usage"}
+        if self.retain_full_reservations:
+            return {"reservation_status": "retained_formal_full_reservation"}
         self.tokens -= tokens - prompt - completion
         self.cost -= cost - self._cost(prompt, completion)
         return {"reservation_status": "settled_reported_usage"}

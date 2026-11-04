@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import logging
 
 from marvis.agent.service import (
     REQUIRED_AGENT_REPORT_KEYS,
@@ -18,6 +19,16 @@ from marvis.agent.validation_messages import (
     model_metadata,
     stream_agent_message,
 )
+from marvis.agent.quick_replies import quick_reply, with_quick_replies
+from marvis.agent.validation_repair import (
+    TIER_AUTO,
+    apply_repair_option,
+    budget_exhausted_note,
+    plan_auto_repair,
+    repair_report_content,
+    strip_option,
+)
+from marvis.agent.workflow_error_diagnostics import workflow_error_content
 from marvis.agent.validation_service import raise_if_agent_cancelled
 from marvis.agent_memory.api_support import (
     agent_memory_context_from_store,
@@ -25,6 +36,7 @@ from marvis.agent_memory.api_support import (
 )
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.domain import TASK_TYPE_VALIDATION, TaskRecord, TaskStatus
+from marvis.llm_outbound_revision import EVIDENCE_OPERATIONS, LOCAL_OPERATIONS
 from marvis.repositories.tasks import AGENT_REPORT_WRITABLE_KEYS, TaskRepository
 from marvis.repositories.validation_contracts import (
     ValidationContractRepository,
@@ -32,6 +44,8 @@ from marvis.repositories.validation_contracts import (
 )
 from marvis.validation_services.confirmation import confirm_unambiguous_contract
 
+
+logger = logging.getLogger(__name__)
 
 MAX_INPUT_CONFIRMATION_CANDIDATE_LINES = 24
 MAX_INPUT_CONFIRMATION_CANDIDATES_PER_FIELD = 3
@@ -70,6 +84,9 @@ class ValidationStageDependencies:
     failure_summary: Callable
     sync_agent_batch_after_child_report: Callable | None = None
     sync_agent_batch_child_progress: Callable | None = None
+    # B-line self-repair (marvis/agent/validation_repair.py). ``None`` keeps
+    # the LLM failure explanation only.
+    diagnose_failure: Callable | None = None
 
 
 def open_agent_stage(
@@ -188,6 +205,9 @@ def finalize_agent_opening_message(
     )
 
 
+MAX_AUTO_REPAIR_RESCANS = 2
+
+
 def run_agent_scan_stage(
     repo: TaskRepository,
     settings,
@@ -196,6 +216,7 @@ def run_agent_scan_stage(
     *,
     auto_accept: bool = False,
     deps: ValidationStageDependencies,
+    _repair_depth: int = 0,
 ) -> bool:
     task = repo.get_task(task_id)
     repo.add_agent_message(
@@ -203,8 +224,9 @@ def run_agent_scan_stage(
         role="assistant",
         stage="scan",
         content=(
-            "正在调用材料识别工具 scan_materials：读取材料目录，识别 Notebook、样本数据、"
-            "PMML 模型和数据字典，并检查 Notebook RMC 契约。"
+            "正在调用材料识别工具：读取材料目录，识别 Notebook、样本数据、"
+            "PMML 模型和数据字典，并检查"
+            + ("验证输入契约。" if task.validation_workflow_version == 2 else " Notebook RMC 契约。")
         ),
         metadata={
             **model_metadata(model_profile),
@@ -219,6 +241,48 @@ def run_agent_scan_stage(
     raise_if_agent_cancelled(task_id)
     task = repo.get_task(task_id)
     if task.status == TaskStatus.FAILED:
+        diagnostic = diagnose_agent_failure(
+            settings,
+            task,
+            stage="scan",
+            error=task.status_message,
+            evidence={"scan": scan_payload},
+            deps=deps,
+        )
+        if diagnostic is not None and _repair_depth < MAX_AUTO_REPAIR_RESCANS:
+            report = try_agent_auto_repair(
+                repo,
+                settings,
+                task,
+                diagnostic,
+                model_profile=model_profile,
+                stage="scan",
+            )
+            if report is not None and report["verified"]:
+                # Rescan with the repaired contract inputs; the rescan's own
+                # outcome (and its failure card, if any) is the final word.
+                return run_agent_scan_stage(
+                    repo,
+                    settings,
+                    task_id,
+                    model_profile,
+                    auto_accept=auto_accept,
+                    deps=deps,
+                    _repair_depth=_repair_depth + 1,
+                )
+            if report is not None:
+                diagnostic = strip_option(
+                    diagnostic,
+                    str(report["option_id"]),
+                    {"label": "我试过", "value": str(report["verification"])},
+                )
+            else:
+                note = budget_exhausted_note(settings, repo.list_agent_messages(task_id), task)
+                if note is not None and any(
+                    option.get("tier") == TIER_AUTO
+                    for option in diagnostic.get("repair_options") or []
+                ):
+                    diagnostic = {**diagnostic, "evidence": [*diagnostic["evidence"], note]}
         add_agent_failure_summary(
             repo,
             task_id=task_id,
@@ -228,6 +292,7 @@ def run_agent_scan_stage(
             model_profile=model_profile,
             deps=deps,
             evidence={"scan": scan_payload},
+            diagnostic=diagnostic,
         )
         return False
     add_and_stream_agent_message(
@@ -370,11 +435,10 @@ def add_agent_input_confirmation_prompt(
         role="assistant",
         stage="input_confirmation",
         content=(
-            f"验证输入契约状态为 {status}"
-            f"（revision {revision}）。"
+            f"验证字段{_contract_status_label(status)}（第 {revision} 版）。"
             f"{candidate_intro}"
-            "请先在验证字段确认界面逐项确认验证字段并提交；契约状态变为 ready 后，"
-            "再回复“继续”。在确认完成前，平台不会执行 PMML 打分测试。"
+            "请先在下面的界面逐项确认验证字段并提交，确认完成后再继续。"
+            "确认前平台不会执行 PMML 打分测试。"
         ),
         metadata={
             **model_metadata(model_profile),
@@ -390,6 +454,20 @@ def add_agent_input_confirmation_prompt(
             },
         },
     )
+
+
+# Business wording for the contract states users see; unknown states fall back
+# to a neutral phrase instead of the raw code.
+_CONTRACT_STATUS_LABELS = {
+    "pending_confirmation": "待确认",
+    "needs_confirmation": "待确认",
+    "ready": "已确认",
+    "confirmed": "已确认",
+}
+
+
+def _contract_status_label(status: object) -> str:
+    return _CONTRACT_STATUS_LABELS.get(str(status or "").strip(), "待核对")
 
 
 def _candidate_preview_value(value: object, *, depth: int = 0) -> object:
@@ -634,23 +712,17 @@ def run_agent_word_conclusion_stage(
         )
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         narrative_source = "agent_generated"
-        if metadata.get("report_revision_operation") in {"clear", "set_local_text", "replace_local_text"}:
+        if metadata.get("report_revision_operation") in LOCAL_OPERATIONS:
             narrative_source = "local_edited"
         needs_clarification = metadata.get("outbound_context_status") == "clarification_required"
         revision_failed = metadata.get("report_revision_status") == "failed"
-        preserves_local_edit = metadata.get("report_revision_operation") in {"clear", "set_local_text", "replace_local_text", "regenerate_from_evidence"}
+        preserves_local_edit = metadata.get("report_revision_operation") in LOCAL_OPERATIONS | EVIDENCE_OPERATIONS
         if needs_clarification or revision_failed:
             # Never replace a rejected revision with new, auto-accepted prose.
-            # Keep the exact local baseline available in the draft for editing.
-            from marvis.agent.service import _with_narrative_report_seeds
-
-            local = {}
-            for name in ("saved_report_narrative", "report_draft"):
-                context = evidence.get(name)
-                if isinstance(context, dict) and isinstance(context.get("text_values"), dict):
-                    local.update({key: value for key, value in context["text_values"].items()
-                                  if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)})
-            values = _with_narrative_report_seeds(task, local, evidence)
+            # Re-emit the exact local baseline (the current draft, which a
+            # report-text rerun no longer clears) so nothing typed is lost.
+            values = _preserved_draft_values(task, evidence)
+            metadata["local_preserved"] = True
             narrative_source = "local_preserved"
         elif (not isinstance(values, dict) or not agent_conclusions_confirmed(values)) and not preserves_local_edit:
             values = deps.fallback_word_conclusions(task=task, evidence=evidence)
@@ -660,6 +732,7 @@ def run_agent_word_conclusion_stage(
                 "deterministic_fallback": True,
                 "confirmable": False,
             })
+        values = _refresh_default_training_description(values, task)
         draft_result["values"] = values
         draft_result["metadata"] = metadata
         draft_result["report_revision"] = report_revision
@@ -699,6 +772,15 @@ def run_agent_word_conclusion_stage(
             model_profile=model_profile,
             metadata=draft_result.get("metadata"),
         )
+        # A batch item would otherwise stay 「执行中 · 报告结论」 with no job
+        # (eval S5 stalled 8+ minutes): it now waits on the user's retry.
+        if deps.sync_agent_batch_child_progress is not None:
+            deps.sync_agent_batch_child_progress(
+                db_path=repo.db_path,
+                child_task_id=task_id,
+                status="awaiting_confirmation",
+                stage="word_conclusion_draft",
+            )
         return False
     if auto_accept:
         return generate_agent_report_from_conclusions(
@@ -713,7 +795,62 @@ def run_agent_word_conclusion_stage(
             ),
             deps=deps,
         )
+    # The draft now waits on the user (or 全部确认); the batch item says so
+    # instead of 「执行中 · 报告结论」 (eval S5).
+    if deps.sync_agent_batch_child_progress is not None:
+        deps.sync_agent_batch_child_progress(
+            db_path=repo.db_path,
+            child_task_id=task_id,
+            status="awaiting_confirmation",
+            stage="word_conclusion_draft",
+        )
     return True
+
+
+def _readable_llm_error(text: str) -> str:
+    """The model client's English failure text, in words a user can act on."""
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if value.lower().startswith("llm request failed"):
+        return "大模型请求失败（可能是网络或服务暂时不可用）。"
+    return value
+
+
+def _refresh_default_training_description(values, task):
+    """Show the platform's training text once the algorithm is known.
+
+    Home-created tasks store the pending placeholder at creation; the scan
+    later sets ``task.algorithm``. The final report already swaps a platform
+    default for the algorithm's text (report_texts); the draft table now
+    shows the same instead of the placeholder (eval S2). A user's own text is
+    never replaced.
+    """
+    from marvis.model_algorithms import is_platform_default_training_description, model_training_report_text
+
+    key = "TEXT:model_training_description"
+    if not isinstance(values, dict) or key not in values:
+        return values
+    algorithm = str(getattr(task, "algorithm", "") or "").strip()
+    if not algorithm or not is_platform_default_training_description(values.get(key), algorithm):
+        return values
+    try:
+        text = model_training_report_text(algorithm)
+    except ValueError:
+        return values
+    return {**values, key: text}
+
+
+def _preserved_draft_values(task, evidence: dict) -> dict:
+    from marvis.agent.service import _with_narrative_report_seeds
+
+    local = {}
+    for name in ("saved_report_narrative", "report_draft"):
+        context = evidence.get(name)
+        if isinstance(context, dict) and isinstance(context.get("text_values"), dict):
+            local.update({key: value for key, value in context["text_values"].items()
+                          if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)})
+    return _with_narrative_report_seeds(task, local, evidence)
 
 
 def _word_conclusion_evidence_with_stage_summaries(
@@ -774,11 +911,19 @@ def add_agent_word_draft_failure_message(
             )
             return
         if metadata.get("report_revision_status") == "failed":
+            # The first draft is generated through the same evidence path as a
+            # rewrite; it is not a 修订 the user asked for.
+            drafts = [m for m in repo.list_agent_messages(task_id) if m.get("stage") == "word_conclusion_draft"]
+            first_draft = len(drafts) <= 1
+            lead = "报告结论草稿生成失败。" if first_draft else "报告修订未完成。"
             repo.add_agent_message(
                 task_id, role="assistant", stage="chat",
-                content=f"报告修订未完成。{llm_error} 当前报告字段已保留，请重试或使用报告表格编辑后确认。",
-                metadata={**model_metadata(model_profile), "word_draft_failed": True,
-                          "confirmable": False, "report_revision_status": "failed"},
+                content=f"{lead}{_readable_llm_error(llm_error)} 当前报告字段已保留，可以点「重新生成报告结论」再试，或直接在报告表格里编辑后确认。",
+                metadata=with_quick_replies(
+                    {**model_metadata(model_profile), "word_draft_failed": True,
+                     "confirmable": False, "report_revision_status": "failed"},
+                    quick_reply("重新生成报告结论", "重新生成结论"),
+                ),
             )
             return
         if metadata.get("report_revision_operation") in {"clear", "set_local_text", "replace_local_text", "regenerate_from_evidence"}:
@@ -914,6 +1059,83 @@ def auto_confirm_agent_report_conclusions(
     )
 
 
+def diagnose_agent_failure(
+    settings,
+    task: TaskRecord,
+    *,
+    stage: str,
+    error: str,
+    evidence: dict | None,
+    deps: ValidationStageDependencies,
+) -> dict | None:
+    if deps.diagnose_failure is None:
+        return None
+    return deps.diagnose_failure(
+        settings=settings,
+        task=task,
+        stage=stage,
+        error=error,
+        evidence=evidence,
+    )
+
+
+def try_agent_auto_repair(
+    repo: TaskRepository,
+    settings,
+    task: TaskRecord,
+    diagnostic: dict,
+    *,
+    model_profile: dict,
+    stage: str,
+) -> dict | None:
+    """Run the diagnostic's auto option within budget and post its report."""
+
+    option = plan_auto_repair(settings, task, diagnostic, repo.list_agent_messages(task.id))
+    if option is None:
+        return None
+    try:
+        report = apply_repair_option(
+            settings,
+            task,
+            option,
+            finding=str(diagnostic.get("summary") or ""),
+            trigger="auto",
+        )
+    except Exception:  # noqa: BLE001 - the failure card must still be posted
+        logger.exception("validation auto repair failed task_id=%s", task.id)
+        return None
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage=stage,
+        content=repair_report_content(report),
+        metadata={**model_metadata(model_profile), "repair_report": report},
+    )
+    return report
+
+
+def add_agent_diagnostic_failure_message(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    diagnostic: dict,
+    model_profile: dict,
+) -> dict:
+    """A deterministic failure card: classified, checked, with repair options."""
+
+    return repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="failure",
+        content=workflow_error_content(diagnostic),
+        metadata={
+            **model_metadata(model_profile),
+            "error": True,
+            "error_diagnostic": diagnostic,
+        },
+    )
+
+
 def add_agent_failure_summary(
     repo: TaskRepository,
     *,
@@ -924,7 +1146,16 @@ def add_agent_failure_summary(
     model_profile: dict,
     deps: ValidationStageDependencies,
     evidence: dict | None = None,
+    diagnostic: dict | None = None,
 ) -> None:
+    if diagnostic is not None:
+        add_agent_diagnostic_failure_message(
+            repo,
+            task_id=task_id,
+            diagnostic=diagnostic,
+            model_profile=model_profile,
+        )
+        return
     add_and_stream_agent_message(
         repo,
         task_id,
@@ -958,7 +1189,10 @@ def add_agent_continue_prompt(
             "是否继续执行【"
             f"{agent_stage_label(next_stage, validation_workflow_version=validation_workflow_version)}"
             "】？"
-            "你可以先继续提问；需要继续时，请明确回复“继续”。"
+            "点「继续」开始，也可以先接着提问。"
         ),
-        metadata={**model_metadata(model_profile), "awaiting_next_stage": next_stage},
+        metadata=with_quick_replies(
+            {**model_metadata(model_profile), "awaiting_next_stage": next_stage},
+            quick_reply("继续"),
+        ),
     )

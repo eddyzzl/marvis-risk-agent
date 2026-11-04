@@ -33,7 +33,7 @@ MAX_MANIFEST_BYTES = 16 * 1024**2
 _WORKSPACE_DIRS = (
     "tasks", "datasets", "plugins", "report_templates", "branding",
     "material_uploads", "source", "reference_decision", "historical_event_private",
-    "operations", "cache",
+    "operations", "cache", ".runtime-process-originals", ".runtime-eval-fault",
 )
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\Z")
 

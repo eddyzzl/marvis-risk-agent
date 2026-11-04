@@ -143,6 +143,16 @@ export function createLabelingSetupPanel(dependencies = {}) {
     states: requiredElement(getElementById, "labelingStates"),
   };
 
+  // Eval S6: a join task opened on the full label-construction form, which
+  // had nothing to do with joining. With the page's toggle present the form
+  // starts folded behind 「填写口径」; without it (tests, embeds) it is open.
+  const toggle = getElementById("labelingSetupToggle");
+  let expanded = !toggle;
+  toggle?.addEventListener?.("click", () => {
+    expanded = !expanded;
+    renderAvailability();
+  });
+
   let activeSubmission = null;
   const isSubmitting = () => Boolean(activeSubmission && isCurrentView(activeSubmission.view));
   const beginActivity = dependencies.beginActivity || (() => ({}));
@@ -167,8 +177,13 @@ export function createLabelingSetupPanel(dependencies = {}) {
     const availability = workspaceAvailability(workspaceController, task);
 
     elements.root.hidden = !visible;
-    elements.form.hidden = !visible || uiState.mode !== "setup";
+    elements.form.hidden = !visible || uiState.mode !== "setup" || !expanded;
     elements.proposalPanel.hidden = !visible || uiState.mode !== "confirm";
+    if (toggle) {
+      toggle.hidden = uiState.mode !== "setup";
+      toggle.textContent = expanded ? "收起" : "填写口径";
+      toggle.setAttribute?.("aria-expanded", expanded ? "true" : "false");
+    }
     renderRuleFields();
 
     if (!visible) {

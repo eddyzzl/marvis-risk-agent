@@ -15,9 +15,16 @@ function location(locator) {
   return `JSON ${locator.pointer || "根值"}`;
 }
 
-export function createStrategyHistoryMappingPanel({ root, get = apiGet, post = apiPost }) {
+// V3 5.7: data processing tasks use the same panel. They register a task
+// material directly (registerSources), and the panel hides itself outside its
+// task types (hideOutsideTaskTypes) because it sits in the Inspector.
+export function createStrategyHistoryMappingPanel({
+  root, get = apiGet, post = apiPost, taskTypes = ["strategy"], registerSources = false, hideOutsideTaskTypes = false,
+}) {
   root.innerHTML = `<details><summary>确认历史材料中的字段和指标</summary>
     <p>来源值留在本地。历史报告值未经平台复算，不能据此宣称验证通过；缺项保持未知。</p>
+    ${registerSources ? `<label>任务材料 <select data-hm-candidate aria-label="可登记的任务材料"></select></label>
+    <button type="button" class="button compact secondary" data-hm-register>登记为历史材料</button>` : ""}
     <label>已登记材料 <select data-hm-source aria-label="历史映射材料"></select></label>
     <button type="button" class="button compact secondary" data-hm-refresh>重新读取材料</button>
     <label>输入方式 <select data-hm-mode><option value="form">选择来源位置</option><option value="instruction">完整位置指令</option></select></label>
@@ -55,6 +62,10 @@ export function createStrategyHistoryMappingPanel({ root, get = apiGet, post = a
     field("name").parentElement.hidden = kind === "metric" || kind === "strategy_version";
     const ready = sources.some((source) => source.artifact_id === field("source").value && source.status === "ready");
     for (const name of ["source", "mode", "cell", "kind", "name", "metric", "unit", "format", "period", "version", "instruction", "refresh"]) field(name).disabled = busy;
+    if (registerSources) {
+      field("candidate").disabled = busy || !taskId;
+      field("register").disabled = busy || !taskId || !field("candidate").value;
+    }
     field("add").disabled = busy || !ready || !cells.length;
     field("more").disabled = busy || nextOffset === null;
     field("propose").disabled = busy || !taskId || (field("mode").value === "instruction" ? !ready : !draft.length && head.revision === 0);
@@ -83,8 +94,10 @@ export function createStrategyHistoryMappingPanel({ root, get = apiGet, post = a
     invalidate(); cells = []; busy = true; sync();
     if (!task) { busy = false; sync(); return; }
     try {
-      const [current, available] = await Promise.all([get(endpoint()), get(endpoint() + "/sources")]);
+      const [current, available, candidates] = await Promise.all([get(endpoint()), get(endpoint() + "/sources"),
+        registerSources ? get(endpoint() + "/sources/candidates") : null]);
       if (operation !== epoch || task !== taskId) return;
+      if (registerSources) field("candidate").innerHTML = (candidates?.filenames || []).map((name) => `<option value="${escape(name)}">${escape(name)}</option>`).join("");
       head = current.head; draft = (current.mapping?.bindings || []).map(requestOnly); sources = available.sources;
       field("source").innerHTML = sources.map((source) => `<option value="${escape(source.artifact_id)}">${escape(source.name)}${source.status === "ready" ? "" : " · 无法定位"}</option>`).join("");
       renderDraft();
@@ -99,6 +112,20 @@ export function createStrategyHistoryMappingPanel({ root, get = apiGet, post = a
     else { epoch += 1; cells = []; nextOffset = null; invalidate(); field("status").textContent = source?.next_action || "来源不可用。"; sync(); }
   });
   field("refresh").addEventListener("click", refresh);
+  if (registerSources) {
+    field("candidate").addEventListener("change", sync);
+    field("register").addEventListener("click", async () => {
+      if (field("register").disabled) return;
+      const task = taskId, operation = ++epoch;
+      busy = true; sync();
+      try {
+        await post(endpoint() + "/sources", {filename:field("candidate").value});
+        if (operation !== epoch || task !== taskId) return;
+        busy = false;
+        await refresh();
+      } catch (error) { if (operation === epoch && task === taskId) { busy = false; field("status").textContent = errorMessage(error); sync(); } }
+    });
+  }
   field("more").addEventListener("click", () => loadCells(nextOffset));
   for (const name of ["mode", "kind", "name", "metric", "unit", "format", "period", "version", "cell", "instruction"]) field(name).addEventListener(name === "instruction" || name === "name" ? "input" : "change", () => { invalidate(); sync(); });
   field("add").addEventListener("click", () => {
@@ -149,7 +176,8 @@ export function createStrategyHistoryMappingPanel({ root, get = apiGet, post = a
   });
   sync();
   return {refresh, selectTask(task) {
-    const selected = task?.task_type === "strategy" ? task.id : "";
+    const selected = taskTypes.includes(task?.task_type) ? task.id : "";
+    if (hideOutsideTaskTypes) root.hidden = !selected;
     if (selected === taskId) return Promise.resolve();
     epoch += 1; taskId = selected; busy = false; draft = []; cells = []; sources = []; nextOffset = null;
     head = {revision:0, artifact_id:null, content_hash:null}; field("instruction").value = ""; field("name").value = "";

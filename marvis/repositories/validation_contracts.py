@@ -70,6 +70,23 @@ class ValidationContractRepository:
     def get(self, task_id: str) -> ValidationInputContractRecord | None:
         return _read_contract_record(self.db_path, task_id)
 
+    def pending_confirmation_task_ids(self, task_ids: list[str]) -> set[str]:
+        """Tasks whose input contract still waits on the user's field check.
+
+        Feeds the task list so a single validation task waiting on that check
+        shows the same status word as a batch item in the same state
+        (2026-10-14 redesign, B7). One query for the whole page of tasks.
+        """
+        ids = [str(task_id).strip() for task_id in task_ids if str(task_id).strip()]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" * len(ids))
+        # Only generated '?' placeholders are interpolated; IDs stay bound.
+        query = f"SELECT task_id FROM validation_input_contracts WHERE status = 'pending_confirmation' AND task_id IN ({placeholders})"  # nosec B608
+        with connect(self.db_path) as conn:
+            rows = conn.execute(query, ids).fetchall()
+        return {str(row["task_id"]) for row in rows}
+
     def replace_candidates(
         self, task_id: str, contract: ValidationInputContract
     ) -> ValidationInputContractRecord:

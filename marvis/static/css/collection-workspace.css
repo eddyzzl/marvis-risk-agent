@@ -1,7 +1,9 @@
 .collection-workspace {
   margin: 12px 0;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-shadow: none;
   min-width: 0;
 }
 .collection-workspace[hidden] {
@@ -15,7 +17,7 @@
 }
 .collection-workspace > details > summary span {
   margin-left: 8px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   font-weight: 400;
 }
@@ -53,7 +55,7 @@
   gap: 14px;
   width: 100%;
   border: 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   padding: 12px 4px;
   background: transparent;
   color: var(--text);
@@ -62,7 +64,7 @@
   font-size: 12px;
 }
 .collection-row span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .collection-table-scroll {
@@ -77,7 +79,7 @@
 .collection-body th,
 .collection-body td {
   padding: 10px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   white-space: nowrap;
 }
 .collection-evidence {
@@ -93,15 +95,16 @@
   overflow-wrap: anywhere;
   max-height: 360px;
   overflow: auto;
-  background: var(--surface-soft);
+  background: var(--fill);
   padding: 12px;
-  border-radius: 7px;
-  font-size: 11px;
+  border-radius: var(--radius-control);
+  font-size: 12px;
 }
 .collection-gate {
-  border: 1px solid var(--border);
+  border: none;
   padding: 12px;
-  border-radius: 9px;
+  border-radius: var(--radius-control);
+  background: var(--fill);
 }
 .collection-gate label {
   display: grid;
@@ -111,8 +114,8 @@
 .collection-gate input {
   width: 100%;
   min-height: 36px;
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
   padding: 8px;
   color: var(--text);
   background: var(--surface);
@@ -136,15 +139,15 @@
   min-width: 0;
   padding: 8px 10px;
   min-height: 36px;
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
   color: var(--text);
   background: var(--surface);
   font: inherit;
 }
 .collection-body form fieldset {
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--sep);
+  border-radius: var(--radius-control);
   margin: 12px 0;
   padding: 12px;
   min-width: 0;
@@ -166,7 +169,7 @@
 .collection-body form [data-collection-coverage],
 .collection-body form [data-collection-window],
 .collection-body form [data-collection-attempt] {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   padding-bottom: 12px;
 }
 
@@ -192,7 +195,7 @@
 }
 
 .collection-rule-section {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--sep);
   padding-top: 12px;
   margin: 12px 0;
 }

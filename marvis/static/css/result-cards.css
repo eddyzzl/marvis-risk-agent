@@ -1,0 +1,771 @@
+/* Result cards (2026-10-14 redesign, batch 6a, D12).
+   A step's evidence is a flat grey card in the conversation (D2: no shadow,
+   no coloured border); inner panels are the white surface. The three chart
+   colours passed the palette check; teal is under 3:1 on white, so the legend
+   and the table view always stay available. */
+
+.result-card {
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px 18px 14px;
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+}
+
+body[data-theme="dark"] .result-card {
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+}
+
+.result-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.result-card-head b {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.result-card-source {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.result-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- tiles ---------- */
+
+.result-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.result-tile {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+body[data-theme="dark"] .result-tile,
+body[data-theme="dark"] .result-viz {
+  background: var(--fill);
+}
+
+.result-tile-label {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.result-tile-value {
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-tile-sub {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.result-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: start;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-style: normal;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.result-status::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.result-status[data-tone="good"] { color: var(--success); }
+.result-status[data-tone="warn"] { color: var(--warning); }
+.result-status[data-tone="bad"] { color: var(--danger); }
+
+/* ---------- chart ---------- */
+
+.result-viz {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 14px 10px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.result-viz-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.result-viz-head h4 {
+  margin: 0;
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+
+.result-viz-head p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.result-chart-mode {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.result-seg {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--fill);
+}
+
+.result-seg button {
+  height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.result-seg button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+body[data-theme="dark"] .result-seg button[aria-pressed="true"] {
+  background: var(--fill-2);
+  box-shadow: none;
+}
+
+.result-seg button:focus-visible,
+.result-chart-plot:focus-visible,
+.result-more > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.result-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
+
+.result-chart-legend[hidden],
+.result-chart-plot[hidden],
+.result-chart-table-wrap[hidden],
+.result-chart-mode-panel[hidden],
+.result-chart-readout[hidden] {
+  display: none;
+}
+
+.result-chart-legend span,
+.result-chart-readout span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.result-chart-legend i,
+.result-chart-readout i {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--series-color);
+}
+
+[data-series="0"] { --series-color: var(--chart-1); }
+[data-series="1"] { --series-color: var(--chart-2); }
+[data-series="2"] { --series-color: var(--chart-3); }
+
+.result-chart-plot {
+  position: relative;
+  border-radius: var(--radius-control);
+}
+
+.result-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.result-chart-svg .chart-grid {
+  stroke: var(--sep);
+  stroke-width: 1;
+}
+
+.result-chart-svg .chart-axis {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-chart-svg .chart-series polyline {
+  fill: none;
+  stroke: var(--series-color);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.result-chart-svg .chart-dot {
+  fill: var(--surface);
+  stroke: var(--series-color);
+  stroke-width: 2;
+}
+
+.result-chart-svg .chart-guide {
+  stroke: var(--text-muted);
+  stroke-dasharray: 3 3;
+  opacity: 0;
+}
+
+.result-chart-svg .chart-guide.is-on {
+  opacity: 1;
+}
+
+.result-chart-svg .chart-hit {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+.result-chart-readout {
+  position: absolute;
+  top: 6px;
+  display: grid;
+  gap: 2px;
+  min-width: 132px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.result-chart-readout small {
+  color: var(--text-muted);
+}
+
+/* ---------- tables and rows ---------- */
+
+.result-table-wrap,
+.result-chart-table-wrap {
+  overflow-x: auto;
+}
+
+.result-chart-table,
+.result-mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.result-chart-table :is(th, td),
+.result-mini-table :is(th, td) {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--sep);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.result-chart-table :is(th, td):first-child,
+.result-mini-table :is(th, td):first-child,
+.result-chart-table td:nth-child(2) {
+  text-align: left;
+}
+
+.result-chart-table thead th,
+.result-mini-table thead th {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.result-mini-table td[data-tone="warn"] { color: var(--warning); font-weight: 600; }
+.result-mini-table td[data-tone="bad"] { color: var(--danger); font-weight: 600; }
+
+.result-more {
+  border-top: 1px solid var(--sep);
+}
+
+.result-more > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  list-style: none;
+  cursor: pointer;
+}
+
+.result-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* The disclosure chevron is the app-wide details > summary::before. */
+
+.result-rows {
+  display: grid;
+}
+
+.result-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 2px;
+  border-top: 1px solid var(--sep);
+  font-size: var(--fs-sm);
+}
+
+.result-row b {
+  font-weight: 500;
+}
+
+.result-row-value {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.result-row-value[data-tone="warn"] { color: var(--warning); }
+.result-row-value[data-tone="bad"] { color: var(--danger); }
+
+.result-note {
+  margin: 8px 2px 4px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.result-all-body {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 4px 0 6px;
+  overflow-x: auto;
+}
+
+/* The card carries its own title; the section heading above it would repeat it. */
+#metricSection > h3 {
+  display: none;
+}
+
+/* The material and scoring steps read as result cards too (same flat grey
+   card, hairline rows, white figure tiles). A section that is carrying its own
+   Agent messages keeps the plain layout so chat text never sits in a card. */
+.result-scroll-content > :is(#scanSection, #notebookSection):not(.hidden):not(:has(> .agent-stage-messages:not(.hidden))) {
+  padding: 16px 18px 14px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+:is(#scanSection, #notebookSection) > h3 {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+#scanSummary .preflight-check-list {
+  gap: 0;
+}
+
+#scanSummary .preflight-check-item {
+  padding: 9px 2px;
+  border-top: 1px solid var(--sep);
+  border-radius: 0;
+  background: transparent;
+}
+
+#scanSummary .preflight-check-item:first-child {
+  border-top: 0;
+}
+
+#reproducibilitySummary .summary-item {
+  background: var(--surface);
+}
+
+body[data-theme="dark"] #reproducibilitySummary .summary-item {
+  background: var(--fill);
+}
+
+#scanSection .validation-contract-panel {
+  padding: 10px 2px 0;
+  border-top: 1px solid var(--sep);
+  border-radius: 0;
+  background: transparent;
+}
+
+/* ---------- batch 6b: every task's result tables as one card ---------- */
+/* The step's first table stays open; the others are one line each. */
+.result-tables-more {
+  display: grid;
+  margin-top: 8px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+
+.result-table-more > summary {
+  font-size: var(--fs-md);
+}
+
+.result-table-more[open] > .agent-inline-table {
+  margin: 0 -6px 12px;
+}
+
+/* Inside a folded row the summary already names the table. */
+.result-table-more .workflow-widget-glyph,
+.result-table-more .workflow-widget-title,
+.result-table-more .workflow-widget-toggle {
+  display: none;
+}
+
+.result-table-more .workflow-widget-head:not(:has(.workflow-widget-search)) {
+  display: none;
+}
+
+.driver-analysis-section.is-gate-pending .result-tables-more {
+  background: var(--surface);
+}
+
+body[data-theme="dark"] .driver-analysis-section.is-gate-pending .result-tables-more {
+  background: var(--fill);
+}
+
+/* The open table(s) and the folded rows read as one card. */
+.agent-message-tables.result-tables-card {
+  gap: 8px;
+}
+
+.result-tables-card > .result-tables-more {
+  margin-top: 0;
+}
+
+.result-tables-more > [role="listitem"] + [role="listitem"] > .result-table-more {
+  border-top: 1px solid var(--sep);
+}
+
+.result-tables-more > [role="listitem"]:first-child > .result-table-more {
+  border-top: 0;
+}
+
+/* Inside a pending manual gate the tables sit on the white surface. */
+.driver-analysis-section.is-gate-pending .workflow-data-widget {
+  background: var(--surface);
+}
+
+body[data-theme="dark"] .driver-analysis-section.is-gate-pending .workflow-data-widget {
+  background: var(--fill);
+}
+
+/* A read-only (stripped) failure card keeps each option as a plain line
+   (name, reversibility, consequence); the quick replies below act on it.
+   Without a consequence the line would only repeat the chip, so it hides. */
+.workflow-error-card__option-label {
+  display: none;
+}
+
+.workflow-error-card__option:not(:has(button)) {
+  display: block;
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.workflow-error-card__option:not(:has(button)):not(:has(small)) {
+  display: none;
+}
+
+.workflow-error-card__option:not(:has(button)) .workflow-error-card__option-label {
+  display: inline;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.workflow-error-card__option:not(:has(button)) .workflow-error-card__tier {
+  margin-left: 6px;
+}
+
+.workflow-error-card__option:not(:has(button)) small {
+  display: block;
+  max-width: none;
+}
+
+/* D17: the plan rail jumps to a step's card and pulses it once (neutral). */
+.is-located {
+  animation: result-located 1.4s ease-out;
+}
+
+@keyframes result-located {
+  0% { background-color: var(--fill-2); }
+  100% { background-color: transparent; }
+}
+
+.plan-rail-substeps .notebook-step[role="button"] {
+  cursor: pointer;
+  border-radius: var(--radius-control);
+}
+
+.plan-rail-substeps .notebook-step[role="button"]:hover {
+  background: var(--fill);
+}
+
+.plan-rail-substeps .notebook-step[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-located { animation: none; }
+}
+
+/* B-line (2026-10-16 spec): the "已处理好" card. Same flat surface as the
+   failure card; only the small round mark carries colour. */
+.workflow-repair-card {
+  width: 100%;
+  min-width: 0;
+  padding: 14px 18px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  box-shadow: none;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: var(--card);
+}
+
+.workflow-repair-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.workflow-repair-card__icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--text-secondary);
+}
+
+.workflow-repair-card.is-unverified .workflow-repair-card__icon,
+.workflow-repair-card.is-undone .workflow-repair-card__icon {
+  background: var(--text-muted);
+}
+
+.workflow-repair-card h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.workflow-repair-card__rows {
+  display: grid;
+  margin: 10px 0 0;
+}
+
+.workflow-repair-card__rows > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--sep);
+}
+
+.workflow-repair-card__rows > div:first-child {
+  padding-top: 2px;
+  border-top: 0;
+}
+
+.workflow-repair-card__rows dt {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+}
+
+.workflow-repair-card__rows dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-base);
+  line-height: 1.6;
+}
+
+.workflow-repair-card__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 14px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--sep);
+}
+
+.workflow-repair-card__log {
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+}
+
+.workflow-repair-card__log summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.workflow-repair-card__log ol {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+
+.workflow-repair-undo {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-base);
+}
+
+.workflow-error-card__tier {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .workflow-repair-card {
+    padding: 13px;
+  }
+
+  .workflow-repair-card__rows > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+
+/* V3 D-6/D-8: SQL proposal and monitoring form cards. Flat content surface
+   (no glass, no coloured border); invalid fields get the danger text tone. */
+.conversation-action-card {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.conversation-action-card pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-size: var(--fs-sm);
+}
+
+.conversation-action-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.conversation-action-facts dt { color: var(--text-muted); }
+.conversation-action-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+.conversation-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.conversation-form-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+
+.conversation-form-field > span { color: var(--text-secondary); }
+.conversation-form-field[data-invalid="true"] > span { color: var(--danger); font-weight: 600; }
+
+.conversation-form-advanced > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+
+.conversation-form-advanced[open] > summary { margin-bottom: 10px; }
+
+.conversation-action-status:empty { display: none; }
+.conversation-action-status { margin: 0; color: var(--danger); font-size: var(--fs-sm); }
+
+/* V3 5.7: confirmed business name under a field code in result tables. */
+.field-alias {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 0.85em;
+  font-weight: 400;
+}

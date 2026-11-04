@@ -8,6 +8,10 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from marvis.agent.strategy_control_labels import (
+    join_control_labels as _join_control_labels,
+)
+
 from . import contracts as _contracts
 from . import grounding as _grounding
 from . import identifiers as _identifiers
@@ -943,10 +947,10 @@ def _ground_strategy_pool_apply_request(
     if missing_controls:
         missing_controls = list(dict.fromkeys(missing_controls))
         return _contracts._clarification(
-            "Strategy Pool 应用只能采用原话中唯一明确的 Pool 类型与可选 ASCII "
-            "输出前缀；当前无法核对："
-            + "、".join(missing_controls)
-            + "。平台不会替用户猜测 Pool、前缀或任何数据/证据绑定。",
+            "应用策略池只能采用原话里唯一明确的策略池类型，以及可选的输出前缀"
+            "（英文字母或下划线开头，只含英文字母、数字和下划线）；当前无法核对："
+            + _join_control_labels(missing_controls)
+            + "。平台不会替你猜测策略池、前缀或任何数据/证据绑定。",
             code="strategy_pool_apply_controls_not_grounded",
             fields=tuple(missing_controls),
         )
@@ -1084,9 +1088,9 @@ def _ground_strategy_pool_validation_request(
 
     if missing_controls:
         return _contracts._clarification(
-            "独立样本回放验证只能采用原话中唯一明确的 approval/reject Pool "
-            "类型和一个 validation/OOT 分区；当前无法核对："
-            + "、".join(dict.fromkeys(missing_controls))
+            "独立样本回放验证只能采用原话里唯一明确的审批或拒绝策略池类型，"
+            "以及一个验证集或 OOT 分区；当前无法核对："
+            + _join_control_labels(missing_controls)
             + "。平台不会猜测类型、分区或证据绑定。",
             code="strategy_pool_validation_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
@@ -1275,11 +1279,11 @@ def _ground_strategy_pool_impact_request(
     ):
         missing_controls.append("drop_nan_labels=true")
     if missing_controls:
-        rendered = "、".join(dict.fromkeys(missing_controls))
+        rendered = _join_control_labels(missing_controls, bare_value="基线策略 ID")
         return _contracts._clarification(
-            "Strategy Pool 影响测算只能使用用户原话中的 Pool 类型、基线模式/完整 ID、"
-            "精确列名和空标签授权；当前无法核对："
-            f"{rendered}。平台不会采用 LLM 猜测的数据绑定、列、hash、指标或策略。",
+            "策略池影响测算只能使用原话里的策略池类型、对比方式和完整基线策略 ID、"
+            "准确列名以及删除空标签样本的授权；当前无法核对："
+            f"{rendered}。平台不会替你猜测数据绑定、列、校验值、指标或策略。",
             code="strategy_pool_impact_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
         )
@@ -2294,10 +2298,13 @@ def _ground_strategy_pool_add_request(
             and source_prefix_count == 0
             and isinstance(legacy_asset_id, str)
         ):
+            rendered = _join_control_labels(
+                (legacy_asset_id,), bare_value="候选 ID", bare_keys=False
+            )
             return _contracts._clarification(
-                "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed "
-                f"action；当前无法核对：{legacy_asset_id}。平台不会采用 LLM "
-                "猜测的 ID、动作、顺序、hash 或指标。",
+                "请在原话中明确提供策略池的策略类型、完整候选 ID 和动作类型；"
+                f"当前无法核对：{rendered}。平台不会替你猜测 ID、动作、顺序、"
+                "校验值或指标。",
                 code="strategy_pool_controls_not_grounded",
                 fields=(legacy_asset_id,),
             )
@@ -2382,9 +2389,9 @@ def _ground_strategy_pool_add_request(
             missing_controls.append(field)
     if missing_controls:
         return _contracts._clarification(
-            "请分别显式标注策略池类型、Pool 默认动作和命中动作；三者是"
-            "独立控制，平台不会从动作词推断 Pool 类型，也不会对调两个动作。"
-            "当前无法核对：" + "、".join(dict.fromkeys(missing_controls)) + "。",
+            "请分别写明策略池类型、策略池默认动作和命中动作；三者互相独立，"
+            "平台不会从动作词推断策略池类型，也不会对调两个动作。"
+            "当前无法核对：" + _join_control_labels(missing_controls) + "。",
             code="strategy_pool_add_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
         )
@@ -2496,10 +2503,11 @@ def _ground_strategy_pool_request(
         missing_controls.append(reason)
 
     if missing_controls:
-        rendered = "、".join(dict.fromkeys(missing_controls))
+        # Bare entries here are IDs, reason codes or reason text, never keys.
+        rendered = _join_control_labels(missing_controls, bare_keys=False)
         return _contracts._clarification(
-            "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed action；"
-            f"当前无法核对：{rendered}。平台不会采用 LLM 猜测的 ID、动作、顺序、hash 或指标。",
+            "请在原话中明确提供策略池的策略类型、完整 ID 和动作类型；"
+            f"当前无法核对：{rendered}。平台不会替你猜测 ID、动作、顺序、校验值或指标。",
             code="strategy_pool_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
         )

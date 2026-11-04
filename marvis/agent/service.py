@@ -36,12 +36,7 @@ from marvis.validation.stress_risk import (
     worst_stress_risk,
 )
 from marvis.validation_report_copy import narrative_report_values
-from marvis.agent_memory.prompting import (
-    add_memory_to_prompt_payload,
-    attach_memory_metadata,
-    memory_context_was_truncated,
-    normalize_memory_context,
-)
+from marvis.agent_memory.prompting import attach_memory_metadata
 
 
 REQUIRED_AGENT_REPORT_KEYS = tuple(sorted(AGENT_REPORT_CONCLUSION_KEYS))
@@ -49,68 +44,6 @@ _V2_PMML_SCORING_LEGACY_PATTERN = re.compile(
     r"可复现(?:性)?|(?:分数|评分|部署)?一致性|Notebook\s*模型|代码模型|原始代码模型",
     re.IGNORECASE,
 )
-GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
-    {
-        "scan",
-        "notebook_steps",
-        "contract",
-        "reproducibility",
-        "pmml_scoring",
-        "validation_results",
-        "report_fields",
-        "report_draft",
-        "visible_stage_summaries",
-    }
-)
-STAGE_EVIDENCE_KEYS = {
-    "scan": ("scan", "contract", "notebook_steps"),
-    "reproducibility": (
-        "notebook_steps",
-        "contract",
-        "reproducibility",
-        "pmml_scoring",
-    ),
-    "report": ("report_fields",),
-}
-SCAN_REQUIRED_CHECK_LABELS = (
-    "Notebook 文件",
-    "样本数据",
-    "PMML 模型",
-    "数据字典",
-    "Notebook RMC 契约",
-)
-SCAN_SUCCESS_STATUSES = {"success", "passed", "pass", "ok", "通过", "已通过"}
-METRICS_VALIDATION_RESULT_KEYS = (
-    "model_name",
-    "model_version",
-    "algorithm",
-    "target_type",
-    "basic_info",
-    "effectiveness",
-    "overfitting_check",
-    "stress_test",
-)
-WORD_CONCLUSION_MONTHLY_LIMIT = 12
-WORD_CONCLUSION_FEATURE_LIMIT = 20
-WORD_CONCLUSION_STRESS_CATEGORY_LIMIT = 20
-WORD_CONCLUSION_PSI_BIN_LIMIT = 12
-WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT = 8
-WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS = 1200
-METRICS_BIN_TABLE_LIMIT = 10
-REPRODUCIBILITY_NOTEBOOK_STEP_LIMIT = 16
-REPRODUCIBILITY_CONTRACT_FEATURE_LIMIT = 20
-NOTEBOOK_CONTRACT_SOURCE_PREVIEW_LIMIT = 3
-NOTEBOOK_CONTRACT_SOURCE_PREVIEW_CHARS = 500
-NOTEBOOK_FAILURE_CELL_LIMIT = 3
-NOTEBOOK_FAILURE_SOURCE_CHARS = 1200
-NOTEBOOK_FAILURE_FILE_LIMIT = 20
-NOTEBOOK_FAILURE_LINE_LIMIT = 12
-# Raw chart series that balloon the prompt without helping LLM reasoning
-# (each curve carries thousands of (x, y) samples — easily 10+ MB total).
-# AUC/KS summary numbers used in image-1's analysis already live in
-# effectiveness.overall, so dropping the raw curves keeps the analysis honest
-# while shrinking the prompt by >99%.
-OVERSIZED_EFFECTIVENESS_KEYS = frozenset({"roc_ks_curves"})
 START_VALIDATION_GUIDANCE_FRAGMENTS = (
     "可以协助启动验证",
     "需要开始时，请输入",
@@ -119,9 +52,6 @@ START_VALIDATION_GUIDANCE_FRAGMENTS = (
     "输入“开始验证”",
     '输入"开始验证"',
 )
-CONVERSATION_MEMORY_MAX_MESSAGES = 48
-CONVERSATION_MEMORY_MAX_CHARS = 32000
-CONVERSATION_MEMORY_MESSAGE_MAX_CHARS = 2400
 GREETING_CHAT_FALLBACK = (
     "你好，我在。你可以直接问我验证结果、指标含义、PMML 或报告结论，"
     "也可以告诉我下一步想处理什么。"
@@ -489,10 +419,16 @@ def is_agent_material_reselection_intent(content: str) -> bool:
 
 
 def is_agent_report_revision_intent(content: str) -> bool:
+    from marvis.llm_outbound_revision import report_revision_button_field
+
+    # The draft card's「请 Agent 修订」button names its field explicitly.
+    if report_revision_button_field(content) is not None:
+        return True
     compact = _compact_agent_command(content)
     if not compact:
         return False
     revision_markers = (
+        "修订",
         "修正",
         "更正",
         "纠正",
@@ -500,6 +436,7 @@ def is_agent_report_revision_intent(content: str) -> bool:
         "调整",
         "改写",
         "改成",
+        "改为",
         "重写",
         "替换",
         "删除",
@@ -509,6 +446,13 @@ def is_agent_report_revision_intent(content: str) -> bool:
         "只评价",
         "只保留",
         "补充",
+        "补上",
+        "补全",
+        "写上",
+        "加上",
+        "增加",
+        "添加",
+        "完善",
     )
     report_markers = (
         "报告",
@@ -522,6 +466,8 @@ def is_agent_report_revision_intent(content: str) -> bool:
         "适用范围",
         "坏样本",
         "好样本",
+        "样本人群",
+        "训练说明",
         "word",
         "excel",
         "支用",
@@ -787,8 +733,26 @@ def _looks_like_start_validation_guidance(content: str) -> bool:
     return any(fragment in content for fragment in START_VALIDATION_GUIDANCE_FRAGMENTS)
 
 
+AGENT_REPORT_CONCLUSION_LABELS = {
+    "TEXT:final_validation_conclusion": "最终验证结论",
+    "TEXT:pressure_test_summary": "压力测试总结",
+    "TEXT:pressure_impact_recommendation": "压力影响建议",
+}
+
+
 def agent_conclusions_confirmed(values: dict[str, str]) -> bool:
     return all(str(values.get(key) or "").strip() for key in REQUIRED_AGENT_REPORT_KEYS)
+
+
+def missing_agent_conclusion_labels(values: dict | None) -> list[str]:
+    """Display names of required report paragraphs that are still empty."""
+    row = values if isinstance(values, dict) else {}
+    return [
+        AGENT_REPORT_CONCLUSION_LABELS[key]
+        for key in ("TEXT:final_validation_conclusion", "TEXT:pressure_test_summary",
+                    "TEXT:pressure_impact_recommendation")
+        if not str(row.get(key) or "").strip()
+    ]
 
 
 def latest_report_draft_context(messages: list[dict]) -> dict:
@@ -845,6 +809,29 @@ def summarize_stage(
     fallback: str,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
+    """Validation stage summary. It feeds the Word conclusion draft
+    (``visible_stage_summaries``), and reports keep their language (D-10), so
+    the reply-language rule is not applied to these model calls."""
+
+    from marvis.ui_locale import use_reply_language
+
+    with use_reply_language(None):
+        return _summarize_stage(
+            task=task, stage=stage, evidence=evidence, memory_context=memory_context,
+            model_profile=model_profile, fallback=fallback, on_delta=on_delta,
+        )
+
+
+def _summarize_stage(
+    *,
+    task: TaskRecord,
+    stage: str,
+    evidence: dict,
+    memory_context: dict | None = None,
+    model_profile: dict,
+    fallback: str,
+    on_delta: Callable[[str], None] | None = None,
+) -> tuple[str, dict]:
     metrics_v2 = stage == "metrics" and task.validation_workflow_version == 2
     metrics_v1 = stage == "metrics" and not metrics_v2
     scoring_v2 = stage == "reproducibility" and task.validation_workflow_version == 2
@@ -852,17 +839,15 @@ def summarize_stage(
     scan_stage = stage == "scan"
     typed_stage = metrics_v2 or metrics_v1 or scoring_v2 or comparison_v1 or scan_stage
     guard_before_emit = metrics_v1 or scoring_v2 or comparison_v1 or scan_stage
+    if not typed_stage:
+        # Only stages with a typed structural adapter may reach a model. The
+        # former plain-string prompt builder was always refused by the client
+        # before any request; keep that outcome without building the text.
+        return fallback, {"llm_error": "此调用尚未提供已批准的结构摘要，未发送模型请求。", "fallback": True}
     # Native aggregates must reach their typed adapter before legacy text
     # compaction or sanitization can truncate periods or change numeric values.
-    prompt = {"stage": stage, "evidence": evidence} if typed_stage else _stage_prompt(
-        task=task,
-        stage=stage,
-        evidence=evidence,
-        memory_context=memory_context,
-    )
-    # LLM-5: memory injection is one of the three named highest-volume prompt
-    # touch points; surface the truncation flag on this call's audit record.
-    truncated = False if typed_stage else memory_context_was_truncated(normalize_memory_context(memory_context))
+    prompt = {"stage": stage, "evidence": evidence}
+    truncated = False
     client = _client(model_profile)
     history = None
     try:
@@ -1073,6 +1058,14 @@ def answer_chat_message(
 ) -> tuple[str, dict]:
     from marvis.llm_outbound import OutboundContextError
     from marvis.llm_outbound_chat import chat_prompt
+    dictionary_answer = _dictionary_requirement_answer(user_message, evidence)
+    if dictionary_answer is not None:
+        # The platform's own contract answers this; a model must not invent
+        # extra "required" dictionary columns.
+        if on_delta:
+            on_delta(dictionary_answer)
+        return dictionary_answer, {"fallback": False, "deterministic_answer": "dictionary_requirements",
+                                   "history_comparison_available": False}
     fallback = _chat_fallback_for_message(user_message)
     # LLM-5: memory injection is one of the three named highest-volume prompt
     # touch points; surface the truncation flag on this call's audit record.
@@ -1091,6 +1084,11 @@ def answer_chat_message(
             prompt_version=_AGENT_PROMPT_SPEC.version,
         )
         content = (raw_content or "").strip()
+        # UI-6: the trailing 「建议回复：…」 line is metadata, never prose.
+        from marvis.agent.suggested_reply import split_suggested_reply
+
+        content, raw_suggestion = split_suggested_reply(content)
+        content = (content or "").strip()
     except OutboundContextError as exc:
         return str(exc), {"llm_error": str(exc), "fallback": True, "needs_clarification": True,
                           "history_comparison_available": False}
@@ -1117,7 +1115,47 @@ def answer_chat_message(
     content = _strip_agent_response_preamble(content)
     if on_delta:
         on_delta(content)
-    return content, {"fallback": False, **history.metadata(use_reason="chat")}
+    from marvis.agent.suggested_reply import attach_suggested_reply
+
+    return content, attach_suggested_reply({"fallback": False, **history.metadata(use_reason="chat")},
+                                           raw_suggestion, user_message=user_message)
+
+
+_DICTIONARY_SUBJECT = re.compile(r"数据字典|字典文件|特征元数据")
+_DICTIONARY_QUESTION = re.compile(
+    r"哪些列|什么列|几列|哪几列|必填|需要.{0,6}列|要.{0,4}列|列名|什么要求|有什么要求|格式要求|"
+    r"不能用|不可用|用不了|不完整|缺什么|缺了什么|缺哪|哪里不对|有什么问题|不合格|不通过"
+)
+
+
+def _dictionary_requirement_answer(user_message: str, evidence: dict | None) -> str | None:
+    """Answer data-dictionary questions from the platform contract and checks."""
+    from marvis.validation_report_copy import METADATA_REASON_LABELS, dictionary_requirement_text
+
+    text = str(user_message or "")
+    if not (_DICTIONARY_SUBJECT.search(text) and _DICTIONARY_QUESTION.search(text)):
+        return None
+    diagnostics = evidence.get("material_diagnostics") if isinstance(evidence, dict) else None
+    if not isinstance(diagnostics, dict):
+        return None
+    rows = [row for row in diagnostics.get("data_dictionary") or [] if isinstance(row, dict)]
+    lines = []
+    usable = [row for row in rows if row.get("status") == "compatible"]
+    for row in rows:
+        name = str(row.get("name") or "数据字典")
+        if row.get("status") == "compatible":
+            lines.append(f"- {name}：与所选 PMML 匹配，可以使用。")
+        elif row.get("status") == "incompatible":
+            reasons = [METADATA_REASON_LABELS[code] for code in row.get("reasons") or [] if code in METADATA_REASON_LABELS]
+            lines.append(f"- {name}：不能用，" + ("；".join(reasons) or "内容不符合数据字典要求") + "。")
+        else:
+            lines.append(f"- {name}：平台未能自动检查，请人工确认。")
+    if not lines:
+        lines.append("- 材料目录里没有找到数据字典文件。")
+    parts = ["平台对当前材料的数据字典检查结果：", *lines, "", dictionary_requirement_text()]
+    if not usable:
+        parts.append("补齐后点「重新选择验证材料」，在弹窗里用「上传补充文件」传入，选中新字典再重新扫描。")
+    return "\n".join(parts)
 
 
 def _strip_agent_response_preamble(content: str) -> str:
@@ -1133,7 +1171,50 @@ def _strip_agent_response_preamble(content: str) -> str:
             text = AGENT_RESPONSE_LEADING_SEPARATOR_PATTERN.sub("", text).lstrip()
         if text == before:
             break
-    return text.strip() or original
+    return humanize_internal_terms(text.strip() or original)
+
+
+# Internal evidence keys and tool names stay in metadata; user text gets labels.
+_INTERNAL_TERM_LABELS = (
+    ("material_data_dictionary", "数据字典"),
+    ("material_model_pmml", "PMML 模型"),
+    ("material_notebook", "Notebook"),
+    ("material_sample", "样本数据"),
+    ("validation_input_contract", "验证输入契约"),
+    ("notebook_contract", "Notebook RMC 契约"),
+    ("missing_or_unsatisfied_checks", "未满足的检查项"),
+    ("satisfied_checks", "已满足的检查项"),
+    ("required_checks", "必需检查项"),
+    ("failed_check_count", "失败检查数"),
+    ("unknown_check_count", "未识别检查数"),
+    ("scan_materials", "材料识别工具"),
+)
+_INTERNAL_TERM_PATTERNS = (
+    (re.compile(r"`?required_materials_complete`?\s*(?:=|＝|为|：|:)?\s*`?false`?", re.IGNORECASE), "必需材料尚未齐全"),
+    (re.compile(r"`?required_materials_complete`?\s*(?:=|＝|为|：|:)?\s*`?true`?", re.IGNORECASE), "必需材料已齐全"),
+    (re.compile(r"`?required_materials_complete`?"), "必需材料是否齐全"),
+    (re.compile(
+        r"`?pending_confirmation`?\s*[（(]\s*`?needs_confirmation\s*=\s*true`?\s*[，,、]\s*"
+        r"`?revision\s*[=：:]?\s*(\d+)`?\s*[）)]", re.IGNORECASE,
+    ), r"待确认（第 \1 版）"),
+    (re.compile(r"`?needs_confirmation\s*=\s*true`?", re.IGNORECASE), "仍需确认"),
+    (re.compile(r"`?needs_confirmation\s*=\s*false`?", re.IGNORECASE), "无需再确认"),
+    (re.compile(r"`?pending_confirmation`?"), "待确认"),
+)
+
+
+def humanize_internal_terms(text: str) -> str:
+    """Replace internal keys the model echoed with the labels users see."""
+    value = str(text or "")
+    if not value:
+        return value
+    for pattern, label in _INTERNAL_TERM_PATTERNS:
+        value = pattern.sub(label, value)
+    for key, label in _INTERNAL_TERM_LABELS:
+        # "数据字典（material_data_dictionary）" keeps only the label once.
+        value = re.sub(r"\s*[（(]\s*`?" + key + r"`?\s*[）)]", "", value)
+        value = re.sub(r"`?" + key + r"`?", label, value)
+    return value
 
 
 def generate_word_conclusions(
@@ -1148,6 +1229,7 @@ def generate_word_conclusions(
     from marvis.llm_outbound_instructions import user_instruction as approve_user_instruction
     from marvis.llm_outbound_memory import model_history_context
     from marvis.llm_outbound_revision import (
+        APPEND_OPERATIONS, EVIDENCE_OPERATIONS, ReportRevisionError,
         parse_report_revision_response, report_revision_baseline,
         report_revision_prompt, report_revision_request, revision_fields,
     )
@@ -1169,20 +1251,24 @@ def generate_word_conclusions(
                 evidence, report_revision=task.report_values_revision,
             )
             fields = revision_fields(request, baseline)
-        client = _client(model_profile) if fresh_report or (fields and request.operation == "regenerate_from_evidence") else None
-        if request is not None and request.operation == "clear":
-            values = {key: "" for key in fields}
-        elif request is not None and request.operation == "set_local_text":
-            values = {key: request.local_text for key in fields}
-        elif request is not None and request.operation == "replace_local_text":
-            from marvis.llm_outbound_revision import ReportRevisionError
-
+        client = _client(model_profile) if fresh_report or (fields and request.operation in EVIDENCE_OPERATIONS) else None
+        local_base = {}
+        if request is not None and request.operation in {"replace_local_text", "replace_and_append"}:
+            # Check the local edit before any external request is sent.
             if any(request.local_old_text not in baseline.get(key, "") for key in fields):
                 raise ReportRevisionError(
                     "当前报告字段未包含指定的待替换片段，请核对当前草稿后重新说明修改。",
                     code="revision_text_mismatch",
                 )
-            values = {key: baseline[key].replace(request.local_old_text, request.local_text) for key in fields}
+            local_base = {key: baseline[key].replace(request.local_old_text, request.local_text) for key in fields}
+        elif request is not None and request.operation == "append_from_evidence":
+            local_base = {key: baseline.get(key, "") for key in fields}
+        if request is not None and request.operation == "clear":
+            values = {key: "" for key in fields}
+        elif request is not None and request.operation == "set_local_text":
+            values = {key: request.local_text for key in fields}
+        elif request is not None and request.operation == "replace_local_text":
+            values = dict(local_base)
         elif request is not None and not fields:
             values = {}
         elif task.validation_workflow_version == 2 and request is not None:
@@ -1226,6 +1312,15 @@ def generate_word_conclusions(
                 values = _parse_conclusion_json(content)
                 values = {key: value for key, value in values.items()
                           if key in AGENT_REPORT_CONCLUSION_KEYS or key == "TEXT:model_training_description"}
+        if request is not None and request.operation in APPEND_OPERATIONS:
+            # The measured addendum follows the locally kept paragraph verbatim.
+            values = {
+                key: "\n\n".join(part for part in (local_base.get(key, "").strip(), values.get(key, "").strip()) if part)
+                for key in fields
+            }
+        if fresh_report or (request is not None and request.operation in EVIDENCE_OPERATIONS
+                            and _FINAL_CONCLUSION_KEY in fields):
+            values = _with_platform_risk_findings(values, evidence)
         if request is not None:
             values = {**narrative_report_values(task.model_name), **baseline, **values}
             if "TEXT:model_training_description" not in values:
@@ -1250,7 +1345,7 @@ def generate_word_conclusions(
                              "report_revision_provenance": provenance})
         return {}, metadata
     history_metadata = (history.metadata(use_reason="word_conclusion_draft")
-                        if fresh_report or (request.operation == "regenerate_from_evidence" and fields)
+                        if fresh_report or (request.operation in EVIDENCE_OPERATIONS and fields)
                         else {"history_comparison_available": False})
     metadata = {"fallback": False, **history_metadata}
     if not fresh_report:
@@ -1422,6 +1517,85 @@ def _fallback_conclusions_from_validation_evidence(
     }
 
 
+_FINAL_CONCLUSION_KEY = "TEXT:final_validation_conclusion"
+
+
+def _platform_risk_findings(evidence: dict | None) -> list[tuple[tuple[tuple[str, ...], ...], str]]:
+    """Failed or high-risk items the platform measured, with mention keywords.
+
+    Each finding pairs keyword groups (every group needs one hit in the
+    conclusion) with a red-bold sentence quoting platform values only. Reads
+    the persisted result dict directly so a partial payload still reports.
+    """
+    raw = evidence.get("validation_results") if isinstance(evidence, dict) else None
+    if not isinstance(raw, dict):
+        return []
+
+    def number(value):
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    findings: list[tuple[tuple[tuple[str, ...], ...], str]] = []
+    stress = raw.get("stress_test") if isinstance(raw.get("stress_test"), dict) else {}
+    baseline_ks = number((stress.get("baseline") or {}).get("ks")) if isinstance(stress.get("baseline"), dict) else None
+    high: list[str] = []
+    categories = stress.get("per_category") if isinstance(stress.get("per_category"), list) else []
+    for index, item in enumerate(categories, start=1):
+        if not isinstance(item, dict) or item.get("status") != "completed":
+            continue
+        ks_after = number(item.get("ks_after"))
+        risk = worst_stress_risk(
+            stress_ks_risk(baseline_ks, ks_after) if baseline_ks is not None and ks_after is not None else None,
+            stress_psi_risk(number(item.get("psi_vs_baseline"))),
+        )
+        if risk != "high":
+            continue
+        name = str(item.get("category") or "").strip()[:24] or f"类别{index}"
+        after = f"KS {ks_after:.3f}" if ks_after is not None else "KS 未知"
+        high.append(f"「{name}」类（剔除后 {after}）")
+    if high:
+        baseline_text = f"基线 KS {baseline_ks:.3f}，" if baseline_ks is not None else ""
+        findings.append((
+            (("压力",), ("高风险", "失效", "丧失")),
+            f"!!压力测试显示{'、'.join(high[:6])}为高风险数据源!!，{baseline_text}"
+            "相关数据缺失或口径变化会显著削弱模型区分能力",
+        ))
+    overfitting = raw.get("overfitting_check")
+    if not isinstance(overfitting, dict):
+        try:
+            overfitting = overfitting_check_from_validation_results(raw)
+        except Exception:  # noqa: BLE001 - a partial payload just has no overfitting finding
+            overfitting = None
+    if isinstance(overfitting, dict) and overfitting.get("status") == "fail":
+        findings.append(((("过拟合",), ("未通过", "不通过", "风险")), _overfitting_sentence(overfitting)))
+    effectiveness = raw.get("effectiveness") if isinstance(raw.get("effectiveness"), dict) else {}
+    overall = effectiveness.get("overall") if isinstance(effectiveness.get("overall"), list) else []
+    oot = next((row for row in overall if isinstance(row, dict) and row.get("split") == "oot"), None)
+    oot_psi = number(oot.get("psi_vs_train")) if oot else None
+    if oot_psi is not None and oot_psi >= 0.25:
+        findings.append((
+            (("PSI",), ("迁移", "不稳定", "偏移", "超过", "超出")),
+            f"!!OOT 相对 Train 的 PSI 为 {oot_psi:.4f}，样本外分布迁移明显!!",
+        ))
+    return findings
+
+
+def _with_platform_risk_findings(values: dict, evidence: dict | None) -> dict:
+    """A final conclusion must not omit platform-measured failed/high-risk items."""
+    conclusion = str(values.get(_FINAL_CONCLUSION_KEY) or "")
+    if not conclusion.strip():
+        return values
+    missing = [
+        sentence for groups, sentence in _platform_risk_findings(evidence)
+        if not all(any(word.lower() in conclusion.lower() for word in group) for group in groups)
+    ]
+    if not missing:
+        return values
+    return {
+        **values,
+        _FINAL_CONCLUSION_KEY: conclusion.rstrip() + "\n\n平台确定性检查提示：" + "；".join(missing) + "。",
+    }
+
+
 def _effectiveness_metric_sentence(overall: list) -> str:
     by_split = {row.split: row for row in overall}
     parts: list[str] = []
@@ -1570,737 +1744,6 @@ def _client(model_profile: dict) -> OpenAICompatibleLLMClient:
     return OpenAICompatibleLLMClient(model_profile)
 
 
-def _stage_prompt(
-    *,
-    task: TaskRecord,
-    stage: str,
-    evidence: dict,
-    memory_context: dict | None = None,
-    user_instruction: str | None = None,
-) -> str:
-    instructions = _stage_instructions(
-        stage,
-        validation_workflow_version=task.validation_workflow_version,
-    )
-    payload = {
-        "stage": stage,
-        "task": _llm_task_meta(task),
-        "evidence": _sanitize_llm_payload(
-            _stage_scoped_evidence(
-                stage,
-                evidence,
-                validation_workflow_version=task.validation_workflow_version,
-            ),
-            task,
-        ),
-        "instructions": instructions,
-    }
-    if user_instruction:
-        payload["user_instruction"] = _sanitize_llm_text(user_instruction, task)
-        payload["instructions"] = (
-            instructions
-            + "本次是用户要求重新生成该阶段内容，必须优先满足 user_instruction 中的修改要求；"
-            "不得因为已有旧草稿而复用旧措辞。"
-        )
-    if stage == "word_conclusion_draft" and evidence.get("report_draft"):
-        payload["instructions"] += (
-            "evidence.report_draft.text_values 是当前已保存但尚未确认的报告草稿，"
-            "修订时以它为起点，保留用户未要求修改的业务事实和主动清空的字段；"
-            "按照 user_instruction 修改指定段落。草稿中的数值不是平台指标证据，"
-            "指标与通过判断仍只能依据确定性验证结果。"
-        )
-    if stage == "word_conclusion_draft" and evidence.get("saved_report_narrative"):
-        payload["instructions"] += (
-            "evidence.saved_report_narrative.text_values 是已保存报告文字，仅用于修订参考，"
-            "不是本次指标证据；report_draft 中的当前编辑优先于已保存文字。"
-            "未要求修改的业务定义和主动清空字段应保留；不得据旧报告中的数值改写平台指标。"
-        )
-    payload = add_memory_to_prompt_payload(payload, memory_context)
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def _stage_scoped_evidence(
-    stage: str,
-    evidence: dict,
-    *,
-    validation_workflow_version: int | None = None,
-) -> dict:
-    if not isinstance(evidence, dict):
-        return evidence
-    if stage == "scan":
-        return _scan_stage_evidence(evidence)
-    if stage == "reproducibility":
-        if validation_workflow_version == 2:
-            return _pmml_scoring_stage_evidence(evidence)
-        return _reproducibility_stage_evidence(evidence)
-    if stage == "metrics":
-        return _metrics_stage_evidence(evidence)
-    if stage == "word_conclusion_draft":
-        return _word_conclusion_stage_evidence(
-            evidence,
-            validation_workflow_version=validation_workflow_version,
-        )
-    keys = STAGE_EVIDENCE_KEYS.get(stage)
-    if not keys or not _looks_like_global_agent_evidence(evidence):
-        return _slim_evidence_for_llm(evidence)
-    return _slim_evidence_for_llm(
-        {
-            key: evidence.get(key)
-            for key in keys
-            if evidence.get(key) is not None
-        }
-    )
-
-
-def _metrics_stage_evidence(evidence: dict) -> dict:
-    if not _looks_like_global_agent_evidence(evidence):
-        return _slim_evidence_for_llm(evidence)
-    validation_results = evidence.get("validation_results")
-    if not isinstance(validation_results, dict):
-        return {"validation_results": validation_results}
-    return {
-        "validation_results": _compact_metrics_validation_results(
-            {
-                key: validation_results.get(key)
-                for key in METRICS_VALIDATION_RESULT_KEYS
-                if key in validation_results
-            }
-        )
-    }
-
-
-def _pmml_scoring_stage_evidence(evidence: dict) -> dict:
-    validation_results = evidence.get("validation_results")
-    scoring = _compact_pmml_scoring_evidence(
-        evidence.get("pmml_scoring"),
-        validation_results.get("pmml_scoring")
-        if isinstance(validation_results, dict)
-        else None,
-    )
-    return {"pmml_scoring": scoring}
-
-
-def _reproducibility_stage_evidence(evidence: dict) -> dict:
-    if not _looks_like_global_agent_evidence(evidence):
-        return _slim_evidence_for_llm(evidence)
-    validation_results = evidence.get("validation_results")
-    scoped: dict[str, object] = {}
-
-    notebook_steps = _compact_notebook_steps_for_reproducibility(
-        evidence.get("notebook_steps")
-    )
-    if notebook_steps or "notebook_steps" in evidence:
-        scoped["notebook_steps"] = notebook_steps
-
-    notebook_failure = _compact_notebook_failure_evidence(
-        evidence.get("notebook_steps")
-    )
-    if notebook_failure:
-        scoped["notebook_failure"] = notebook_failure
-
-    contract = _compact_contract_for_reproducibility(evidence.get("contract"))
-    if contract or "contract" in evidence:
-        scoped["contract"] = contract
-
-    reproducibility = _compact_reproducibility_evidence(
-        evidence.get("reproducibility"),
-        validation_results.get("reproducibility") if isinstance(validation_results, dict) else None,
-    )
-    if reproducibility or "reproducibility" in evidence:
-        scoped["reproducibility"] = reproducibility
-
-    return scoped
-
-
-def _compact_notebook_steps_for_reproducibility(steps: object) -> list[dict]:
-    if isinstance(steps, dict):
-        steps = steps.get("steps")
-    if not isinstance(steps, list):
-        return []
-    compact = []
-    for step in steps[:REPRODUCIBILITY_NOTEBOOK_STEP_LIMIT]:
-        if not isinstance(step, dict):
-            continue
-        compact.append(
-            {
-                key: step.get(key)
-                for key in (
-                    "id",
-                    "title",
-                    "status",
-                    "cell_count",
-                    "elapsed_seconds",
-                    "system",
-                )
-                if step.get(key) not in (None, "")
-            }
-        )
-    return compact
-
-
-def _compact_notebook_failure_evidence(notebook_steps: object) -> dict:
-    if not isinstance(notebook_steps, dict):
-        return {}
-    cells = notebook_steps.get("cells")
-    if not isinstance(cells, list):
-        return {}
-    steps_by_id = _notebook_steps_by_id(notebook_steps.get("steps"))
-    failed_cells: list[dict] = []
-    for cell in cells:
-        if not isinstance(cell, dict):
-            continue
-        if str(cell.get("status") or "").lower() != "failed":
-            continue
-        compact = {
-            key: cell.get(key)
-            for key in (
-                "cell_index",
-                "step_id",
-                "exception_name",
-                "exception_value",
-                "traceback_preview",
-            )
-            if cell.get(key) not in (None, "")
-        }
-        step = steps_by_id.get(str(cell.get("step_id") or ""))
-        if step:
-            compact["step_title"] = step.get("title")
-        source_preview = str(cell.get("source_preview") or "").strip()
-        if source_preview:
-            compact["source_preview"] = _truncate_llm_text(
-                source_preview,
-                NOTEBOOK_FAILURE_SOURCE_CHARS,
-            )
-        referenced_files = cell.get("referenced_files")
-        if isinstance(referenced_files, list) and referenced_files:
-            compact["referenced_files"] = [
-                str(item)
-                for item in referenced_files[:NOTEBOOK_FAILURE_FILE_LIMIT]
-                if str(item).strip()
-            ]
-        access_lines = cell.get("file_access_lines")
-        if isinstance(access_lines, list) and access_lines:
-            compact["file_access_lines"] = [
-                _truncate_llm_text(str(item), NOTEBOOK_FAILURE_SOURCE_CHARS)
-                for item in access_lines[:NOTEBOOK_FAILURE_LINE_LIMIT]
-                if str(item).strip()
-            ]
-        failed_cells.append(compact)
-        if len(failed_cells) >= NOTEBOOK_FAILURE_CELL_LIMIT:
-            break
-    if not failed_cells:
-        return {}
-    return {
-        "source": "notebook_execution_progress",
-        "read_only": True,
-        "failed_cells": failed_cells,
-        "interpretation_rule": (
-            "回答 Notebook 缺文件或失败 cell 问题时，优先使用 failed_cells 中的 "
-            "source_preview、referenced_files 和 file_access_lines；不要只根据错误文本猜测。"
-        ),
-    }
-
-
-def _notebook_steps_by_id(steps: object) -> dict[str, dict]:
-    if not isinstance(steps, list):
-        return {}
-    return {
-        str(step.get("id") or ""): step
-        for step in steps
-        if isinstance(step, dict) and step.get("id")
-    }
-
-
-def _compact_contract_for_reproducibility(contract: object) -> dict:
-    if not isinstance(contract, dict):
-        return {}
-    compact = {
-        key: contract.get(key)
-        for key in (
-            "algorithm",
-            "target_col",
-            "score_col",
-            "split_col",
-            "time_col",
-            "pmml_output_field",
-            "score_decimal_places",
-        )
-        if contract.get(key) not in (None, "")
-    }
-    feature_columns = contract.get("feature_columns")
-    if isinstance(feature_columns, list):
-        compact["feature_count"] = len(feature_columns)
-        compact["feature_columns_sample"] = feature_columns[
-            :REPRODUCIBILITY_CONTRACT_FEATURE_LIMIT
-        ]
-    return compact
-
-
-def _slim_evidence_for_llm(evidence: dict) -> dict:
-    if not isinstance(evidence, dict):
-        return evidence
-    slim = dict(evidence)
-    validation_results = slim.get("validation_results")
-    if isinstance(validation_results, dict):
-        slim["validation_results"] = _slim_validation_results_for_llm(validation_results)
-    return slim
-
-
-def _word_conclusion_stage_evidence(
-    evidence: dict,
-    *,
-    validation_workflow_version: int | None = None,
-) -> dict:
-    if not _looks_like_global_agent_evidence(evidence):
-        return _slim_evidence_for_llm(evidence)
-    validation_results = evidence.get("validation_results")
-    scoped: dict[str, object] = {}
-
-    scan = _compact_scan_evidence(evidence.get("scan"))
-    if scan:
-        scoped["scan"] = scan
-
-    pmml_scoring = _compact_pmml_scoring_evidence(
-        evidence.get("pmml_scoring"),
-        validation_results.get("pmml_scoring")
-        if isinstance(validation_results, dict)
-        else None,
-    )
-    if pmml_scoring:
-        scoped["pmml_scoring"] = pmml_scoring
-
-    if validation_workflow_version != 2:
-        reproducibility = _compact_reproducibility_evidence(
-            evidence.get("reproducibility"),
-            validation_results.get("reproducibility")
-            if isinstance(validation_results, dict)
-            else None,
-        )
-        if reproducibility:
-            scoped["reproducibility"] = reproducibility
-
-    compact_validation = _compact_word_validation_results(
-        validation_results,
-        validation_workflow_version=validation_workflow_version,
-    )
-    if compact_validation:
-        scoped["validation_results"] = compact_validation
-
-    report_fields = evidence.get("report_fields")
-    if report_fields is not None:
-        scoped["report_fields"] = report_fields
-    report_draft = evidence.get("report_draft")
-    if isinstance(report_draft, dict):
-        scoped["report_draft"] = report_draft
-    saved_narrative = evidence.get("saved_report_narrative")
-    if isinstance(saved_narrative, dict):
-        scoped["saved_report_narrative"] = saved_narrative
-
-    visible_summaries = _compact_visible_stage_summaries(
-        evidence.get("visible_stage_summaries")
-    )
-    if visible_summaries:
-        scoped["visible_stage_summaries"] = visible_summaries
-
-    return scoped
-
-
-def _compact_scan_evidence(scan: object) -> dict:
-    if not isinstance(scan, dict):
-        return {}
-    checks = scan.get("checks")
-    if not isinstance(checks, list):
-        checks = []
-    compact_checks = []
-    for check in checks[:20]:
-        if not isinstance(check, dict):
-            continue
-        compact_checks.append(
-            {
-                key: check.get(key)
-                for key in ("id", "label", "status", "message")
-                if check.get(key) not in (None, "")
-            }
-        )
-    compact = {
-        "checks": compact_checks,
-        "scan_interpretation": _scan_interpretation(compact_checks),
-    }
-    notebook_contract = _compact_notebook_contract_evidence(
-        scan.get("notebook_contract")
-    )
-    if notebook_contract:
-        compact["notebook_contract"] = notebook_contract
-    return compact
-
-
-def _compact_notebook_contract_evidence(contract: object) -> dict:
-    if not isinstance(contract, dict):
-        return {}
-    compact = {
-        key: contract.get(key)
-        for key in (
-            "read_only",
-            "source",
-            "sample_df_defined",
-            "score_fn_defined",
-            "target_col_defined",
-            "algorithm_defined",
-            "target_col",
-            "algorithm",
-            "algorithm_raw",
-            "algorithm_source",
-            "algorithm_valid",
-            "algorithm_error",
-            "error",
-        )
-        if contract.get(key) not in (None, "")
-    }
-    for key in ("missing_names", "invalid_names", "contract_cell_indexes"):
-        value = contract.get(key)
-        if isinstance(value, list) and value:
-            compact[key] = value[:20]
-    previews = contract.get("source_previews")
-    if isinstance(previews, list) and previews:
-        compact["source_previews"] = [
-            _truncate_llm_text(str(preview), NOTEBOOK_CONTRACT_SOURCE_PREVIEW_CHARS)
-            for preview in previews[:NOTEBOOK_CONTRACT_SOURCE_PREVIEW_LIMIT]
-            if str(preview).strip()
-        ]
-    return compact
-
-
-def _compact_reproducibility_evidence(*candidates: object) -> dict:
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        compact = {
-            key: candidate.get(key)
-            for key in ("summary", "sample_size", "seed")
-            if candidate.get(key) is not None
-        }
-        if compact:
-            return compact
-    return {}
-
-
-def _compact_pmml_scoring_evidence(*candidates: object) -> dict:
-    fields = (
-        "schema_version",
-        "engine",
-        "engine_version",
-        "output_field",
-        "input_row_count",
-        "success_count",
-        "failure_count",
-        "null_count",
-        "non_finite_count",
-        "elapsed_seconds",
-        "rows_per_second",
-        "chunk_size",
-        "required_input_count",
-        "missing_inputs",
-        "status",
-        "bounded_errors",
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        compact = {
-            key: candidate.get(key)
-            for key in fields
-            if candidate.get(key) is not None
-        }
-        if compact:
-            return compact
-    return {}
-
-
-def _compact_word_validation_results(
-    validation_results: object,
-    *,
-    validation_workflow_version: int | None = None,
-) -> dict:
-    if not isinstance(validation_results, dict):
-        return {}
-    slim = _slim_validation_results_for_llm(validation_results)
-    compact: dict[str, object] = {}
-    for key in ("model_name", "model_version", "algorithm", "target_type"):
-        if slim.get(key) is not None:
-            compact[key] = slim.get(key)
-
-    basic_info = _compact_basic_info_for_word(slim.get("basic_info"))
-    if basic_info:
-        compact["basic_info"] = basic_info
-
-    if validation_workflow_version != 2:
-        reproducibility = _compact_reproducibility_evidence(
-            slim.get("reproducibility")
-        )
-        if reproducibility:
-            compact["reproducibility"] = reproducibility
-
-    pmml_scoring = _compact_pmml_scoring_evidence(slim.get("pmml_scoring"))
-    if pmml_scoring:
-        compact["pmml_scoring"] = pmml_scoring
-
-    raw_effectiveness = slim.get("effectiveness")
-    effectiveness = _compact_effectiveness_for_word(raw_effectiveness)
-    if isinstance(raw_effectiveness, dict):
-        ranking = assess_lift_ranking(raw_effectiveness)
-        if ranking["splits"]:
-            effectiveness["lift_ranking_assessment"] = ranking
-    if effectiveness:
-        compact["effectiveness"] = effectiveness
-
-    overfitting = slim.get("overfitting_check")
-    if isinstance(overfitting, dict):
-        compact["overfitting_check"] = dict(overfitting)
-
-    stress_test = _compact_stress_test_for_word(slim.get("stress_test"))
-    if stress_test:
-        compact["stress_test"] = stress_test
-    return compact
-
-
-def _compact_basic_info_for_word(basic_info: object) -> dict:
-    if not isinstance(basic_info, dict):
-        return {}
-    compact: dict[str, object] = {}
-    for key in ("sample_period", "split_summary", "monthly_distribution"):
-        value = basic_info.get(key)
-        if isinstance(value, list):
-            compact[key] = _tail_list(value, WORD_CONCLUSION_MONTHLY_LIMIT)
-        elif value is not None:
-            compact[key] = value
-    feature_importance = basic_info.get("feature_importance")
-    if isinstance(feature_importance, list):
-        compact["feature_importance"] = feature_importance[:WORD_CONCLUSION_FEATURE_LIMIT]
-    hyperparameters = basic_info.get("hyperparameters")
-    if isinstance(hyperparameters, dict) and hyperparameters:
-        compact["hyperparameters"] = dict(list(hyperparameters.items())[:50])
-    return compact
-
-
-def _compact_effectiveness_for_word(effectiveness: object) -> dict:
-    if not isinstance(effectiveness, dict):
-        return {}
-    compact: dict[str, object] = {}
-    for key in ("overall", "monthly_ks", "monthly_psi", "psi_stability_table"):
-        value = effectiveness.get(key)
-        if not isinstance(value, list):
-            if value is not None:
-                compact[key] = value
-            continue
-        if key in {"monthly_ks", "monthly_psi"}:
-            compact[key] = _tail_list(value, WORD_CONCLUSION_MONTHLY_LIMIT)
-        elif key == "psi_stability_table":
-            compact[key] = value[:WORD_CONCLUSION_PSI_BIN_LIMIT]
-        else:
-            compact[key] = value
-    return compact
-
-
-def _compact_stress_test_for_word(stress_test: object) -> dict:
-    if not isinstance(stress_test, dict):
-        return {}
-    compact: dict[str, object] = {}
-    baseline = stress_test.get("baseline")
-    if isinstance(baseline, dict):
-        compact["baseline"] = {
-            key: value
-            for key, value in baseline.items()
-            if key != "bin_table"
-        }
-    elif baseline is not None:
-        compact["baseline"] = baseline
-    per_category = stress_test.get("per_category")
-    if isinstance(per_category, list):
-        compact["per_category"] = [
-            _compact_stress_category(item)
-            for item in per_category[:WORD_CONCLUSION_STRESS_CATEGORY_LIMIT]
-            if isinstance(item, dict)
-        ]
-    if stress_test.get("status") is not None:
-        compact["status"] = stress_test.get("status")
-    return compact
-
-
-def _compact_stress_category(category: dict) -> dict:
-    compact = {
-        key: value
-        for key, value in category.items()
-        if key != "bin_table"
-    }
-    dropped = compact.get("dropped_features")
-    if isinstance(dropped, list):
-        compact["dropped_features"] = dropped[:WORD_CONCLUSION_FEATURE_LIMIT]
-    return compact
-
-
-def _compact_visible_stage_summaries(summaries: object) -> list[dict]:
-    if not isinstance(summaries, list):
-        return []
-    compact = []
-    for item in summaries[-WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT:]:
-        if not isinstance(item, dict):
-            continue
-        content = str(item.get("content") or "")
-        compact.append(
-            {
-                "stage": str(item.get("stage") or ""),
-                "content": _truncate_llm_text(
-                    content,
-                    WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS,
-                ),
-            }
-        )
-    return compact
-
-
-def _tail_list(value: list, limit: int) -> list:
-    if len(value) <= limit:
-        return value
-    return value[-limit:]
-
-
-def _slim_validation_results_for_llm(validation_results: dict) -> dict:
-    if not isinstance(validation_results, dict):
-        return validation_results
-    slim = dict(validation_results)
-    effectiveness = slim.get("effectiveness")
-    if isinstance(effectiveness, dict):
-        slim["effectiveness"] = {
-            key: value
-            for key, value in effectiveness.items()
-            if key not in OVERSIZED_EFFECTIVENESS_KEYS
-        }
-    return slim
-
-
-def _compact_metrics_validation_results(validation_results: dict) -> dict:
-    if not isinstance(validation_results, dict):
-        return validation_results
-    compact: dict[str, object] = {
-        key: validation_results.get(key)
-        for key in ("model_name", "model_version", "algorithm", "target_type")
-        if validation_results.get(key) is not None
-    }
-    raw_basic_info = validation_results.get("basic_info")
-    basic_info = _compact_basic_info_for_word(raw_basic_info)
-    if basic_info:
-        compact["basic_info"] = basic_info
-
-    effectiveness = _compact_effectiveness_for_word(
-        validation_results.get("effectiveness")
-    )
-    raw_effectiveness = validation_results.get("effectiveness")
-    if isinstance(raw_effectiveness, dict):
-        for table_key in ("bin_tables", "independent_quantile_bin_tables"):
-            tables = raw_effectiveness.get(table_key)
-            if isinstance(tables, dict):
-                effectiveness[table_key] = {
-                    str(split): rows[:METRICS_BIN_TABLE_LIMIT]
-                    for split, rows in tables.items()
-                    if isinstance(rows, list)
-                }
-        ranking = assess_lift_ranking(raw_effectiveness)
-        if ranking["splits"]:
-            effectiveness["lift_ranking_assessment"] = ranking
-    if effectiveness:
-        compact["effectiveness"] = effectiveness
-
-    overfitting = validation_results.get("overfitting_check")
-    if isinstance(overfitting, dict):
-        compact["overfitting_check"] = dict(overfitting)
-
-    stress_test = _compact_stress_test_for_word(
-        validation_results.get("stress_test")
-    )
-    raw_stress_test = validation_results.get("stress_test")
-    if stress_test and isinstance(raw_stress_test, dict):
-        source_counts = raw_stress_test.get("category_source_counts")
-        if isinstance(source_counts, dict):
-            stress_test["category_source_counts"] = dict(source_counts)
-        unclassified = raw_stress_test.get("unclassified_features")
-        if isinstance(unclassified, list):
-            stress_test["unclassified_feature_count"] = len(unclassified)
-            stress_test["unclassified_features_sample"] = unclassified[
-                :WORD_CONCLUSION_FEATURE_LIMIT
-            ]
-    if stress_test:
-        compact["stress_test"] = stress_test
-    return compact
-
-
-def _scan_stage_evidence(evidence: dict) -> dict:
-    scoped = dict(evidence)
-    checks = scoped.get("checks")
-    if not isinstance(checks, list) and isinstance(scoped.get("scan"), dict):
-        checks = scoped["scan"].get("checks")
-        notebook_contract = _compact_notebook_contract_evidence(
-            scoped["scan"].get("notebook_contract")
-        )
-        if notebook_contract:
-            scoped["scan"] = {**scoped["scan"], "notebook_contract": notebook_contract}
-    else:
-        notebook_contract = _compact_notebook_contract_evidence(
-            scoped.get("notebook_contract")
-        )
-        if notebook_contract:
-            scoped["notebook_contract"] = notebook_contract
-    scoped["scan_interpretation"] = _scan_interpretation(
-        checks if isinstance(checks, list) else []
-    )
-    return scoped
-
-
-def _scan_interpretation(checks: list[dict]) -> dict:
-    checks_by_label = {
-        str(check.get("label") or check.get("name") or ""): check
-        for check in checks
-        if isinstance(check, dict)
-    }
-    detected: list[str] = []
-    missing: list[str] = []
-    for label in SCAN_REQUIRED_CHECK_LABELS:
-        check = checks_by_label.get(label)
-        if check and _scan_check_passed(check):
-            detected.append(label)
-        else:
-            missing.append(label)
-    return {
-        "required_materials": list(SCAN_REQUIRED_CHECK_LABELS),
-        "detected_required_materials": detected,
-        "missing_required_materials": missing,
-        "required_materials_complete": not missing,
-        "not_required_in_scan_stage": [
-            "pickle/pkl 模型",
-            "验证样本与评分输出中间结果",
-            "KS/PSI/AUC 等效果指标产物",
-        ],
-        "interpretation_rule": (
-            "checks 中 success/passed/通过 表示对应材料或契约已经满足，"
-            "不得再描述为缺失。pickle/pkl、评分输出和 KS/PSI/AUC 是可选材料或后续阶段结果，"
-            "不属于材料扫描阶段的必需输入。"
-        ),
-    }
-
-
-def _scan_check_passed(check: dict) -> bool:
-    status = str(check.get("status") or "").strip().lower()
-    message = str(check.get("message") or "")
-    return (
-        status in SCAN_SUCCESS_STATUSES
-        or message.startswith("已识别")
-        or message.startswith("已定义")
-    )
-
-
 def _guard_stage_summary(
     *,
     task: TaskRecord,
@@ -2351,221 +1794,11 @@ def _scan_summary_claims_missing_complete_materials(content: str) -> bool:
     )
 
 
-def _looks_like_global_agent_evidence(evidence: dict) -> bool:
-    return any(key in evidence for key in GLOBAL_AGENT_EVIDENCE_KEYS)
-
-
-def _chat_prompt(
-    *,
-    task: TaskRecord,
-    user_message: str,
-    conversation: list[dict],
-    evidence: dict,
-    memory_context: dict | None = None,
-) -> str:
-    conversation_memory = _conversation_memory(
-        conversation=conversation,
-        task=task,
-        current_user_message=user_message,
-    )
-    payload = {
-            "stage": "chat",
-            "task": _llm_task_meta(task),
-            "user_message": _sanitize_llm_text(user_message, task),
-            "conversation_memory": conversation_memory,
-            "available_evidence": _sanitize_llm_payload(
-                _chat_evidence_for_llm(evidence), task
-            ),
-            "instructions": _chat_instructions(user_message),
-        }
-    payload = add_memory_to_prompt_payload(payload, memory_context)
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def _conversation_memory(
-    *,
-    conversation: list[dict],
-    task: TaskRecord,
-    current_user_message: str,
-) -> dict:
-    messages = _conversation_memory_messages(conversation, task)
-    previous_messages = messages
-    if messages and messages[-1]["role"] == "user" and messages[-1]["content"] == _sanitize_llm_text(
-        current_user_message, task
-    ):
-        previous_messages = messages[:-1]
-    previous_user_question = _last_message_content(previous_messages, role="user")
-    previous_assistant_answer = _last_message_content(previous_messages, role="assistant")
-    kept_messages, omitted_count = _fit_conversation_memory(messages)
-    return {
-        "scope": "same_agent_task",
-        "description": "同一个验证任务内的用户问题、Agent 回复和阶段输出历史，用于理解后续追问。",
-        "messages": kept_messages,
-        "omitted_message_count": omitted_count,
-        "previous_user_question": previous_user_question,
-        "previous_assistant_answer": previous_assistant_answer,
-        "follow_up_guidance": (
-            "如果当前 user_message 是省略主语、承接上一轮或只问“有什么影响/为什么/继续说”的追问，"
-            "必须优先按 previous_user_question 和 previous_assistant_answer 中的主题补全问题，"
-            "不要扩展到无关验证阶段或泛化成整体验证分析。"
-        ),
-    }
-
-
-def _conversation_memory_messages(conversation: list[dict], task: TaskRecord) -> list[dict]:
-    messages = []
-    current_draft = latest_report_draft_context(conversation)
-    for message in conversation:
-        content = str(message.get("content") or "")
-        if current_draft and message.get("id") == current_draft["message_id"]:
-            content = json.dumps(current_draft["text_values"], ensure_ascii=False)
-        content = _truncate_llm_text(
-            _sanitize_llm_text(content, task),
-            CONVERSATION_MEMORY_MESSAGE_MAX_CHARS,
-        )
-        if not content:
-            continue
-        messages.append(
-            {
-                "role": str(message.get("role") or ""),
-                "stage": str(message.get("stage") or ""),
-                "content": content,
-            }
-        )
-    return messages
-
-
-def _fit_conversation_memory(messages: list[dict]) -> tuple[list[dict], int]:
-    kept: list[dict] = []
-    total_chars = 0
-    for message in reversed(messages):
-        content_length = len(message["content"])
-        if kept and (
-            len(kept) >= CONVERSATION_MEMORY_MAX_MESSAGES
-            or total_chars + content_length > CONVERSATION_MEMORY_MAX_CHARS
-        ):
-            break
-        kept.append(message)
-        total_chars += content_length
-    kept.reverse()
-    return kept, max(0, len(messages) - len(kept))
-
-
-def _chat_evidence_for_llm(evidence: dict) -> dict:
-    if not isinstance(evidence, dict):
-        return evidence
-    if not _looks_like_global_agent_evidence(evidence):
-        return _slim_evidence_for_llm(evidence)
-    scoped = _word_conclusion_stage_evidence(evidence)
-    notebook_failure = _compact_notebook_failure_evidence(
-        evidence.get("notebook_steps")
-    )
-    if notebook_failure:
-        scoped["notebook_failure"] = notebook_failure
-    return scoped
-
-
-def _last_message_content(messages: list[dict], *, role: str) -> str:
-    for message in reversed(messages):
-        if message["role"] == role and message["content"]:
-            return message["content"]
-    return ""
-
-
-def _truncate_llm_text(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
-        return value
-    return value[: max(0, max_chars - 8)].rstrip() + "…[截断]"
-
-
-def _chat_instructions(user_message: str) -> str:
-    instructions = (
-        _llm_task_reference_instruction()
-        + "直接回答用户当前问题。若用户只是问候、寒暄或普通对话，应自然、简短回应，"
-        "不要给出固定启动口令或流程引导。若 conversation 显示用户连续多轮明显偏离当前模型验证任务，"
-        "可以简短回答后提醒你主要用于解释验证结果、PMML、指标含义和报告结论。"
-        "若问题是 PMML、验证流程、指标含义或当前任务结果解释，"
-        "请以信贷风控模型验证专家身份给出清晰中文说明；能引用平台证据时引用证据，"
-        "没有证据时明确说明这是通用解释。若用户提到界面里的图、表、阶段文字或结论，"
-        "优先使用 available_evidence.validation_results、report_fields.metric_values、"
-        "report_fields.text_values 和 visible_stage_summaries 作答；图表应按其底层结构化数据解释，"
-        "不要假装直接看到了像素图。"
-        "available_evidence.report_draft.text_values 是用户当前已保存但尚未确认的报告文字，"
-        "讨论或修订当前草稿时优先使用它，不要把旧会话草稿当作最新版本；"
-        "草稿文字不能覆盖 report_fields.metric_values 或 validation_results 中的确定性指标。"
-        "若用户询问 Notebook、RMC 契约字段或 RMC_ALGORITHM 当前值，优先使用 "
-        "available_evidence.scan.notebook_contract；该证据来自平台对 Notebook 的只读静态扫描，"
-        "可以说明原始填写值、归一化算法和错误原因，但不得声称修改过 Notebook，也不得要求用户手动打开"
-        "Notebook 来查找已在 evidence 中提供的字段。"
-        "若用户询问 Notebook 执行失败、缺少哪个文件、或某个 cell 为什么报错，优先使用 "
-        "available_evidence.notebook_failure.failed_cells 中的失败 cell 源码摘要、referenced_files "
-        "和 file_access_lines；不要只根据 FileNotFoundError 文本、任务名、文件名或历史经验猜测。"
-        "同一验证任务内的 conversation_memory 是任务内会话记忆。若当前 user_message 是承接式追问、"
-        "省略主语或只问影响/原因/继续说明，必须先根据 conversation_memory.previous_user_question "
-        "和 previous_assistant_answer 补全主题；回答时要围绕上一轮用户问题的主题，不要自动扩展到"
-        "无关验证阶段或整体验证结论。"
-        "如果回答涉及 KS、PSI、AUC、稳定性或区分能力等指标，必须按以下业务口径解释，不能脱离模型场景："
-        + RISK_METRIC_INTERPRETATION_GUIDANCE
-    )
-    if _is_greeting_message(user_message):
-        instructions += "当前 user_message 是问候或寒暄，直接打招呼并表示可以继续回答即可。"
-    return instructions
-
-
-def _llm_task_meta(task: TaskRecord) -> dict:
-    status_message = task.status_message
-    if status_message is not None:
-        status_message = _sanitize_llm_text(status_message, task)
-    return {
-        "model_display_name": _model_display_name(task),
-        "model_name": task.model_name or "当前模型",
-        "model_version": task.model_version,
-        "algorithm": task.algorithm,
-        "status": task.status.value,
-        "status_message": status_message,
-    }
-
-
-def _model_display_name(task: TaskRecord) -> str:
-    name = task.model_name or "当前模型"
-    version = str(task.model_version or "").strip()
-    return f"{name}（{version}）" if version else name
-
-
 def _llm_task_reference_instruction() -> str:
     return (
         "涉及当前任务或当前模型时，必须使用 task.model_display_name / 模型名称来称呼，"
         "不要输出、复述或引用内部任务 ID。"
     )
-
-
-def _sanitize_llm_payload(value: object, task: TaskRecord) -> object:
-    if isinstance(value, str):
-        return _sanitize_llm_text(value, task)
-    if isinstance(value, list):
-        return [_sanitize_llm_payload(item, task) for item in value]
-    if isinstance(value, tuple):
-        return [_sanitize_llm_payload(item, task) for item in value]
-    if isinstance(value, dict):
-        # Only sanitize values, never keys. Keys are structural field names; a
-        # key that happens to contain the task id should not be rewritten into a
-        # display name (which would corrupt the payload schema seen by the LLM).
-        return {
-            key: _sanitize_llm_payload(item, task)
-            for key, item in value.items()
-        }
-    return value
-
-
-def _sanitize_llm_text(value: str, task: TaskRecord) -> str:
-    task_id = str(task.id or "")
-    if not task_id:
-        return value
-    return value.replace(task_id, _model_display_name(task))
 
 
 def _stage_instructions(

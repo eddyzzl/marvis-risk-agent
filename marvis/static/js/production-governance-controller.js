@@ -54,6 +54,8 @@ export function collectProbe(values, schema) {
     }),
   );
 }
+const REQUESTS_URL = "/api/production-governance/promotion-requests?environment=local-reference";
+const REQUESTS_PAGE = 20;
 export function promotionPayload(values, record) {
   const c = record.manifest.configuration,
     seconds = Number(text(values.expires_in_seconds, "审批有效期"));
@@ -83,6 +85,7 @@ export function createProductionGovernanceController({
     busy = false,
     packages = [],
     requests = [],
+    requestsNextOffset = null,
     installations = [],
     heads = [],
     environment = null,
@@ -108,6 +111,20 @@ export function createProductionGovernanceController({
     if (!root.dataset.productionMounted) {
       root.dataset.productionMounted = "true";
       root.innerHTML = shellHtml();
+    }
+  }
+  async function moreRequests() {
+    if (requestsNextOffset == null) return;
+    const ticket = epoch;
+    try {
+      const page = await apiClient(`${REQUESTS_URL}&limit=${REQUESTS_PAGE}&offset=${requestsNextOffset}`);
+      if (!valid(ticket)) return;
+      const seen = new Set(requests.map((r) => r.id));
+      requests = [...requests, ...page.requests.filter((r) => !seen.has(r.id))];
+      requestsNextOffset = page.next_offset ?? null;
+      q("[data-production-requests]").innerHTML = requestsHtml(requests, requestsNextOffset);
+    } catch (e) {
+      if (valid(ticket)) message(error(e), "error");
     }
   }
   async function list(url, key) {
@@ -142,17 +159,17 @@ export function createProductionGovernanceController({
       }
       const result = await Promise.all([
         list("/api/reference-decision/packages", "packages"),
-        list(
-          "/api/production-governance/promotion-requests?environment=local-reference",
-          "requests",
-        ),
+        // V3 5.7: promotion requests are read one database page at a time.
+        apiClient(`${REQUESTS_URL}&limit=${REQUESTS_PAGE}&offset=0`),
         list("/api/reference-decision/installations", "installations"),
         apiClient("/api/reference-decision/status?slot=production"),
         apiClient("/api/reference-decision/status?slot=shadow"),
         apiClient("/api/production-governance/environments/local-reference"),
       ]);
       if (!valid(ticket)) return;
-      [packages, requests, installations] = result;
+      [packages, , installations] = result;
+      requests = result[1].requests;
+      requestsNextOffset = result[1].next_offset ?? null;
       heads = result.slice(3, 5);
       environment = result[5];
       q("[data-production-heads]").innerHTML = headsHtml(
@@ -161,7 +178,7 @@ export function createProductionGovernanceController({
         principal.role,
       );
       q("[data-production-packages]").innerHTML = packagesHtml(packages);
-      q("[data-production-requests]").innerHTML = requestsHtml(requests);
+      q("[data-production-requests]").innerHTML = requestsHtml(requests, requestsNextOffset);
       q("[data-production-installations]").innerHTML =
         installationsHtml(installations);
       message("");
@@ -557,6 +574,7 @@ export function createProductionGovernanceController({
     if (action === "refresh") void refresh();
     if (action === "package") void showPackage(id);
     if (action === "request") void showRequest(id);
+    if (action === "more-requests") void moreRequests();
     if (action === "installation")
       void showRequest(id, { readInstallation: true });
     if (action === "prepare-install") void prepareFeatures("install", id);

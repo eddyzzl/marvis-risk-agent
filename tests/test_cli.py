@@ -1,4 +1,5 @@
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -10,24 +11,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_pyproject_exposes_short_marvis_script_alias():
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
-    assert 'marvis = "marvis.__main__:main"' in text
+    assert project["scripts"]["marvis"] == "marvis.__main__:main"
+    assert callable(cli.main)
 
 
 def test_pyproject_declares_runtime_dependency_bounds():
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
     for requirement in [
-        '"pydantic>=2.7,<3"',
-        '"pandas>=2.2,<4"',
-        '"packaging>=16.8,<27"',
-        '"nbclient>=0.8,<0.12"',
-        '"nbformat>=5.9,<6"',
-        '"ipykernel>=6.23.2,<8"',
-        '"scikit-learn>=1.4,<1.9.1"',
+        "pydantic>=2.7,<3",
+        "pandas>=2.2,<4",
+        "packaging>=16.8,<27",
+        "nbclient>=0.8,<0.12",
+        "nbformat>=5.9,<6",
+        "ipykernel>=6.23.2,<8",
+        "scikit-learn>=1.4,<1.9.1",
     ]:
-        assert requirement in text
+        assert requirement in project["dependencies"]
 
 
 def test_main_without_subcommand_starts_default_profile(monkeypatch):

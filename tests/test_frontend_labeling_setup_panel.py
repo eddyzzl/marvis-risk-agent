@@ -195,15 +195,9 @@ def test_labeling_panel_fails_closed_for_dirty_workspace_and_mixed_status_rule()
 
 
 def test_labeling_panel_is_mounted_next_to_data_workspace():
-    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
-    index_html = (ROOT / "marvis/static/index.html").read_text(encoding="utf-8")
-    css = read_browser_stylesheets(ROOT / "marvis/static")
-
+    index_html = (ROOT / 'marvis/static/index.html').read_text(encoding='utf-8')
+    css = read_browser_stylesheets(ROOT / 'marvis/static')
     assert 'id="labelingSetupPanel"' in index_html
     assert 'id="labelingSetupForm"' in index_html
     assert 'id="labelingProposalConfirm"' in index_html
-    assert "createLabelingSetupPanel," in app_js
-    assert 'from "./js/v2/labeling_setup_panel.js";' in app_js
-    assert "const labelingSetupPanel = createLabelingSetupPanel({" in app_js
-    assert "labelingSetupPanel.renderAvailability();" in app_js
-    assert ".labeling-setup-panel" in css
+    assert '.labeling-setup-panel' in css

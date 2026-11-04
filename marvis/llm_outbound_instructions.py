@@ -102,6 +102,32 @@ def user_instruction(value: str, *, allowed_identifiers=()) -> SafeInstruction:
     return SafeInstruction(value, _token=_PROMPT_TOKEN)
 
 
+def persisted_goal_instruction(value) -> SafeInstruction | None:
+    """The plan's unchanged user goal for review prompts, verbatim or refused.
+
+    Reviews must see the same negations, conditions and thresholds the planner
+    saw, so the goal is admitted through the same content boundary rather than
+    reduced to topic words. A missing goal is omitted; disallowed material
+    raises before any request exists.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return user_instruction(value)
+
+
+def review_goal_or_omitted(value) -> SafeInstruction | None:
+    """Review prompts keep the goal verbatim, or leave it out when refused.
+
+    A goal holding a local path, URL or record cannot leave the machine, but
+    that must not turn every reviewed step into a critic warning: the review
+    proceeds on the measured evidence alone, never on topic words.
+    """
+    try:
+        return persisted_goal_instruction(value)
+    except OutboundContextError:
+        return None
+
+
 def column_identifiers(values) -> list[str]:
     """Bound field-name metadata; no descriptions or observed cell values."""
     if not isinstance(values, (list, tuple)) or len(values) > 10000:

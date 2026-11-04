@@ -174,3 +174,16 @@ __all__ = [
     "deep_freeze",
     "deep_thaw",
 ]
+
+
+def prepare_strategy_plan(
+    workflow_id: str,
+    template_id: str,
+    slots: Mapping[str, Any],
+) -> PreparedStrategyPlan:
+    return PreparedStrategyPlan(
+        workflow_id=workflow_id,
+        template_id=template_id,
+        slots=deep_freeze(slots),
+        success_criteria=(),
+    )

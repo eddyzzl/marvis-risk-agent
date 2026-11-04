@@ -22,8 +22,8 @@ from marvis.validation.platform_metrics import (
     stress_category_resolution_for_metrics, validate_metrics_contract,
     validate_stress_category_artifact,
 )
-from marvis.validation.pmml_analysis import load_pmml_analysis_frame, validated_split_identity_mapping
-from marvis.validation.pmml_score_artifacts import raise_if_cancelled
+from marvis.validation_services.pmml_analysis import load_pmml_analysis_frame, validated_split_identity_mapping
+from marvis.validation_services.pmml_score_artifacts import raise_if_cancelled
 from marvis.validation.pmml_scoring import load_pmml_scorer
 from marvis.validation.reproducibility import run_reproducibility
 from marvis.validation.results import (
@@ -53,13 +53,16 @@ def write_reproducibility_result(
     input_pmml_path: Path,
     output_path: Path,
     fallback_sample_path: Path | None = None,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> Path:
+    raise_if_cancelled(cancellation_check)
     sample = load_runtime_sample(contract, fallback_sample_path=fallback_sample_path)
     config = validation_config_from_contract(
         contract=contract,
         task=task,
         settings=settings,
     )
+    raise_if_cancelled(cancellation_check)
     result = run_reproducibility(
         sample=sample,
         config=config,
@@ -69,6 +72,7 @@ def write_reproducibility_result(
             positive_output_field=contract.pmml_output_field,
         ),
     )
+    raise_if_cancelled(cancellation_check)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(asdict(result), ensure_ascii=False, indent=2),
@@ -89,7 +93,9 @@ def write_platform_validation_metrics(
     excel_path: Path,
     stress_scores_path: Path | None = None,
     fallback_sample_path: Path | None = None,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> Path:
+    raise_if_cancelled(cancellation_check)
     sample = load_runtime_sample(contract, fallback_sample_path=fallback_sample_path)
     config = validation_config_from_contract(
         contract=contract,
@@ -111,7 +117,10 @@ def write_platform_validation_metrics(
         config=config,
         model_meta_path=model_meta_path,
     )
-    effectiveness = run_effectiveness(sample=sample_scored, config=config)
+    raise_if_cancelled(cancellation_check)
+    effectiveness = run_effectiveness(
+        sample=sample_scored, config=config, cancellation_check=cancellation_check,
+    )
 
     category_resolution = stress_category_resolution_for_metrics(
         feature_importance=basic_info.feature_importance,
@@ -136,9 +145,11 @@ def write_platform_validation_metrics(
         config=config,
         feature_categories=feature_categories,
         input_scorer=stress_scorer,
+        cancellation_check=cancellation_check,
         unclassified_features=category_resolution.unclassified_features,
         category_source_counts=category_resolution.source_counts,
     )
+    raise_if_cancelled(cancellation_check)
 
     results = ValidationResults(
         model_name=task.model_name,

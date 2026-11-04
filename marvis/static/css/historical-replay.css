@@ -1,8 +1,9 @@
 .historical-replay-panel {
   margin: 0 0 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-shadow: none;
   min-width: 0;
 }
 .historical-replay-panel > details > summary {
@@ -13,7 +14,7 @@
 }
 .historical-replay-panel > details > summary > span {
   margin-left: 12px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--text-muted);
 }
@@ -33,8 +34,8 @@
 }
 .history-boundary {
   padding: 12px;
-  border-left: 3px solid var(--warning);
-  background: var(--surface-soft);
+  border-radius: var(--radius-control);
+  background: var(--fill);
 }
 .history-error {
   font-size: 12px;
@@ -64,8 +65,8 @@
   min-width: 0;
   min-height: 36px;
   padding: 7px 9px;
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
   font: inherit;
@@ -78,8 +79,8 @@
 .history-feature {
   margin: 14px 0;
   padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--sep);
+  border-radius: var(--radius-control);
   min-width: 0;
 }
 .history-feature legend {
@@ -129,7 +130,7 @@
   margin: 16px 0;
 }
 .history-constraint {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   padding: 12px 0;
   margin-bottom: 12px;
 }
@@ -138,8 +139,9 @@
 }
 .history-proposal,
 .history-gate {
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--fill);
   padding: 0 14px 14px;
   margin: 16px 0;
 }
@@ -152,7 +154,7 @@
   gap: 12px 18px;
 }
 .history-facts dt {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 5px;
 }
@@ -173,12 +175,12 @@
 .history-table th,
 .history-table td {
   padding: 10px 9px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   overflow-wrap: anywhere;
 }
 .history-table th small {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   font-weight: 400;
 }
@@ -187,10 +189,10 @@
   overflow-wrap: anywhere;
   max-height: 360px;
   overflow: auto;
-  background: var(--surface-soft);
-  border-radius: 8px;
+  background: var(--fill);
+  border-radius: var(--radius-control);
   padding: 12px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .history-receipt {
   margin: 0 8px 8px 0;
@@ -203,7 +205,7 @@
 
 .history-time-window {
   padding: 12px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--sep);
   margin-bottom: 12px;
 }
 .history-time-window button {

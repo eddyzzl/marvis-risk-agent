@@ -488,7 +488,10 @@ def test_explicitly_named_oversized_sample_does_not_block_recommendation(
     candidates = _dictionary_candidates_by_name(payload)
     assert payload["recommendation"]["dictionary_path"] == "候选甲.csv"
     assert candidates["候选甲.csv"]["recommended"] is True
-    assert "metadata_compatibility" not in candidates["oot样本.csv"]
+    # Not size-evaluated as metadata; offered only as an unusable sample file.
+    assert candidates["oot样本.csv"]["metadata_compatibility"]["blocking_errors"] == [
+        "metadata file: candidate is the sample data file"
+    ]
 
 
 def test_required_role_label_includes_feature_metadata(tmp_path: Path) -> None:

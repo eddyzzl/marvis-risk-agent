@@ -243,6 +243,30 @@ def test_start_ready_job_atomically_checks_contract_and_active_lease(tmp_path):
         repo.start_ready_job(task.id, "report")
 
 
+def test_report_confirmation_rejects_corrupt_ready_contract_without_side_effects(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _paths, hashes = _create_material_task(tmp_path)
+    contracts = ValidationContractRepository(db_path)
+    pending = contracts.replace_candidates(task.id, make_candidate_contract(material_hashes=hashes))
+    contracts.confirm(task.id, make_validation_confirmation(), expected_revision=pending.revision)
+    repo = TaskRepository(db_path)
+    with connect(db_path) as conn:
+        conn.execute("UPDATE tasks SET status='writing_artifacts' WHERE id=?", (task.id,))
+        conn.execute("UPDATE validation_input_contracts SET candidate_json='{}' WHERE task_id=?", (task.id,))
+    before = repo.get_report_values(task.id)
+    with pytest.raises(ValidationContractDataError):
+        repo.confirm_agent_report_batch([{
+            "task_id": task.id, "expected_revision": before[1],
+            "text_values": {"TEXT:final_validation_conclusion": "Do not accept corrupt contracts"},
+        }])
+    assert repo.get_report_values(task.id) == before
+    assert repo.get_latest_job(task.id) is None
+    assert repo.list_agent_messages(task.id) == []
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM audit WHERE target_ref=? AND kind='report.agent_conclusions.confirm'", (task.id,)).fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     ("task_type", "workflow_version"),
     [("validation", 1), ("modeling", 0)],
@@ -499,3 +523,33 @@ def test_confirmation_rolls_back_contract_and_task_when_audit_write_fails(
         "apply_month",
         "",
     )
+
+
+def test_task_list_flags_validation_tasks_waiting_on_field_check(tmp_path):
+    # 2026-10-14 redesign B7: the sidebar reads 待确认 for a single task whose
+    # input contract still waits on the field check, like a batch item does.
+    from marvis.api_task_payloads import list_task_payloads, task_payload
+
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _paths, hashes = _create_material_task(tmp_path)
+    repo = ValidationContractRepository(db_path)
+    task_repo = TaskRepository(db_path)
+
+    def flags():
+        return {
+            payload["id"]: payload["awaiting_input_confirmation"]
+            for payload in list_task_payloads(task_repo, task_repo.list_tasks())
+        }
+
+    assert flags() == {task.id: False}
+    pending = repo.replace_candidates(
+        task.id, make_candidate_contract(material_hashes=hashes)
+    )
+    assert repo.pending_confirmation_task_ids([task.id, "missing"]) == {task.id}
+    assert flags() == {task.id: True}
+    assert task_payload(task_repo, task_repo.get_task(task.id))["awaiting_input_confirmation"] is True
+
+    repo.confirm(task.id, make_validation_confirmation(), expected_revision=pending.revision)
+    assert flags() == {task.id: False}
+    assert repo.pending_confirmation_task_ids([]) == set()

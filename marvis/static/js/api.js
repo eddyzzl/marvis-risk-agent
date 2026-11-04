@@ -1,3 +1,5 @@
+import { uiRequestHeaders } from "./i18n.js";
+
 export class ApiError extends Error {
   constructor(message, { status = 0, detail = null, payload = null } = {}) {
     super(message);
@@ -152,6 +154,16 @@ export async function api(endpoint, options = {}) {
   const token = localToken();
   if (token && isSameOriginEndpoint(normalizedEndpoint) && !hasHeader(headers, "X-Marvis-Token")) {
     headers["X-Marvis-Token"] = token;
+  }
+  // D-10: the UI locale drives platform labels; the reply language (what the
+  // user last typed) drives Agent prose. Same-origin only, like the token.
+  if (isSameOriginEndpoint(normalizedEndpoint)) {
+    for (const [name, value] of Object.entries(uiRequestHeaders(isFormData ? undefined : body))) {
+      if (!hasHeader(headers, name)) headers[name] = value;
+    }
+    // Renderers use canonical labels to classify sections, summaries and
+    // charts. The DOM presentation layer handles their selected UI language.
+    if (!hasHeader(headers, "X-MARVIS-UI-Canonical")) headers["X-MARVIS-UI-Canonical"] = "1";
   }
   const { responseType, ...requestOptions } = options;
   const response = await fetch(normalizedEndpoint, {

@@ -1,24 +1,29 @@
 """Real native ToolRunner artifacts; independent math and installed learners only."""
-from contextlib import closing
-from pathlib import Path
 import pickle
 import shutil
 import sqlite3
+from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
+from test_feature_pack import _runtime
 
 from marvis.orchestrator.eval.runtime_archive_modeling import _model_values
 from marvis.orchestrator.eval.runtime_archive_reader import _Unsupported
-from marvis.orchestrator.eval.runtime_modeling_native_reference import read_linear_reference
-from marvis.orchestrator.eval.runtime_modeling_reference import binary_reference, metrics_reference
+from marvis.orchestrator.eval.runtime_modeling_native_reference import (
+    read_linear_reference,
+)
+from marvis.orchestrator.eval.runtime_modeling_reference import (
+    binary_reference,
+    metrics_reference,
+)
 from marvis.plugins.manifest import ToolRef
-from test_feature_pack import _runtime
 
 
-def _native(tmp_path, recipe, *, early_stop=None, fold=False):
+def _native(tmp_path, recipe, *, early_stop=None, fold=False, extra_params=None, weighted=False, calibration=None, single=False):
     runner, registry, _, _ = _runtime(tmp_path)
     rng = np.random.RandomState(921)
     n = 300
@@ -29,6 +34,8 @@ def _native(tmp_path, recipe, *, early_stop=None, fold=False):
     if kind == "multiclass":
         frame["y"] = frame.y.map({0: "A", 1: "B", 2: "C"})
     frame.loc[frame.split == "oot", "y"] = np.nan if kind == "regression" else None
+    if weighted:
+        frame["sample_weight"] = 1.0 + np.arange(n) % 3 * .5
     source = tmp_path / "synthetic-source.parquet"
     frame.to_parquet(source, index=False)
     dataset = registry.register_from_upload("task-feature", source, role="sample")
@@ -37,22 +44,39 @@ def _native(tmp_path, recipe, *, early_stop=None, fold=False):
         params["verbosity"] = 0
     if early_stop:
         params["early_stopping_rounds"] = early_stop
-    trained = runner.invoke(ToolRef("modeling", "train_models"), {
+    params.update(extra_params or {})
+    if weighted:
+        params["sample_weight_col"] = "sample_weight"
+    inputs = {
         "dataset_id": dataset.id, "features": ["x", "z"], "target_col": "y",
         "target_type": "continuous" if kind == "regression" else kind, "split_col": "split",
         "split_values": {"train": "train", "test": "test", "oot": "oot"},
-        "recipes": [recipe], "seed": 21, "params": params,
-    }, task_id="task-feature")
+        "recipes": [recipe], "seed": 21, "params": {recipe: params} if extra_params is not None else params,
+        **({"sample_weight_col": "sample_weight"} if weighted else {}),
+    }
+    if single:
+        inputs.pop("recipes")
+        inputs.update(recipe=recipe, params=params)
+    trained = runner.invoke(ToolRef("modeling", "train_model" if single else "train_models"), inputs, task_id="task-feature")
     assert trained.ok, trained.error
+    experiment_id = trained.output["experiment_id" if single else "best_experiment_id"]
+    if calibration:
+        with sqlite3.connect(registry._repo.db_path) as source_conn:
+            artifact_id = source_conn.execute("SELECT artifact_id FROM experiments WHERE id=?",
+                                              (experiment_id,)).fetchone()[0]
+        calibrated = runner.invoke(ToolRef("modeling", "calibrate_model"), {
+            "artifact_id": artifact_id, "dataset_id": dataset.id, "method": calibration, "min_samples": 10,
+        }, task_id="task-feature")
+        assert calibrated.ok, calibrated.error
     workspace = registry._repo.db_path.parent
     archive = tmp_path / "retained"
     shutil.copytree(workspace, archive / "workspace")
     conn = sqlite3.connect(archive / "workspace/marvis.sqlite")
     conn.row_factory = sqlite3.Row
-    experiment = conn.execute("SELECT * FROM experiments WHERE id=?", (trained.output["best_experiment_id"],)).fetchone()
+    experiment = conn.execute("SELECT * FROM experiments WHERE id=?", (experiment_id,)).fetchone()
     session = SimpleNamespace(conn=conn, archive=archive,
         binding=SimpleNamespace(task_id="task-feature", dataset_id=dataset.id,
-            fit_representations={experiment["id"]: {"representation": "compact_float32", "noncompact_features": []}}))
+            fit_representations={experiment["id"]: {"representation": "source_native" if single else "compact_float32", "noncompact_features": []}}))
     return session, dict(experiment), frame, runner, registry
 
 
@@ -60,8 +84,8 @@ def _native(tmp_path, recipe, *, early_stop=None, fold=False):
     "xgb_regressor", "lgb_regressor", "xgb_multiclass", "lgb_multiclass"])
 def test_actual_native_profiles_recompute_without_producer_metrics_or_scoring(tmp_path, monkeypatch, recipe):
     session, experiment, frame, _, _ = _native(tmp_path, recipe)
-    import marvis.packs.modeling.recipes.common as common
-    import marvis.packs.modeling.scoring as scoring
+    from marvis.packs.modeling import scoring
+    from marvis.packs.modeling.recipes import common
     def forbidden(*args, **kwargs):
         raise AssertionError("producer is not an independent mathematical reference")
     for name in ("compute_model_metrics", "compute_regression_metrics", "compute_multiclass_model_metrics"):
@@ -128,7 +152,10 @@ def test_archive_joblib_nested_object_array_cannot_execute_pickle(tmp_path, stru
 
 def test_archive_joblib_object_metadata_keeps_restricted_reader(tmp_path):
     import joblib
-    from marvis.orchestrator.eval.runtime_modeling_native_reference import _LinearUnpickler
+
+    from marvis.orchestrator.eval.runtime_modeling_native_reference import (
+        _LinearUnpickler,
+    )
 
     values = np.array(["feature-name", None], dtype=object)
     file = tmp_path / "object-metadata.joblib"

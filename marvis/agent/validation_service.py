@@ -43,7 +43,10 @@ def reset_agent_task_for_rerun(
         task_id,
         target_status,
         f"agent rerun requested: {stage}",
-        clear_agent_report_conclusions=True,
+        # New evidence invalidates the narrative. A report-text revision keeps
+        # the current draft and report version as its baseline, so a failed or
+        # field-scoped revision never wipes the other paragraphs.
+        clear_agent_report_conclusions=stage != "word_conclusion_draft",
     )
     if stage in {"scan", "reproducibility"}:
         close_live_notebook_session(task_id)

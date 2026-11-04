@@ -31,6 +31,7 @@ from marvis.domain import TASK_TYPE_MODELING
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
 from marvis.plugins.manifest import ToolRef
 from tests.strategy_sample_design_support import (
+    confirm_strategy_score_direction,
     materialize_mature_strategy_sample_design,
 )
 
@@ -574,6 +575,7 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
         # governed business contract, so the compatibility route is explicit.
         "strategy_input": {"entry_mode": "strategy_analysis"},
     }).json()["id"]
+    confirm_strategy_score_direction(client, task_id, direction="lower_is_riskier")
     materialize_mature_strategy_sample_design(
         client,
         task_id,

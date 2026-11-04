@@ -609,6 +609,8 @@ def test_add_pool_type_cannot_be_inferred_from_action_words() -> None:
     assert result.draft is None
     assert result.clarification_code == "strategy_pool_add_controls_not_grounded"
     assert "strategy_type" in result.clarification_fields
+    assert "当前无法核对：策略类型。" in result.clarification
+    assert "strategy_type" not in result.clarification
 
 
 def test_add_rejects_negated_strategy_pool_type_label() -> None:
@@ -1653,7 +1655,9 @@ def test_add_candidate_controls_must_be_present_in_the_user_utterance() -> None:
 
     assert result.draft is None
     assert result.clarification_code == "strategy_pool_controls_not_grounded"
-    assert ASSET_ID in result.clarification
+    assert result.clarification_fields == (ASSET_ID,)
+    assert f"当前无法核对：候选 ID「{ASSET_ID}」。" in result.clarification
+    assert "typed action" not in result.clarification
     assert len(llm.calls) == 1
 
 
@@ -1895,8 +1899,37 @@ def test_pool_mutation_rejects_llm_invented_reason_and_action_reason_code() -> N
 
     assert result.draft is None
     assert result.clarification_code == "strategy_pool_controls_not_grounded"
-    assert "MANUAL_REVIEW" in result.clarification
-    assert "模型建议转人工" in result.clarification
+    assert result.clarification_fields == (
+        "strategy_type approval",
+        "MANUAL_REVIEW",
+        "模型建议转人工",
+    )
+    assert (
+        "当前无法核对：策略类型（审批策略）、「MANUAL_REVIEW」、「模型建议转人工」。"
+        in result.clarification
+    )
+    for internal in ("strategy_type", "typed action", "Strategy Pool", "LLM"):
+        assert internal not in result.clarification
+
+
+def test_pool_reason_text_starting_with_a_control_word_stays_user_text() -> None:
+    result, _ = _compile(
+        f"把 {RULE_1} 的动作改成人工复核 review",
+        "strategy_pool_set_action",
+        {
+            "strategy_type": "approval",
+            "rule_id": RULE_1,
+            "action": {"type": "review", "reason_code": "lgd"},
+            "reason": "pd 过高",
+        },
+    )
+
+    assert result.clarification_fields == ("strategy_type approval", "lgd", "pd 过高")
+    # The invented reason code/text are quoted as-is, not relabelled as the
+    # LGD/PD economics controls.
+    assert "当前无法核对：策略类型（审批策略）、「lgd」、「pd 过高」。" in (
+        result.clarification
+    )
 
 
 def test_reorder_requires_an_explicit_full_order_and_rejects_heuristic_sorting() -> (

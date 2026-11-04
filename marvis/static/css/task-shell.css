@@ -35,16 +35,30 @@
   padding-right: var(--task-card-action-space);
 }
 
-.task-row-top .pill {
-  flex: 0 0 auto;
-  white-space: nowrap;
+/* D6 (batch 4): the row carries a status dot instead of a word pill — blue
+   pulse while running, amber while waiting on the user, red on failure, none
+   otherwise. The word itself is in the row's aria-label and the hover card. */
+.task-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.task-status-dot.run {
+  background: var(--accent);
+  animation: task-status-dot-ping 1.6s ease-out infinite;
+}
+.task-status-dot.wait { background: var(--warning); }
+.task-status-dot.bad { background: var(--danger); }
+@keyframes task-status-dot-ping {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  100% { box-shadow: 0 0 0 7px transparent; }
 }
 
-.task-row-badges {
-  display: inline-flex;
-  flex-wrap: nowrap;
-  justify-content: flex-end;
-  gap: 5px;
+@media (prefers-reduced-motion: reduce) {
+  .task-status-dot.run { animation: none; }
 }
 
 .workspace-subtitle,
@@ -67,7 +81,7 @@
   overflow: hidden;
   color: var(--text);
   font-size: 14px;
-  font-weight: 550;
+  font-weight: 500;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -136,11 +150,11 @@
   width: min(320px, calc(100vw - 24px));
   max-width: 320px;
   padding: 12px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--sep);
+  border-radius: var(--radius-md);
   color: var(--text);
   background: var(--surface);
-  box-shadow: var(--shadow-floating);
+  box-shadow: var(--shadow-pop);
   pointer-events: none;
 }
 
@@ -182,7 +196,15 @@
 .task-row-preview-k {
   display: block;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
+}
+
+.task-row-preview-dot {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
 }
 
 .task-row-preview-icon {
@@ -208,15 +230,16 @@
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
   background: transparent;
   cursor: pointer;
 }
 
+/* Flat danger fill on hover; no coloured outline ring. */
 .delete-task-button:hover,
 .delete-task-button:focus-visible {
-  border-color: var(--danger-border);
+  border-color: transparent;
   color: var(--danger);
   background: var(--danger-soft);
 }
@@ -234,9 +257,9 @@
 .empty-state {
   padding: 9px 12px;
   color: var(--text-secondary);
-  border: 1px dashed var(--border-strong);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--card);
   font-size: 14px;
 }
 
@@ -255,18 +278,26 @@
   min-width: 0;
   margin: 0;
   padding: 0;
-  /* Head itself stays transparent so the task-hero's backdrop-filter still
-     blurs scrolled content behind the card. The two background images below
-     paint the workspace mask color ONLY in the upper corner slivers (outside the task-hero's
-     16px rounded shape, inside its bounding box) so the slivers blend into
-     the workspace surface instead of leaking the page background. */
+  /* Head itself stays transparent (the dark-theme task-hero still blurs
+     scrolled content behind the card). The background images below paint the
+     workspace mask color ONLY in the corner slivers outside the task-hero's
+     rounded shape, inside its bounding box, so scrolled content never peeks
+     out around the card's corners. The two bottom masks are sized to the
+     radius and centred on the card's own corner arc, so they paint nothing
+     inside the card. */
   background: transparent;
   background-image:
     radial-gradient(circle calc(var(--radius) - 1px) at 100% 100%, transparent calc(var(--radius) - 1px), var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)),
-    radial-gradient(circle calc(var(--radius) - 1px) at 0 100%, transparent calc(var(--radius) - 1px), var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px));
+    radial-gradient(circle calc(var(--radius) - 1px) at 0 100%, transparent calc(var(--radius) - 1px), var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)),
+    radial-gradient(circle var(--radius) at 100% 0, transparent calc(var(--radius) - 0.5px), var(--workspace-mask-bg, var(--surface)) var(--radius)),
+    radial-gradient(circle var(--radius) at 0 0, transparent calc(var(--radius) - 0.5px), var(--workspace-mask-bg, var(--surface)) var(--radius));
   background-repeat: no-repeat;
-  background-position: left 0 top 0, right 0 top 0;
-  background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px);
+  background-position: left 0 top 0, right 0 top 0, left 0 bottom 0, right 0 bottom 0;
+  background-size:
+    calc(var(--radius) + 2px) calc(var(--radius) + 2px),
+    calc(var(--radius) + 2px) calc(var(--radius) + 2px),
+    var(--radius) var(--radius),
+    var(--radius) var(--radius);
 }
 
 .validation-workspace.is-empty .workspace-head,
@@ -284,8 +315,11 @@
   display: none;
 }
 
-/* Task hero (direction A): a soft card with a status-keyed corner glow, a status
-   pill, a muted description line and an icon-led meta row — no inner divider. */
+/* Task hero: a flat grey content card with a status pill, a muted description
+   line and an icon-led meta row — no inner divider. Light theme carries no
+   glass, gradient, glow or inset highlight (D2-D4); the status pill is the only
+   colour signal. The transparent 1px border keeps the card geometry and lets
+   the dark-theme override (execution-workspace.css) keep its glass edge. */
 .task-hero {
   position: relative;
   isolation: isolate;
@@ -295,22 +329,17 @@
   max-width: 100%;
   min-width: 0;
   padding: 16px 18px 14px;
-  border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--surface) 76%, transparent) 0%,
-    color-mix(in srgb, var(--surface) 52%, transparent) 100%
-  );
-  -webkit-backdrop-filter: blur(18px) saturate(1.55);
-  backdrop-filter: blur(18px) saturate(1.55);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  background: var(--card);
+  box-shadow: none;
   transform: translateZ(0);
   will-change: transform;
   transition: border-color 140ms ease;
 }
 
+/* Status-keyed corner glow: light theme defines no --hero-glow, so the layer
+   stays transparent; only the dark-theme tone overrides set it. */
 .task-hero::before {
   content: "";
   position: absolute;
@@ -318,12 +347,8 @@
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.25s ease;
-  background: radial-gradient(78% 130% at 100% -10%, var(--hero-glow, transparent), transparent 55%);
+  background: none;
 }
-.task-hero[data-tone="fail"] { --hero-glow: rgba(179, 38, 30, 0.10); }
-.task-hero[data-tone="run"] { --hero-glow: rgba(0, 113, 227, 0.10); }
-.task-hero[data-tone="ok"] { --hero-glow: rgba(31, 122, 63, 0.10); }
-.task-hero[data-tone="review"] { --hero-glow: rgba(138, 84, 0, 0.12); }
 .task-hero[data-tone="fail"]::before,
 .task-hero[data-tone="run"]::before,
 .task-hero[data-tone="ok"]::before,
@@ -346,23 +371,28 @@
   transition: opacity 180ms ease, transform 180ms ease;
 }
 
-.task-hero.is-glass-active {
-  border-color: color-mix(in srgb, var(--border) 62%, transparent);
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--surface) 68%, transparent) 0%,
-    color-mix(in srgb, var(--surface) 44%, transparent) 100%
-  );
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.78);
-}
-
-.task-hero.is-glass-active::after {
-  opacity: 1;
-  transform: scaleX(1);
-}
+/* The glass rim draws the scrolled header's edge in both themes, so the
+   former dark-theme highlight line (.task-hero.is-glass-active::after) stays off. */
 
 .task-hero > * { position: relative; z-index: 1; }
+
+/* Batch 2 (D7): once the conversation scrolls beneath it, the header turns
+   into toolbar glass and the content stays visible through it. Batch 6a
+   removed the validation tabs, so validation tasks float the header too. */
+#resultWorkspace .task-hero {
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+#resultWorkspace .task-hero.is-glass-active {
+  border-color: var(--glass-rim);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+/* Glass shows what passes beneath, so the corner masks step aside. */
+#resultWorkspace.is-glass-active > .workspace-head {
+  background-image: none;
+}
 
 /* The whole hero is a click target that folds everything below the title row
    down to just the name + status pill (see .task-hero-details). */
@@ -398,7 +428,7 @@
   transition: background 140ms ease, color 140ms ease;
 }
 .task-hero-toggle:hover {
-  background: color-mix(in srgb, var(--text) 8%, transparent);
+  background: var(--fill);
   color: var(--text);
 }
 .task-hero-toggle:focus-visible {
@@ -444,7 +474,7 @@
 .task-hero-name {
   margin: 0;
   min-width: 0;
-  font-size: 22px;
+  font-size: var(--fs-h1);
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.15;
@@ -463,9 +493,9 @@
   border-radius: var(--radius-pill);
   font-size: 13px;
   font-weight: 700;
-  /* opaque, saturated chip so the status colour stays legible over any content
-     blurred behind the translucent card */
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  /* flat, opaque status chip: the tinted fill and dot carry the status colour;
+     no outline ring and no drop shadow */
+  box-shadow: none;
 }
 .task-pill::before {
   content: "";
@@ -475,31 +505,34 @@
   border-radius: 50%;
   background: currentColor;
 }
+/* The dot marks states that need an eye on them (running, waiting, failed);
+   done and neutral states read from the word alone (batch 4, mockup). */
+.task-pill:not(.run):not(.review):not(.fail)::before { display: none; }
 .task-pill:empty { display: none; }
 .task-pill.fail {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 15%, var(--surface));
-  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  border-color: transparent;
 }
 .task-pill.ok {
   color: var(--success);
   background: color-mix(in srgb, var(--success) 15%, var(--surface));
-  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+  border-color: transparent;
 }
 .task-pill.run {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 15%, var(--surface));
-  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  border-color: transparent;
 }
 .task-pill.review {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 16%, var(--surface));
-  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  border-color: transparent;
 }
 .task-pill.neutral {
   color: var(--text-secondary);
-  background: var(--surface-soft);
-  border-color: var(--border);
+  background: var(--fill);
+  border-color: transparent;
 }
 .task-pill.run::before { animation: pill-pulse 1.2s ease-in-out infinite; }
 @keyframes pill-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.6); } }

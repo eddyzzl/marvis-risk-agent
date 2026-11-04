@@ -122,8 +122,9 @@ def tool_bucket_migration(inputs: dict, ctx) -> dict:
         "states": list(result.states),
         "to_states": list(result.to_states),
         "window_months": list(result.window_months),
-        "avg_matrix": [[float(cell) for cell in row] for row in result.avg_matrix],
-        "worst_matrix": [[float(cell) for cell in row] for row in result.worst_matrix],
+        # None = from-state unobserved in the window (undefined row, not 0%).
+        "avg_matrix": [[_optional_float(cell) for cell in row] for row in result.avg_matrix],
+        "worst_matrix": [[_optional_float(cell) for cell in row] for row in result.worst_matrix],
         "heat_table": _jsonable(result.heat_table),
         "red_flags": _jsonable(result.red_flags),
     }
@@ -505,6 +506,10 @@ def _optional_str(value) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _optional_float(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def _optional_str_list(value) -> list[str] | None:

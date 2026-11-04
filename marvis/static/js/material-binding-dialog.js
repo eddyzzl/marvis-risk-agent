@@ -1,8 +1,8 @@
 const MATERIAL_BINDING_ROLES = [
   { role: "notebook", field: "notebook_path", label: "Notebook", caption: "Notebook 文件" },
-  { role: "sample", field: "sample_path", label: "Sample", caption: "样本数据" },
-  { role: "model_pmml", field: "pmml_path", label: "PMML", caption: "PMML 模型" },
-  { role: "data_dictionary", field: "dictionary_path", label: "Metadata", caption: "数据字典 / 特征元数据" },
+  { role: "sample", field: "sample_path", label: "样本数据", caption: "样本数据" },
+  { role: "model_pmml", field: "pmml_path", label: "PMML 模型", caption: "PMML 模型" },
+  { role: "data_dictionary", field: "dictionary_path", label: "数据字典", caption: "数据字典 / 特征元数据" },
 ];
 
 const MATERIAL_BINDING_ROLE_ICONS = {
@@ -29,10 +29,56 @@ function formatBytes(value) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// Mirrors marvis.validation_report_copy.metadata_reason_codes: the backend's
+// English blocking errors become one Chinese reason the user can act on.
+const METADATA_REASON_LABELS = {
+  missing_feature_column: "缺少 feature（特征名）列",
+  missing_category_column: "缺少 category（特征类别/数据源）列",
+  missing_importance_column: "缺少 importance（特征重要性）列",
+  sample_file: "这是样本数据文件，不是数据字典",
+  not_evaluated: "文件过大或候选过多，平台未能自动检查",
+  no_table: "没有读到可用的表格",
+  pmml_mismatch: "没有覆盖所选 PMML 的入模特征，或类别/重要性取值无效",
+};
+
+function metadataReasonCodes(blockingErrors) {
+  const codes = [];
+  (Array.isArray(blockingErrors) ? blockingErrors : []).forEach((error) => {
+    const text = String(error || "").toLowerCase();
+    let found = ["feature", "category", "importance"]
+      .filter((column) => new RegExp(`missing\\b[^;]*\\b${column} column alias`).test(text))
+      .map((column) => `missing_${column}_column`);
+    if (!found.length) {
+      if (text.includes("sample data file")) found = ["sample_file"];
+      else if (text.includes("limit")) found = ["not_evaluated"];
+      else if (text.includes("no candidate table")) found = ["no_table"];
+      else found = ["pmml_mismatch"];
+    }
+    found.forEach((code) => { if (!codes.includes(code)) codes.push(code); });
+  });
+  return codes;
+}
+
+export function metadataUnavailableReason(candidate) {
+  const codes = metadataReasonCodes(candidate?.metadata_compatibility?.blocking_errors);
+  if (!codes.length) return "";
+  const reasons = codes.map((code) => METADATA_REASON_LABELS[code]).join("；");
+  return codes.some((code) => code.startsWith("missing_"))
+    ? `${reasons}，请补充后重新上传`
+    : reasons;
+}
+
 export function materialCandidateSelectable(role, candidate) {
   if (candidate?.available === false) return false;
   if (role?.role !== "data_dictionary") return true;
   return candidate?.metadata_compatibility?.status !== "incompatible";
+}
+
+function incompatibleMetadataText(candidate) {
+  const codes = metadataReasonCodes(candidate?.metadata_compatibility?.blocking_errors);
+  if (codes.length === 1 && codes[0] === "sample_file") return " · 样本数据，不能作数据字典";
+  const reason = metadataUnavailableReason(candidate);
+  return ` · 元数据不完整${reason ? `：${reason}` : ""}`;
 }
 
 function candidateText(candidate) {
@@ -43,7 +89,7 @@ function candidateText(candidate) {
     : metadataStatus === "compatible"
       ? " · 与 PMML 匹配"
       : metadataStatus === "incompatible"
-        ? " · 元数据不完整"
+        ? incompatibleMetadataText(candidate)
         : metadataStatus === "not_evaluated"
           ? " · 需人工确认"
           : "";
@@ -76,6 +122,21 @@ function completeSelection(selection = {}) {
   return MATERIAL_BINDING_ROLES.every((role) => String(selection[role.field] || "").trim());
 }
 
+// Eval S2: all four materials matched (the dictionary even marked 推荐) and
+// the dialog still asked for one more click. When every role has the single
+// choice the dialog itself would preselect, and that choice raises no issue,
+// the selection is saved without asking.
+export function autoMaterialSelection(payload = {}) {
+  const selection = {};
+  for (const role of MATERIAL_BINDING_ROLES) {
+    const candidates = Array.isArray(payload?.candidates?.[role.role]) ? payload.candidates[role.role] : [];
+    const value = defaultSelectionForRole(role, candidates, payload?.selection || {});
+    if (!value) return null;
+    selection[role.field] = value;
+  }
+  return materialSelectionIssue(selection, payload) ? null : selection;
+}
+
 export function materialSelectionIssue(selection = {}, payload = {}) {
   const role = MATERIAL_BINDING_ROLES.find((item) => item.role === "data_dictionary");
   const candidates = Array.isArray(payload?.candidates?.data_dictionary)
@@ -87,7 +148,8 @@ export function materialSelectionIssue(selection = {}, payload = {}) {
   ));
   const guidance = "请更换 PMML 或补齐 feature/category/importance 列后重新扫描。";
   if (selectedCandidate && !materialCandidateSelectable(role, selectedCandidate)) {
-    return `当前特征元数据不可用；${guidance}`;
+    const reason = metadataUnavailableReason(selectedCandidate);
+    return `当前特征元数据不可用${reason ? `（${reason}）` : ""}；${guidance}`;
   }
   if (candidates.length && !candidates.some((candidate) => materialCandidateSelectable(role, candidate))) {
     return `所选 PMML 没有可用的特征元数据；${guidance}`;
@@ -113,22 +175,63 @@ export function renderRoleRow(role, candidates, value) {
         }),
       ].join("")
     : '<option value="">未找到可选文件</option>';
+  const reasons = role.role === "data_dictionary"
+    ? candidates
+      .filter((candidate) => !materialCandidateSelectable(role, candidate)
+        && metadataReasonCodes(candidate?.metadata_compatibility?.blocking_errors).some((code) => code !== "sample_file"))
+      .map((candidate) => {
+        const reason = metadataUnavailableReason(candidate);
+        return reason ? `${candidate.relative_path || candidate.name || "数据字典"}：${reason}。` : "";
+      })
+      .filter(Boolean)
+    : [];
   const unavailableHint = candidates.length && !selectableCandidates.length
-    ? '<small class="material-binding-unavailable">所选 PMML 没有可用的特征元数据；请更换 PMML 或补齐 feature/category/importance 列后重新扫描。</small>'
-    : "";
+    ? `<small class="material-binding-unavailable">${escapeHtml(reasons.join(" "))}${reasons.length ? " " : ""}所选 PMML 没有可用的特征元数据；请更换 PMML 或补齐 feature/category/importance 列后重新扫描。</small>`
+    : reasons.length
+      ? `<small class="material-binding-unavailable">${escapeHtml(reasons.join(" "))}</small>`
+      : "";
   return [
     '<label class="material-binding-row">',
     '<span class="material-binding-role">',
     `<span class="material-binding-role-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${icon}</svg></span>`,
     '<span class="material-binding-role-text">',
     `<strong>${escapeHtml(role.label)}</strong>`,
-    `<small>${escapeHtml(role.caption)}</small>`,
     "</span>",
     "</span>",
     `<select data-material-binding-field="${escapeHtml(role.field)}" aria-label="选择${escapeHtml(role.caption)}"${disabled}>${options}</select>`,
     unavailableHint,
     "</label>",
   ].join("");
+}
+
+// A freshly uploaded file is chosen for one role: the dictionary when the
+// platform found it usable as one, otherwise the role it was recognised as
+// (a CSV is offered under every CSV role, so "offered" alone is not enough).
+// The rest of the user's choices stay.
+function uploadedRole(payload, path) {
+  const candidatesFor = (role) => (
+    Array.isArray(payload?.candidates?.[role.role]) ? payload.candidates[role.role] : []
+  );
+  const dictionary = MATERIAL_BINDING_ROLES.find((role) => role.role === "data_dictionary");
+  const asDictionary = candidatesFor(dictionary).find((candidate) => candidate.relative_path === path);
+  if (asDictionary?.metadata_compatibility?.status === "compatible") return dictionary;
+  return MATERIAL_BINDING_ROLES.find((role) => candidatesFor(role).some((candidate) => (
+    candidate.relative_path === path
+    && candidate.role === role.role
+    && materialCandidateSelectable(role, candidate)
+  ))) || null;
+}
+
+export function uploadedMaterialSelection(payload, uploadedPaths) {
+  const selection = {};
+  const chosenRoles = [];
+  uploadedPaths.forEach((path) => {
+    const role = uploadedRole(payload, path);
+    if (!role || selection[role.field]) return;
+    selection[role.field] = path;
+    chosenRoles.push(role.caption);
+  });
+  return { selection, chosenRoles };
 }
 
 export function createMaterialBindingDialogController({ $, api } = {}) {
@@ -144,9 +247,22 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
     status.className = `status ${kind}`;
   }
 
+  function renderSupplement(payload) {
+    const supported = payload?.supplement_upload_supported !== false;
+    const label = $("materialBindingUploadLabel");
+    if (label) label.hidden = !supported;
+    const hint = $("materialBindingSupplementHint");
+    if (hint) {
+      hint.textContent = supported
+        ? "补好的数据字典等文件可以直接传进这个任务，原文件保留。"
+        : "这个任务的材料来自本地目录：把补好的文件放进该目录，再点「刷新列表」。";
+    }
+  }
+
   function render(payload) {
     const rows = $("materialBindingRows");
     if (!rows) return;
+    renderSupplement(payload);
     activePayload = payload || {};
     const selection = payload?.selection || {};
     rows.innerHTML = MATERIAL_BINDING_ROLES.map((role) => {
@@ -206,6 +322,67 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
     }
   }
 
+  // The candidate list for the PMML currently chosen in the dialog.
+  async function fetchMaterials() {
+    const pmmlPath = collectSelection().pmml_path || "";
+    const query = pmmlPath ? `?pmml_path=${encodeURIComponent(pmmlPath)}` : "";
+    return api(`/api/tasks/${activeTask.id}/materials${query}`);
+  }
+
+  async function reloadCandidates({ uploadedPaths = [] } = {}) {
+    const requestSequence = ++previewRequestSequence;
+    const payload = await fetchMaterials();
+    if (requestSequence !== previewRequestSequence || !activeTask) return null;
+    const { selection, chosenRoles } = uploadedMaterialSelection(payload, uploadedPaths);
+    render({
+      ...payload,
+      selection: { ...(payload.selection || {}), ...collectSelection(), ...selection },
+    });
+    return chosenRoles;
+  }
+
+  async function uploadSupplementFiles(fileList) {
+    const selected = Array.from(fileList || []);
+    if (!activeTask?.id || !selected.length) return;
+    const form = new FormData();
+    selected.forEach((file) => form.append("files", file, file.name));
+    const confirmButton = $("materialBindingConfirmButton");
+    if (confirmButton) confirmButton.disabled = true;
+    setStatus(`正在上传 ${selected.length} 个文件...`, "busy");
+    try {
+      const result = await api(`/api/tasks/${activeTask.id}/materials/files`, {
+        method: "POST",
+        body: form,
+      });
+      const uploadedPaths = (result?.files || []).map((item) => String(item.relative_path || ""));
+      const chosenRoles = await reloadCandidates({ uploadedPaths });
+      if (chosenRoles === null) return;
+      const names = selected.map((file) => file.name).join("、");
+      const next = activeTask?.run_mode === "agent" ? "确认后 Agent 会重新扫描" : "确认后请点「重新扫描」";
+      setStatus(
+        chosenRoles.length
+          ? `已上传 ${names}，并为${chosenRoles.join("、")}选中新文件；${next}。`
+          : `已上传 ${names}；请在上面的列表里选择它。`,
+        chosenRoles.length ? "success" : "info",
+      );
+    } catch (error) {
+      setStatus(error?.message || "补充材料上传失败。", "error");
+    } finally {
+      if (confirmButton) confirmButton.disabled = false;
+    }
+  }
+
+  async function refreshCandidates() {
+    if (!activeTask?.id) return;
+    setStatus("正在刷新材料列表...", "busy");
+    try {
+      const chosenRoles = await reloadCandidates();
+      if (chosenRoles !== null) setStatus("材料列表已刷新。", "info");
+    } catch (error) {
+      setStatus(error?.message || "材料列表刷新失败。", "error");
+    }
+  }
+
   function resolvePending(value) {
     if (!pendingResolve) return;
     const resolve = pendingResolve;
@@ -252,12 +429,27 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
     const payload = await api(`/api/tasks/${task.id}/materials`);
     const selectionIssue = materialSelectionIssue(payload.selection || {}, payload);
     if (!force && completeSelection(payload.selection) && !selectionIssue) return task;
+    let autoSaveError = "";
+    const automatic = force ? null : autoMaterialSelection(payload);
+    if (automatic) {
+      try {
+        const result = await api(`/api/tasks/${task.id}/materials`, {
+          method: "PUT",
+          body: JSON.stringify(automatic),
+        });
+        return result?.task || task;
+      } catch (error) {
+        // Fall back to the dialog and say why the automatic choice failed.
+        autoSaveError = error?.message || "材料选择保存失败。";
+      }
+    }
     previewRequestSequence += 1;
     activeTask = task;
     render(payload);
     const confirmButton = $("materialBindingConfirmButton");
     if (confirmButton) confirmButton.disabled = false;
-    setStatus(selectionIssue, selectionIssue ? "error" : "info");
+    const opening = autoSaveError || selectionIssue;
+    setStatus(opening, opening ? "error" : "info");
     const dialog = $("materialBindingDialog");
     if (!dialog) return task;
     dialog.showModal();
@@ -273,6 +465,12 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
         refreshMetadataRecommendation(event.target.value || "");
       }
     });
+    $("materialBindingFileInput")?.addEventListener("change", async (event) => {
+      const input = event.target;
+      await uploadSupplementFiles(input.files);
+      input.value = "";
+    });
+    $("materialBindingRefreshButton")?.addEventListener("click", refreshCandidates);
     $("materialBindingConfirmButton")?.addEventListener("click", confirmSelection);
     $("materialBindingCancelButton")?.addEventListener("click", () => closeWith(null));
     $("closeMaterialBindingDialogButton")?.addEventListener("click", () => closeWith(null));

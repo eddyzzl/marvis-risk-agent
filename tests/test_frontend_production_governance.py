@@ -171,3 +171,22 @@ const empty={...context,readiness:{...readiness,raw_requirements:[]}};assert.dee
 const html=readinessHtml(empty.readiness,'rule_only');assert.match(html,/请求合同为空/);assert.doesNotMatch(html,/name="score_product"|name="score_field"|原生训练来源已认证/);
 assert.match(decisionHtml({score:null},'rule_only'),/不适用（纯规则）/);
 ''')
+
+
+def test_promotion_requests_load_one_page_then_more_on_request():
+    node(CONTROLLER + r'''
+const row=(id)=>({id,strategy_id:"s",strategy_version:1,deployment_slot:"production",status:"pending_checker"});
+const done=c.refresh();calls.at(-1).resolve({id:"m",display_name:"Maker",role:"maker"});await tick();
+for(const call of calls.filter(c=>!c.settled&&!c.url.endsWith('/me'))){call.settled=true;
+  call.resolve(call.url.includes('promotion-requests')?{requests:[row("r1"),row("r2")],count:3,next_offset:2}:call.url.includes('installations')?{installations:[],next_offset:null}:call.url.includes('packages')?{packages:[],next_offset:null}:call.url.includes('status')?{state:'unavailable'}:{active:null,shadow:null});}
+await done;
+const first=calls.filter(c=>c.url.includes('promotion-requests'));
+assert.equal(first.length,1);assert.match(first[0].url,/limit=20&offset=0/);
+let html=root.querySelector('[data-production-requests]').innerHTML;
+assert.match(html,/r1/);assert.match(html,/data-production-action="more-requests"/);
+click("more-requests");await tick();
+const more=calls.at(-1);assert.match(more.url,/promotion-requests\?environment=local-reference&limit=20&offset=2/);
+more.resolve({requests:[row("r3")],count:3,next_offset:null});await tick();await tick();
+html=root.querySelector('[data-production-requests]').innerHTML;
+assert.match(html,/r1[\s\S]*r3/);assert.doesNotMatch(html,/more-requests/);
+''')

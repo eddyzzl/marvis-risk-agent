@@ -1,20 +1,22 @@
 # MARVIS 路线图
 
-本文档是 MARVIS 产品阶段、运行时术语和能力边界的统一来源。历史实施文档可以继续使用 P1/P2/P3、Phase 1/2/3 或批次编号；当前所有已确定产品能力统一归入 V2.x，阶段编号只表示实施顺序，不对应 V3/V4。
+本文档是 MARVIS 产品阶段、运行时术语和能力边界的统一来源。历史实施文档可以继续使用 P1/P2/P3、Phase 1/2/3 或批次编号，阶段编号只表示实施顺序，不对应 major 版本。
+
+> **2026-10-23 版本口径调整**：工作台改版、Agent 评测修复和随后的新开发合并为 **V3**，以 `V3.0.0` 发布。自此当前主线为 V3.x；下文历史记录里写“在 V2.x 内继续交付”的已确定范围，一律在 V3.x 内继续交付，不另开 V4 承接。V1 兼容边界（Notebook 契约、手动/Agent 两种模式、确定性指标、Word/Excel 产出）不变。
 
 ## 当前状态
 
-- 当前主线：**MARVIS-Agent V2.x**，本地优先、可治理的多工作流信贷风控 Agent 平台。
-- 当前范围决定：**V2.x 承担全部已确定产品能力**；不得用 V3/V4 作为延后 V2 功能的蓄水池。V2.x 可以通过多个 minor / prerelease 逐批交付，但必须在 V2 major 内收口。
+- 当前主线：**MARVIS-Agent V3.x**（V3.0.0 起；此前为 V2.x），本地优先、可治理的多工作流信贷风控 Agent 平台。
+- 当前范围决定：**V3.x 承担全部已确定产品能力**（含原归入 V2.x 的全部范围）；不得用 V4 作为延后已定功能的蓄水池。V3.x 可以通过多个 minor / prerelease 逐批交付。
 - 当前产品面：数据处理、特征分析、模型开发、模型验证、策略开发、Vintage/风险分析、监控、组合分析、额度/定价和即席问数等信贷风控 workflow。
 - 模型验证是稳定兼容工作流之一：继续保留 V1.1 手动模式和 Agent 辅助验证能力，Notebook 契约、PMML 对比、确定性验证指标和 Excel/Word 产出必须保持兼容。欢迎页只保留「模型验证」入口；创建时可添加多个模型。只加一个则与现在单模型验证相同，不生成汇总 Excel；两个及以上走同一套 Agent 工作台并额外出一份汇总 Excel。
-- V2 不是只有 Plugin/Tool runtime 外壳；欢迎页展示的入口必须对应真实可用的端到端 workflow：人在环确认、受控工具执行、结构化结果、下载/报告或可审计产物。
-- 当前验收层状态唯一来源是 [capability-status.md](capability-status.md)；路线图描述 V2.x 范围，不把实现、单测、API、Agent、浏览器、真实材料、签字和生产交付合并成一个“完成”状态。
+- 平台不是只有 Plugin/Tool runtime 外壳；欢迎页展示的入口必须对应真实可用的端到端 workflow：人在环确认、受控工具执行、结构化结果、下载/报告或可审计产物。
+- 当前验收层状态唯一来源是 [capability-status.md](capability-status.md)；路线图描述 V3.x 范围（含原 V2.x 已定范围），不把实现、单测、API、Agent、浏览器、真实材料、签字和生产交付合并成一个“完成”状态。
 - Portfolio / 组合分析已进入正式 Agent allowlist 与首屏，HTTP Agent、pre-plan 手动确认、浏览器和报告下载的 no-trend 纵切已闭环；余额/EAD、业务分群、损失态、LGD 与期限均为显式业务合同，缺失时失败关闭。当前证据仍只覆盖合成 no-trend 旅程，不等于真实组合验收、周期 trend、生产调度或经营签字。
 - Labeling / 标签构造不另设顶层任务，作为数据处理内的高风险 workflow：活动数据集与内容 hash、workspace revision/generation、观察窗、表现窗、as-of、坏样本规则和成熟度决定均需结构化确认；结果作为非活动派生数据集与证据写出，不静默替换 active dataset。
-- 信用决策数字孪生已有本地内容寻址审计、认证 replay 入口、Champion/Challenger/有界反事实联合约束和 proposal-only 晋级桥的基础实现；它尚无正式 API/UI、外部签名、远端不可篡改存储或生产决策接入，因此不能作为当前可交付入口宣传。
-- 策略平台改造的 Phase 0A（真实完整开发入口与业务 contract）、Phase 0B（运行时门禁、人工决策证明和一次性副作用授权）和 Phase 1（五类统一 DSL、自然语言可逆执行、标准分析 Workflow、版本化监控/处置、新版本 handoff、生命周期与可下载 artifact）已完成。策略采纳和监控处置仍是人工责任门，本地采纳不等于生产部署。Phase 2 及全部后续范围继续在 V2.x 内交付，不得推到 V3/V4。
-- **V2 策略开发核心七步已于 2026-07-27 收口**：一个策略任务内已经能够完成项目现状与历史证据、原生 approval/risk 双人群样本设计、单变量/模型证据、Cross/自动树/交互树/评分卡/Voting 候选开发、五类 Strategy Pool、逐月/分群/跨分区影响与验证、Pool → canonical Strategy、Python/SQL/JSON 等价代码交付，以及参考评审模板的 JSON/Markdown/XLSX/DOCX 七步报告。自然语言 Agent 与 Manual Workbench 共用 compiler、PlanValidator、Workflow、Tool、DSL 和确定性指标内核；缺关键口径会澄清，用户明确“暂缺”的可选报告信息保持空白。Evidence Drawer、任务级视图恢复、人工采纳门和全链 provenance 已接通。此结论不把生产部署、跨设备协作、SQL 数据源扩展或组织治理混入“策略开发已完成”的口径；这些增强仍继续在 V2.x 内交付，不转移到 V3/V4。
+- 信用决策数字孪生已有本地内容寻址审计、认证 replay 入口、Champion/Challenger/有界反事实联合约束和 proposal-only 晋级桥，并已有正式 API（`marvis/routers/decision_twin.py`）和历史回放界面；它仍没有外部签名、远端不可篡改存储或生产决策接入，真实历史数据需要外部提供，因此不能宣传为生产决策能力。
+- 策略平台改造的 Phase 0A（真实完整开发入口与业务 contract）、Phase 0B（运行时门禁、人工决策证明和一次性副作用授权）和 Phase 1（五类统一 DSL、自然语言可逆执行、标准分析 Workflow、版本化监控/处置、新版本 handoff、生命周期与可下载 artifact）已完成。策略采纳和监控处置仍是人工责任门，本地采纳不等于生产部署。Phase 2 及全部后续范围继续在 V3.x 内交付，不得推到 V4。
+- **V2 策略开发核心七步已于 2026-07-27 收口**：一个策略任务内已经能够完成项目现状与历史证据、原生 approval/risk 双人群样本设计、单变量/模型证据、Cross/自动树/交互树/评分卡/Voting 候选开发、五类 Strategy Pool、逐月/分群/跨分区影响与验证、Pool → canonical Strategy、Python/SQL/JSON 等价代码交付，以及参考评审模板的 JSON/Markdown/XLSX/DOCX 七步报告。自然语言 Agent 与 Manual Workbench 共用 compiler、PlanValidator、Workflow、Tool、DSL 和确定性指标内核；缺关键口径会澄清，用户明确“暂缺”的可选报告信息保持空白。Evidence Drawer、任务级视图恢复、人工采纳门和全链 provenance 已接通。此结论不把生产部署、跨设备协作、SQL 数据源扩展或组织治理混入“策略开发已完成”的口径；这些增强继续在 V3.x 内交付，不转移到 V4。
 
 以下细目按实现先后保留纵切验收记录；其中“仍待”“尚未”等措辞描述的是该条记录当时的边界，当前结论以上述 2026-07-27 收口状态及后续更新为准。
 
@@ -149,7 +151,7 @@ V2 是当前主线。它把信贷风控任务纳入统一 Plugin / Tool / Hook /
 
 不可用或未接通的入口不得作为“可用”入口展示；如果保留占位，必须明确标记为未开放或实验中。
 
-V2.x 完整交付范围还包括当前尚未全部接通的能力：
+V3.x 完整交付范围（含原 V2.x 已定范围）还包括以下能力；它们多数已有部分实现，逐项状态见 [capability-status.md](capability-status.md)：
 
 - **Data & Semantics Workbench**：文件与受治理 SQL 导入、数据预览/修改/派生/导出、字段语义与中英文映射、风险方向、描述统计和分析状态持久化。
 - **Strategy Lab**：单规则、加权自动规则树、交互树、标准评分卡、voting/n-of-k、2D/3D 自动交叉规则和 2D cross matrix。
@@ -160,7 +162,7 @@ V2.x 完整交付范围还包括当前尚未全部接通的能力：
 - **训练与模型治理**：完整训练平台、实验追踪、模型注册、跨实例同步、模型交接和复核流。
 - **扩展与执行治理**：第三方 Plugin/Workflow 安装、签名、权限和回滚治理，以及支持多用户/生产运行所需的更强隔离和 worker 边界。
 
-“全部功能进入 V2”不代表取消人工责任：确定性指标仍由平台计算，策略采纳、生产 promotion、rollback 和高风险处置必须保留人工授权，Agent 不得无人授权地修改生产状态。
+“全部已定功能在 V3.x 内交付”不代表取消人工责任：确定性指标仍由平台计算，策略采纳、生产 promotion、rollback 和高风险处置必须保留人工授权，Agent 不得无人授权地修改生产状态。
 
 最小平台 Hook：
 
@@ -181,7 +183,7 @@ plan.replanned
 
 ## 后续 major 版本原则
 
-当前不为 V3/V4 分配任何已确定 backlog。未来只有出现需要打破 V2 兼容边界的新产品或架构决定时，才重新定义新的 major；不得因为工程量大、需要多批次或尚未实现，就把已经确认的 V2 能力改挂到 V3/V4。
+V3 由用户在 2026-10-23 决定启用：这一轮前后端改动面足够大，作为新的 major 发布（`V3.0.0`），V1 兼容边界保持不变。当前不为 V4 分配任何已确定 backlog；不得因为工程量大、需要多批次或尚未实现，就把已经确认的能力改挂到 V4。
 
 ## 文档模型
 
@@ -191,5 +193,5 @@ plan.replanned
 - `DESIGN.md`：产品体验、信息架构、视觉和交互约束。
 - `docs/notebook_contract.md`：Notebook 运行契约。
 - `docs/对notebook的要求.md`：给模型开发人员看的 Notebook 提交要求。
-- `docs/superpowers/plans/2026-08-13-next-90-days-development-plan.md`：当前 90 天执行计划，开发工作以此为准。
+- `docs/superpowers/plans/2026-10-23-v3-development-plan.md`：当前 V3 开发计划（本地文件，不进入公开仓库），汇总全部待办；2026-08-13 的 90 天计划等旧计划保留为历史。
 - `docs/history-archive.md`：历史计划、审查与裁决归档（只读）；被移除文档的原文仍在 git 历史中。

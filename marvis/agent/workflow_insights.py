@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from marvis.agent.json_reply import load_json_object
+from marvis.agent.presenters.display_labels import recipe_label, scrub_internal_ids
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
@@ -20,6 +21,11 @@ from marvis.domain import (
 )
 from marvis.llm_prompts import WORKFLOW_INSIGHT_SYS
 from marvis.llm_outbound_workflows import workflow_insight_prompt
+from marvis.validation.overfitting import (
+    OVERFIT_TRAIN_OOT_ABS,
+    OVERFIT_TRAIN_TEST_REL,
+    overfitting_check,
+)
 
 
 _ROW_COUNTS = re.compile(r"锚行\s*(\d+)\s*→\s*拼接后\s*(\d+)\s*行")
@@ -34,6 +40,7 @@ def build_workflow_insight_context(
     stage: str,
     metadata: dict[str, Any] | None,
     content: str = "",
+    task: Any = None,
 ) -> dict[str, Any] | None:
     """Extract auditable facts for one meaningful workflow milestone."""
     meta = metadata if isinstance(metadata, dict) else {}
@@ -43,7 +50,7 @@ def build_workflow_insight_context(
     if task_type == TASK_TYPE_FEATURE_ANALYSIS:
         return _feature_context(stage, tables, meta)
     if task_type == TASK_TYPE_MODELING:
-        return _model_context(stage, tables, meta)
+        return _model_context(stage, tables, meta, oot_ks_goal=_oot_ks_goal(task))
     return None
 
 
@@ -64,6 +71,8 @@ def render_workflow_insight(
             "risks": list(context.get("risks") or []),
             "recommendations": list(context.get("recommendations") or []),
         }
+    if context.get("headline"):
+        parsed = {**parsed, "headline": context["headline"]}
     return {
         "content": _render_sections(context.get("title") or "Agent 分析", parsed),
         "generated_by": generated_by,
@@ -72,6 +81,9 @@ def render_workflow_insight(
         "recommended_features": list(context.get("recommended_features") or []),
         "avoid_features": list(context.get("avoid_features") or []),
         "recommended_params": dict(context.get("recommended_params") or {}),
+        # Absent for the deterministic fallback (templated text needs none).
+        **({"suggested_reply": parsed["suggested_reply"]}
+           if generated_by == "llm" and parsed.get("suggested_reply") is not None else {}),
     }
 
 
@@ -192,13 +204,15 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
             row = list(source_row)
             feature = _cell(row, feature_idx)
             measured["quality"].append({"feature": feature, **{
-                key: _number(_cell(row, _column_index(columns, (label,))))
-                for key, label in (("missing_rate", "缺失率"), ("single_value_rate", "单一值率"),
-                                   ("zero_rate", "零值率"))
+                key: _number(_cell(row, _column_index(columns, labels)))
+                for key, labels in (("missing_rate", ("缺失率",)),
+                                    # Stored messages still carry the old header.
+                                    ("single_value_rate", ("最常见值占比", "单一值率")),
+                                    ("zero_rate", ("零值率",)))
             }})
             for labels, threshold, label in (
                 (("缺失率",), 0.5, "缺失率"),
-                (("单一值率",), 0.95, "单一值率"),
+                (("最常见值占比", "单一值率"), 0.95, "最常见值占比"),
                 (("零值率",), 0.95, "零值率"),
             ):
                 value = _number(_cell(row, _column_index(columns, labels)))
@@ -225,36 +239,94 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
     )
 
 
-def _model_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
+_MODEL_METRIC_LABELS = (
+    ("train_ks", "Train KS"),
+    ("test_ks", "Test KS"),
+    ("oot_ks", "OOT KS"),
+    ("train_auc", "Train AUC"),
+    ("test_auc", "Test AUC"),
+    ("oot_auc", "OOT AUC"),
+    ("psi_oot_vs_train", "OOT PSI"),
+    ("overfit_train_test_gap", "Train/Test KS 相对差距"),
+    ("overfit_train_oot_gap", "Train/OOT KS 差距"),
+)
+
+
+def _with_overfit_gaps(metrics: dict) -> dict:
+    """Hold-out evidence carries the KS values but not always the gaps behind
+    the platform's overfit flag; the same platform rule fills them in (eval S4:
+    the reading said the gap was unknown while the flag was set)."""
+
+    train_ks = _number(metrics.get("train_ks"))
+    test_ks = _number(metrics.get("test_ks"))
+    if train_ks is None or test_ks is None:
+        return metrics
+    gap_tt, gap_to, _flag = overfitting_check(train_ks, test_ks, _number(metrics.get("oot_ks")))
+    filled = dict(metrics)
+    if _number(filled.get("overfit_train_test_gap")) is None:
+        filled["overfit_train_test_gap"] = gap_tt
+    if gap_to is not None and _number(filled.get("overfit_train_oot_gap")) is None:
+        filled["overfit_train_oot_gap"] = gap_to
+    return filled
+
+
+def _overfit_reasons(metrics: dict) -> list[str]:
+    reasons = []
+    gap_tt = _number(metrics.get("overfit_train_test_gap"))
+    gap_to = _number(metrics.get("overfit_train_oot_gap"))
+    if gap_tt is not None and gap_tt > OVERFIT_TRAIN_TEST_REL:
+        reasons.append(f"训练/测试 KS 相对差距 {gap_tt:.4f}，超过 {OVERFIT_TRAIN_TEST_REL:.2f}")
+    if gap_to is not None and gap_to > OVERFIT_TRAIN_OOT_ABS:
+        reasons.append(f"训练/OOT KS 相差 {gap_to:.4f}，超过 {OVERFIT_TRAIN_OOT_ABS:.2f}")
+    return reasons
+
+
+def _model_context(
+    stage: str, tables: list[dict], meta: dict, *, oot_ks_goal: float | None = None
+) -> dict | None:
     delivery = meta.get("model_delivery") if isinstance(meta.get("model_delivery"), dict) else {}
-    metrics = delivery.get("metrics") if isinstance(delivery.get("metrics"), dict) else {}
+    evaluation = (
+        delivery.get("evaluation_evidence")
+        if isinstance(delivery.get("evaluation_evidence"), dict)
+        else {}
+    )
     params_table = _find_table(tables, ("最优超参", "固定/控制参数"))
     comparison = _find_table(tables, ("候选模型对比", "最终模型指标", "模型指标"))
     candidate = _recommended_model_candidate(delivery, comparison)
-    if not metrics and candidate is not None:
-        candidate_metrics = candidate.get("metrics")
-        if isinstance(candidate_metrics, dict):
-            metrics = candidate_metrics
+    # The metrics under discussion: the selected experiment's hold-out evidence
+    # (which stays the evaluation basis after a champion refit), else the
+    # delivered model's own metrics, else the candidate the gate pre-checks.
+    metrics: dict = {}
+    basis = ""
+    for source, source_basis in (
+        (evaluation.get("metrics"), str(evaluation.get("basis") or "selected_experiment")),
+        (delivery.get("metrics"), "delivered_metrics"),
+        ((candidate or {}).get("metrics"), "candidate"),
+    ):
+        if isinstance(source, dict) and source:
+            metrics, basis = source, source_basis
+            break
     if not metrics and params_table is None and comparison is None:
         return None
+    metrics = _with_overfit_gaps(metrics)
     facts: list[str] = []
     risks: list[str] = []
+    headline: list[str] = []
     recipe = str(
         delivery.get("recipe")
         or (candidate.get("recipe") if candidate is not None else "")
         or ""
     ).strip()
     if recipe:
-        facts.append(f"当前推荐模型为 {recipe}。")
-    metric_labels = (
-        ("train_ks", "Train KS"),
-        ("test_ks", "Test KS"),
-        ("oot_ks", "OOT KS"),
-        ("test_auc", "Test AUC"),
-        ("oot_auc", "OOT AUC"),
-        ("psi_oot_vs_train", "OOT PSI"),
-    )
-    for key, label in metric_labels:
+        facts.append(f"当前推荐模型为 {recipe_label(recipe)}。")
+    if basis == "pre_refit_heldout":
+        # The note names experiments by id; the reader sees the sentence without them.
+        note = scrub_internal_ids(str(evaluation.get("note") or "").strip()) or (
+            "评估指标来自所选实验的留出集；交付模型在 train+test 上重新拟合。"
+        )
+        facts.append(note)
+        headline.append(note)
+    for key, label in _MODEL_METRIC_LABELS:
         value = _number(metrics.get(key))
         if value is not None:
             facts.append(f"{label}={value:.4f}")
@@ -262,15 +334,67 @@ def _model_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
     test_ks = _number(metrics.get("test_ks"))
     oot_ks = _number(metrics.get("oot_ks"))
     risk_flags = []
-    if train_ks is not None and test_ks is not None and train_ks - test_ks > 0.05:
+    overfit_flag = metrics.get("overfit_flag") if isinstance(metrics.get("overfit_flag"), bool) else None
+    if overfit_flag:
+        reasons = _overfit_reasons(metrics)
+        risk_flags.append("overfit_flag")
+        risks.append(
+            "平台标记了过拟合风险"
+            + (f"（{'；'.join(reasons)}）" if reasons else "")
+            + "，交付前需复核模型稳健性。"
+        )
+        if train_ks is not None and oot_ks is not None and oot_ks - train_ks > OVERFIT_TRAIN_OOT_ABS:
+            risks.append(
+                f"OOT KS 比训练集高 {oot_ks - train_ks:.4f}：这不是典型的过拟合，"
+                "更可能是 OOT 样本构成不同或样本量小带来的波动，需复核 OOT 样本。"
+            )
+        headline.append("平台标记了过拟合风险，需复核。")
+    elif overfit_flag is False:
+        headline.append("平台未标记过拟合风险。")
+    # The platform flag decides overfitting; only when it is absent does the same
+    # platform rule speak for the train/test gap (review M2: an ad-hoc 0.05
+    # absolute rule contradicted 「平台未标记过拟合风险」).
+    gap_tt = _number(metrics.get("overfit_train_test_gap"))
+    if overfit_flag is None and gap_tt is not None and gap_tt > OVERFIT_TRAIN_TEST_REL:
         risk_flags.append("train_test_ks_gap")
-        risks.append(f"Train/Test KS 相差 {train_ks - test_ks:.4f}，存在过拟合迹象。")
+        risks.append(
+            f"训练/测试 KS 相对差距 {gap_tt:.4f}，超过平台阈值 {OVERFIT_TRAIN_TEST_REL:.2f}，存在过拟合迹象。"
+        )
     if test_ks is not None and oot_ks is not None and test_ks - oot_ks > 0.05:
         risk_flags.append("test_oot_ks_gap")
         risks.append(f"Test/OOT KS 相差 {test_ks - oot_ks:.4f}，样本外效果有衰减。")
     if oot_ks is None:
         risk_flags.append("oot_ks_unavailable")
         risks.append("当前没有 OOT KS，无法评价时间外推稳定性。")
+    goal = None
+    if oot_ks_goal is not None:
+        met = None if oot_ks is None else oot_ks >= oot_ks_goal
+        goal = {"metric": "oot_ks", "min": oot_ks_goal, "met": met}
+        if met is None:
+            risk_flags.append("oot_ks_goal_unverifiable")
+            text = f"用户目标 OOT KS ≥ {oot_ks_goal:.2f}：当前没有 OOT KS，无法判断是否达成。"
+            risks.append(text)
+        elif met:
+            text = f"用户目标 OOT KS ≥ {oot_ks_goal:.2f}：当前 OOT KS={oot_ks:.4f}，已达成。"
+            facts.append(text)
+        else:
+            risk_flags.append("oot_ks_goal_unmet")
+            text = f"用户目标 OOT KS ≥ {oot_ks_goal:.2f}：当前 OOT KS={oot_ks:.4f}，未达成。"
+            risks.append(text)
+        headline.append(text)
+    candidates = [
+        item for item in (delivery.get("candidates") or []) if isinstance(item, dict)
+    ] if str(delivery.get("source_tool") or "") == "compare_experiments" else []
+    for item in candidates[:8] if len(candidates) > 1 else []:
+        item_metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+        parts = [
+            f"{label}={value:.4f}"
+            for key, label in (("test_ks", "Test KS"), ("oot_ks", "OOT KS"), ("oot_auc", "OOT AUC"))
+            if (value := _number(item_metrics.get(key))) is not None
+        ]
+        if item_metrics.get("overfit_flag") is True:
+            parts.append("平台标记过拟合风险")
+        facts.append(f"候选 {recipe_label(item.get('recipe')) if item.get('recipe') else '?'}：{'，'.join(parts) or '无留出指标'}。")
     params: dict[str, str] = {}
     if params_table is not None:
         for row in params_table.get("rows") or []:
@@ -284,20 +408,63 @@ def _model_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
         if risks else
         "当前指标未触发明显效果红旗，仍建议结合业务目标和样本外稳定性决定是否交付。"
     )
-    return _context(
+    context = _context(
         title="模型效果 Agent 解读",
         milestone="model_completed" if stage == "done" else "model_review",
         facts=facts,
         risks=risks,
         recommendations=recommendations,
         evidence=[str(item.get("title") or "") for item in (comparison, params_table) if item]
-        + (["model_delivery.metrics"] if metrics else []),
+        + ([
+            "model_delivery.evaluation_evidence" if basis in {"pre_refit_heldout", "selected_experiment", "delivered_experiment"}
+            else "model_delivery.metrics"
+        ] if metrics else []),
         recommended_params=params,
-        measured_evidence={"recipe": recipe, "risk_flags": risk_flags, "metrics": {
-            key: _number(metrics.get(key)) for key, _label in metric_labels
-        }, "parameters": {key: number if (number := _number(value)) is not None else value
-                          for key, value in params.items()}},
+        measured_evidence={
+            "recipe": recipe,
+            "evidence_basis": basis,
+            "risk_flags": risk_flags,
+            "metrics": {key: _number(metrics.get(key)) for key, _label in _MODEL_METRIC_LABELS},
+            **({"overfit_flag": overfit_flag} if overfit_flag is not None else {}),
+            **({"goal": goal} if goal is not None else {}),
+            "candidates": [
+                {
+                    "recipe": str(item.get("recipe") or ""),
+                    "recommended": bool(item.get("recommended")),
+                    "metrics": {
+                        key: _number((item.get("metrics") or {}).get(key))
+                        for key, _label in _MODEL_METRIC_LABELS
+                    },
+                    **({"overfit_flag": item["metrics"]["overfit_flag"]}
+                       if isinstance((item.get("metrics") or {}).get("overfit_flag"), bool) else {}),
+                }
+                for item in candidates[:8]
+            ],
+            "parameters": {key: number if (number := _number(value)) is not None else value
+                           for key, value in params.items()},
+        },
     )
+    if headline:
+        context["headline"] = headline
+    return context
+
+
+def _oot_ks_goal(task: Any) -> float | None:
+    """The user's stated OOT KS floor: the task threshold, else an absolute
+    oot_ks criterion of the business objective."""
+    value = getattr(task, "oot_ks_min", None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    objective = getattr(task, "business_objective", None)
+    for criterion in getattr(objective, "criteria", None) or ():
+        minimum = getattr(criterion, "minimum", None)
+        if (
+            getattr(criterion, "metric", "") == "oot_ks"
+            and getattr(criterion, "comparison", "absolute") == "absolute"
+            and isinstance(minimum, (int, float))
+        ):
+            return float(minimum)
+    return None
 
 
 def _recommended_model_candidate(delivery: dict, comparison: dict | None) -> dict | None:
@@ -320,6 +487,15 @@ def _recommended_model_candidate(delivery: dict, comparison: dict | None) -> dic
             return candidate
         if selected_recipe and str(candidate.get("recipe") or "").strip() == selected_recipe:
             return candidate
+    # Before selection: the platform recommendation is what the gate pre-checks.
+    recommended_id = str(delivery.get("recommended_experiment_id") or "").strip()
+    for candidate in candidates:
+        if candidate.get("recommended") or (
+            recommended_id and str(candidate.get("id") or "").strip() == recommended_id
+        ):
+            return candidate
+    if len(candidates) == 1:
+        return candidates[0]
 
     recommended_recipe = ""
     if comparison is not None:
@@ -388,11 +564,13 @@ def _llm_insight(client, context: dict, memory: list[dict]) -> dict | None:
         "findings": _string_list(parsed.get("findings")),
         "risks": _string_list(parsed.get("risks")),
         "recommendations": _string_list(parsed.get("recommendations")),
+        # UI-6: raw; sanitised where it becomes message metadata.
+        "suggested_reply": parsed.get("suggested_reply"),
     }
 
 
 def _render_sections(title: str, payload: dict) -> str:
-    lines = [f"**{title}**", str(payload.get("summary") or "").strip()]
+    lines = [f"**{title}**", *_string_list(payload.get("headline")), str(payload.get("summary") or "").strip()]
     for label, key in (("主要发现", "findings"), ("风险与坑点", "risks"), ("建议", "recommendations")):
         items = _string_list(payload.get(key))
         if items:

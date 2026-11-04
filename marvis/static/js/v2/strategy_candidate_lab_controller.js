@@ -31,6 +31,13 @@ import {
 } from "./strategy_candidate_lab_presenters.js";
 
 import {
+  loadStrategyCandidateLabExpanded,
+  persistStrategyCandidateLabExpanded,
+  strategyCandidateLabSummaryFacts,
+  strategyCandidateLabSummaryHtml,
+} from "./strategy_candidate_lab_fold.js";
+
+import {
   STRATEGY_CANDIDATE_LAB_WORKFLOWS,
   collectStrategyCandidateLabRequest,
 } from "./strategy_candidate_lab_requests.js";
@@ -189,7 +196,9 @@ function blockedReason(state, dependencies) {
 }
 
 function panelStatusText(state, dependencies) {
-  if (state.error) return state.error;
+  // The raw error text lives in the body's error card; the announced status
+  // line stays a plain sentence (batch 4 review U3).
+  if (state.error) return "策略候选读取失败，可在工作台里重新读取。";
   const reason = blockedReason(state, dependencies);
   if (reason) return BLOCKED_REASON_COPY[reason] || "当前 Candidate Lab 暂不可启动新分析。";
   if (state.loading) return "正在刷新受认证候选证据…";
@@ -246,6 +255,13 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   let boundRoot = null;
   let activeRefresh = null;
   let restoredTaskId = "";
+  // 2026-10-14 redesign (batch 4): the workbench body folds behind a summary
+  // card, collapsed by default and remembered per task in this viewer.
+  const expandedByTask = new Map();
+  // A load error opens the body to show its error card, but only transiently:
+  // it is never written to expandedByTask, and the user's own toggle wins.
+  let errorFoldDismissedTaskId = "";
+  let lastSummaryHtml = null;
   const serverView = createStrategyWorkbenchStateController({
     getElementById: $, getPanel: panel, getTaskId: selectedTaskId,
     onRestored: (draft) => { render(); serverView.restore(panel(), draft); },
@@ -268,6 +284,64 @@ export function createStrategyCandidateLabController(dependencies = {}) {
 
   function panel() {
     return $("strategyCandidateLabPanel");
+  }
+
+  function isExpanded(taskId = state.taskId) {
+    const id = nonEmptyText(taskId);
+    if (!id) return false;
+    if (!expandedByTask.has(id)) expandedByTask.set(id, loadStrategyCandidateLabExpanded(id, storage));
+    return expandedByTask.get(id);
+  }
+
+  // Fold elements are looked up by id only, so test panels without them
+  // (and without querySelector support) stay valid.
+  function errorHoldsFoldOpen() {
+    return Boolean(state.error && !state.payload) && errorFoldDismissedTaskId !== state.taskId;
+  }
+
+  function applyFold() {
+    const expanded = isExpanded() || errorHoldsFoldOpen();
+    const body = $("strategyCandidateLabBody");
+    if (body) body.hidden = !expanded;
+    const toggle = $("strategyCandidateLabToggle");
+    if (toggle) {
+      toggle.setAttribute?.("aria-expanded", expanded ? "true" : "false");
+      toggle.textContent = expanded ? "收起工作台" : "打开工作台";
+    }
+  }
+
+  function setExpanded(value, { persist = true } = {}) {
+    const id = nonEmptyText(state.taskId);
+    if (!value && errorHoldsFoldOpen()) errorFoldDismissedTaskId = id;
+    if (id) {
+      expandedByTask.set(id, Boolean(value));
+      if (persist) persistStrategyCandidateLabExpanded(id, Boolean(value), storage);
+    }
+    applyFold();
+  }
+
+  // A deep link into a launcher (result-card buttons) opens the workbench first.
+  function revealLauncher(launcher) {
+    setExpanded(true, { persist: true });
+    revealStrategyToolLauncher(panel(), launcher);
+  }
+
+  function renderSummary() {
+    const summary = $("strategyCandidateLabSummary");
+    if (!summary) return;
+    // When the error card is on screen the summary does not repeat it.
+    const errorCardVisible = Boolean(state.error) && (isExpanded() || errorHoldsFoldOpen());
+    const html = state.taskId && !errorCardVisible
+      ? strategyCandidateLabSummaryHtml(strategyCandidateLabSummaryFacts(state.payload, {
+        blockedReason: blockedReason(state, dependencies),
+        loading: state.loading,
+        error: state.error,
+      }))
+      : "";
+    // renderAvailability runs on every app render tick; rewrite only on change.
+    if (html === lastSummaryHtml) return;
+    lastSummaryHtml = html;
+    summary.innerHTML = html;
   }
 
   function persistCurrentView(taskId = state.taskId) {
@@ -356,6 +430,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     }
     const retries = root.querySelectorAll?.("[data-candidate-lab-retry]") || [];
     for (const retry of retries) retry.disabled = state.loading;
+    renderSummary();
   }
 
   function render() {
@@ -366,6 +441,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     root.classList.toggle("hidden", !visible);
     root.setAttribute("aria-hidden", visible ? "false" : "true");
     if (!visible) return;
+    // A load error without a payload lives in the body's error card, so the
+    // body opens to show it (not remembered: the next visit starts collapsed).
+    if (!state.error) errorFoldDismissedTaskId = "";
+    applyFold();
     mountStrategyAssetStabilityPanel($("strategyAssetStabilityPanel"), task.id);
     updateStrategyToolDirectory(root, state.payload, task.id);
     const results = $("strategyCandidateLabResults");
@@ -1075,7 +1154,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       );
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      revealStrategyToolLauncher(panel(), launcher);
+      revealLauncher(launcher);
       dependencies.setActionStatus?.(
         "已带入受认证 revision 与前沿节点；确认后只物化该节点，不会自动入池。",
         "info",
@@ -1132,7 +1211,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       if (candidateField) candidateField.value = candidateId;
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      revealStrategyToolLauncher(panel(), launcher);
+      revealLauncher(launcher);
       dependencies.setActionStatus?.(
         "已带入人工明确选择的 eligible 候选；请检查全部硬预算后再提交续建。",
         "info",
@@ -1222,7 +1301,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       }
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      revealStrategyToolLauncher(panel(), launcher);
+      revealLauncher(launcher);
       dependencies.setActionStatus?.(
         "已回填受认证候选字段与阈值；尚未修改树，请检查理由并手动确认创建不可变 revision。",
         "info",
@@ -1279,7 +1358,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       );
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      revealStrategyToolLauncher(panel(), launcher);
+      revealLauncher(launcher);
       dependencies.setActionStatus?.(
         "已带入受认证分支、字段与当前阈值；请明确填写不同的新阈值后创建不可变 revision。",
         "info",
@@ -1326,7 +1405,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       );
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      revealStrategyToolLauncher(panel(), launcher);
+      revealLauncher(launcher);
       dependencies.setActionStatus?.(
         "已带入受认证分支和节点；填写可选理由后确认创建不可变 revision。",
         "info",
@@ -1335,9 +1414,30 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       return true;
     }
     const retry = event.target?.closest?.("[data-candidate-lab-retry]");
-    if (!retry) return false;
+    if (retry) {
+      event.preventDefault?.();
+      void refresh();
+      return true;
+    }
+    const foldToggle = event.target?.closest?.("[data-candidate-lab-fold-toggle]");
+    if (!foldToggle) return false;
     event.preventDefault?.();
-    void refresh();
+    // Toggle what is on screen (an error may be holding the body open).
+    setExpanded(!(isExpanded() || errorHoldsFoldOpen()), { persist: true });
+    return true;
+  }
+
+  // Opens the workbench at one workflow's launcher, for callers outside the
+  // lab (rail jumps, "open in workbench" buttons in result cards).
+  function reveal(workflow) {
+    const name = nonEmptyText(workflow);
+    const root = panel();
+    if (!root || !/^[a-z0-9_]+$/.test(name)) return false;
+    const form = root.querySelector?.(`[data-candidate-lab-form][data-candidate-lab-workflow="${name}"]`);
+    const launcher = form?.closest?.(".candidate-lab-launcher");
+    if (!launcher) return false;
+    revealLauncher(launcher);
+    launcher.scrollIntoView?.({ block: "nearest" });
     return true;
   }
 
@@ -1706,6 +1806,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     refresh,
     render,
     renderAvailability,
+    reveal,
     selectTask,
     submit,
     unbind,

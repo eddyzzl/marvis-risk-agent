@@ -54,7 +54,7 @@ _METRIC_COLUMN_GROUPS: list[tuple[set[str], list[tuple[str, str]]]] = [
         [
             ("coverage", "覆盖率"),
             ("missing_rate", "缺失率"),
-            ("mode_rate", "单一值率"),
+            ("mode_rate", "最常见值占比"),
             ("zero_rate", "零值率"),
             ("valid_count", "有效样本数"),
             ("unique_count", "唯一值数"),
@@ -133,7 +133,7 @@ _COLUMNS: list[tuple[str, str]] = [
     ("psi", "PSI"),
     ("psi_reason", "PSI说明"),
     ("missing_rate", "缺失率"),
-    ("mode_rate", "单一值率"),
+    ("mode_rate", "最常见值占比"),
     ("zero_rate", "零值率"),
     ("valid_count", "有效样本数"),
     ("unique_count", "唯一值数"),

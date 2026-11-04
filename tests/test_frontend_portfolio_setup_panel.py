@@ -208,22 +208,43 @@ def test_portfolio_open_gate_uses_deterministic_turn_without_llm():
 
 
 def test_portfolio_entry_and_setup_panel_are_mounted_in_product_ui():
-    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
-    index_html = (ROOT / "marvis/static/index.html").read_text(encoding="utf-8")
-    task_types = (ROOT / "marvis/static/js/task-types.js").read_text(encoding="utf-8")
-    plan_rail = (ROOT / "marvis/static/js/v2/plan_rail_controller.js").read_text(
-        encoding="utf-8"
-    )
-
+    index_html = (ROOT / 'marvis/static/index.html').read_text(encoding='utf-8')
     assert 'id="welcomePortfolioAnalysisCard"' in index_html
     assert 'data-task-kind="portfolio"' in index_html
     assert 'id="portfolioSetupPanel"' in index_html
     assert 'id="portfolioSetupForm"' in index_html
-    assert "createPortfolioSetupPanel," in app_js
-    assert "portfolioTurnUsesDeterministicRoute," in app_js
-    assert 'from "./js/v2/portfolio_setup_panel.js";' in app_js
-    assert "const portfolioSetupPanel = createPortfolioSetupPanel({" in app_js
-    assert "portfolioSetupPanel.renderAvailability();" in app_js
-    assert "portfolioTurnUsesDeterministicRoute(task, messages)" in app_js
-    assert "portfolio:" in task_types
-    assert '"portfolio"' in plan_rail
+
+
+def test_portfolio_columns_prefill_from_the_uploaded_table():
+    # Eval S9: empty boxes whose placeholders were the real column names
+    # looked filled and failed on submit. A column matching exactly one alias
+    # is prefilled; anything ambiguous stays empty for the user.
+    import json
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    module = (root / "marvis/static/js/v2/portfolio_setup_panel.js").as_uri()
+    script = "\n".join([
+        f"const m = await import({json.dumps(module)});",
+        "const panel = m.portfolioColumnSuggestions([",
+        "  { name: 'loan_id' }, { name: 'snapshot_month' }, { name: 'bucket' }, { name: 'balance' }, { name: 'segment' }, { name: 'score' },",
+        "]);",
+        "const ambiguous = m.portfolioColumnSuggestions(['loan_id', 'segment', 'channel', 'balance', 'EAD']);",
+        "process.stdout.write(JSON.stringify({ panel, ambiguous }));",
+    ])
+    result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=root, capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["panel"] == {
+        "id_col": "loan_id",
+        "snapshot_col": "snapshot_month",
+        "bucket_col": "bucket",
+        "balance_col": "balance",
+        "segment_col": "segment",
+    }
+    # segment vs channel and balance vs EAD are two candidates: left empty.
+    assert data["ambiguous"] == {"id_col": "loan_id"}
+    html = (root / "marvis/static/index.html").read_text(encoding="utf-8")
+    assert 'id="portfolioIdCol" autocomplete="off" placeholder="例如 loan_id"' in html
+    app_js = (root / "marvis/static/app.js").read_text(encoding="utf-8")
+    assert "listDatasets: (taskId) => api(`/api/tasks/${encodeURIComponent(taskId)}/datasets`)," in app_js

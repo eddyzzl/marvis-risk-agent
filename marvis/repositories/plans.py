@@ -342,6 +342,63 @@ class PlanRepository:
             for row in rows
         }
 
+    def latest_current_steps_for_tasks(
+        self,
+        task_ids: list[str],
+    ) -> dict[str, dict]:
+        """Where each task's latest plan stands, in one query.
+
+        The current step is the first one (by index) that is neither done nor
+        skipped; ``number`` is its 1-based position among the plan's steps. A
+        task whose latest plan has no such step is left out.
+        """
+
+        normalized_task_ids = list(dict.fromkeys(
+            str(task_id).strip()
+            for task_id in task_ids
+            if str(task_id).strip()
+        ))
+        if not normalized_task_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized_task_ids)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                WITH ranked_plans AS (
+                    SELECT id,
+                           task_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY task_id
+                               ORDER BY created_at DESC, id DESC
+                           ) AS plan_rank
+                      FROM plans
+                     WHERE task_id IN ({placeholders})
+                )
+                SELECT ranked.task_id, plan_steps.title, plan_steps.status
+                  FROM ranked_plans AS ranked
+                  JOIN plan_steps ON plan_steps.plan_id = ranked.id
+                 WHERE ranked.plan_rank = 1
+                 ORDER BY ranked.task_id, plan_steps.idx, plan_steps.id
+                """,
+                normalized_task_ids,
+            ).fetchall()
+        settled = {StepStatus.DONE.value, StepStatus.SKIPPED.value}
+        totals: dict[str, int] = {}
+        current: dict[str, dict] = {}
+        for row in rows:
+            task_id = str(row["task_id"])
+            totals[task_id] = totals.get(task_id, 0) + 1
+            if task_id not in current and str(row["status"]) not in settled:
+                current[task_id] = {
+                    "number": totals[task_id],
+                    "title": str(row["title"] or ""),
+                    "status": str(row["status"]),
+                }
+        return {
+            task_id: {**step, "total": totals[task_id]}
+            for task_id, step in current.items()
+        }
+
     def startup_reclaim_plan_ids(self) -> list[str]:
         """Host maintenance projection: IDs of interrupted status rows only."""
         with connect(self.db_path) as conn:
@@ -950,6 +1007,114 @@ class PlanRepository:
             )
             return ordered_reset_ids
 
+    def restore_failed_step(
+        self,
+        plan_id: str,
+        step_id: str,
+        *,
+        inputs: dict,
+        error: str,
+        downstream_inputs: dict[str, dict] | None = None,
+        reason: str,
+    ) -> list[str]:
+        """Put a repaired step back to its recorded failure (B-line rollback/undo).
+
+        One transaction restores the step's original inputs and error (keeping
+        the step's ``confirmed`` flag as it is), resets
+        every transitive descendant to pending (restoring their recorded
+        inputs), and moves the plan back to ``failed``. A plan that is running,
+        done or cancelled, a descendant a human already confirmed, or an
+        unreconciled effect in the closure refuses the restore unchanged.
+        """
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
+            plan_row = conn.execute(
+                "SELECT status FROM plans WHERE id = ?",
+                (plan_id,),
+            ).fetchone()
+            if plan_row is None:
+                raise PlanNotFoundError(plan_id)
+            source_status = str(plan_row["status"])
+            if source_status not in {
+                PlanStatus.FAILED.value,
+                PlanStatus.AWAITING_CONFIRM.value,
+                PlanStatus.CONFIRMED.value,
+            }:
+                raise ConflictError(f"plan cannot be restored from {source_status}")
+            step_rows = conn.execute(
+                "SELECT id, depends_on_json, confirmed FROM plan_steps WHERE plan_id = ? ORDER BY idx, id",
+                (plan_id,),
+            ).fetchall()
+            if step_id not in {str(row["id"]) for row in step_rows}:
+                raise KeyError(step_id)
+            descendants: set[str] = set()
+            changed = True
+            while changed:
+                changed = False
+                for row in step_rows:
+                    row_id = str(row["id"])
+                    if row_id == step_id or row_id in descendants:
+                        continue
+                    depends_on = {str(item) for item in _load_json_array(row["depends_on_json"])}
+                    if depends_on & (descendants | {step_id}):
+                        descendants.add(row_id)
+                        changed = True
+            confirmed = [
+                str(row["id"]) for row in step_rows
+                if str(row["id"]) in descendants and int(row["confirmed"] or 0)
+            ]
+            if confirmed:
+                raise ConflictError("a later step was already confirmed")
+            ordered = [str(row["id"]) for row in step_rows if str(row["id"]) in descendants | {step_id}]
+            _assert_no_unreconciled_step_effects(conn, ordered, plan_id=plan_id)
+            conn.execute(
+                """
+                UPDATE plan_steps
+                   SET inputs_json = ?, status = 'failed',
+                       sub_agent_id = NULL, output_ref = NULL, review_json = '[]', error = ?
+                 WHERE id = ?
+                """,
+                (_dump_json_any(inputs), str(error or "step failed"), step_id),
+            )
+            for descendant in ordered:
+                if descendant == step_id:
+                    continue
+                replacement = (downstream_inputs or {}).get(descendant)
+                if replacement is not None:
+                    conn.execute(
+                        "UPDATE plan_steps SET inputs_json = ? WHERE id = ?",
+                        (_dump_json_any(replacement), descendant),
+                    )
+                conn.execute(
+                    """
+                    UPDATE plan_steps
+                       SET status = 'pending', confirmed = 0, sub_agent_id = NULL,
+                           output_ref = NULL, review_json = '[]', error = NULL
+                     WHERE id = ?
+                    """,
+                    (descendant,),
+                )
+            cursor = conn.execute(
+                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (PlanStatus.FAILED.value, _now(), plan_id, source_status),
+            )
+            if cursor.rowcount == 0:
+                raise ConflictError(f"plan {plan_id} changed while restoring step")
+            _write_audit_row(
+                conn,
+                kind="plan.step.repair_restore",
+                target_ref=step_id,
+                outcome="succeeded",
+                detail={
+                    "plan_id": plan_id,
+                    "reset_step_ids": ordered,
+                    "from_plan_status": source_status,
+                    "reason": str(reason)[:200],
+                },
+            )
+            return ordered
+
     def rollback_failed_plan_from_step(
         self,
         plan_id: str,
@@ -1428,6 +1593,23 @@ class PlanRepository:
         }):
             return "unknown_effect"
         return str(row["error_kind"] or "").strip() or None
+
+    def latest_step_run_timings(self, plan_id: str) -> dict[str, dict]:
+        """Latest attempt's status and timing per step (presentation only)."""
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT r.step_id, r.status, r.duration_ms, r.started_at, r.finished_at
+                  FROM plan_step_runs AS r
+                 WHERE r.plan_id = ?
+                   AND r.attempt = (
+                       SELECT MAX(latest.attempt) FROM plan_step_runs AS latest
+                        WHERE latest.step_id = r.step_id
+                   )
+                """,
+                (plan_id,),
+            ).fetchall()
+        return {str(row["step_id"]): dict(row) for row in rows}
 
     def list_running_step_runs(self, plan_id: str) -> list[dict]:
         with connect(self.db_path) as conn:

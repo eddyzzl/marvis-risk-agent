@@ -61,7 +61,7 @@ def test_model_training_report_text_includes_this_model_hyperparameters():
 
 def test_platform_default_training_description_detects_pending_and_generic_blurbs():
     assert is_platform_default_training_description(
-        "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
+        "待确认模型算法后自动生成模型训练说明。"
     )
     assert is_platform_default_training_description(model_training_description("lgb"))
     assert is_platform_default_training_description(model_training_report_text("lgb"))

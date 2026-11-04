@@ -13,6 +13,7 @@ here directly.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from marvis.llm_outbound_gate_context import authorization_gate
 
 from collections.abc import Callable, Mapping
@@ -35,15 +36,17 @@ from marvis.agent.service import (
     failure_summary,
     generate_word_conclusions,
     latest_report_draft_context,
+    missing_agent_conclusion_labels,
     review_validation_instruction_authorization,
     summarize_stage,
 )
-from marvis.repositories.tasks import TaskRepository
+from marvis.repositories.tasks import AGENT_REPORT_WRITABLE_KEYS, TaskRepository
 from marvis.agent.turn_handlers import (
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
 )
 from marvis.agent.workflow_recovery import answer_workflow_recovery_message
+from marvis.agent.validation_repair import diagnose_validation_failure
 from marvis.agent.validation_runner import (
     ValidationJobCallbacks,
     run_agent_validation_job as run_agent_validation_job_impl,
@@ -51,6 +54,7 @@ from marvis.agent.validation_runner import (
 from marvis.agent.validation_stages import (
     ValidationStageDependencies,
     add_agent_auto_stage_start_message as add_agent_auto_stage_start_message_impl,
+    add_agent_diagnostic_failure_message,
     add_agent_continue_prompt as add_agent_continue_prompt_impl,
     add_agent_failure_summary as add_agent_failure_summary_impl,
     add_agent_input_confirmation_prompt as add_agent_input_confirmation_prompt_impl,
@@ -781,71 +785,30 @@ def confirm_agent_report_conclusions(
     draft_message_id: str | None = None,
     draft_edit_revision: int | None = None,
 ) -> dict:
-    initial_task = get_task_or_404(repo_, task_id)
+    get_task_or_404(repo_, task_id)
+    stored_values, stored_revision = repo_.get_report_values(task_id)
     if expected_revision is None:
-        _, expected_revision = repo_.get_report_values(task_id)
-    if (
-        initial_task.task_type == TASK_TYPE_VALIDATION
-        and initial_task.validation_workflow_version == 2
-    ):
-        try:
-            job_id = ValidationContractRepository(repo_.db_path).start_ready_job(
-                task_id,
-                "report",
-            )
-        except (ValidationContractActiveJobConflict, ConflictError) as exc:
-            raise conflict("task already has an active stage") from exc
-        except ValueError as exc:
-            raise unprocessable(str(exc)) from exc
-    else:
-        job_id = start_task_job(repo_, task_id, "report")
-    latest_task = repo_.get_task(task_id)
-    if latest_task.status not in {
-        TaskStatus.WRITING_ARTIFACTS,
-        TaskStatus.REVIEW_REQUIRED,
-        TaskStatus.SUCCEEDED,
-    }:
-        exc = ValueError(
-            f"cannot generate report in status {latest_task.status.value}"
-        )
-        fail_queued_job(repo_, job_id, exc)
-        raise conflict(str(exc))
+        expected_revision = stored_revision
+    _require_complete_agent_conclusions(stored_values, text_values)
+    # The single-task path shares the batch transaction: a stale draft/revision
+    # must roll back its queued job as well as the report values and audit.
+    # Prechecking the revision outside that transaction would leave a race.
+    metadata = model_metadata(model_profile) if model_profile and model_metadata is not None else {}
     try:
-        revision = repo_.update_agent_report_conclusions_with_audit(
-            task_id,
-            text_values,
-            expected_revision=expected_revision,
-            draft_message_id=draft_message_id,
-            draft_edit_revision=draft_edit_revision,
-            audit={
-                "kind": "report.agent_conclusions.confirm",
-                "target_ref": task_id,
-                "outcome": "succeeded",
-                "detail": {
-                    "keys": sorted(text_values),
-                    "expected_revision": expected_revision,
-                },
-            },
-        )
+        confirmed = repo_.confirm_agent_report_batch([{
+            "task_id": task_id,
+            "text_values": text_values,
+            "expected_revision": expected_revision,
+            "draft_message_id": draft_message_id,
+            "draft_edit_revision": draft_edit_revision,
+            "model_metadata": metadata,
+        }])[0]
     except ConflictError as exc:
-        fail_queued_job(repo_, job_id, exc)
         raise conflict(str(exc)) from exc
     except ValueError as exc:
-        fail_queued_job(repo_, job_id, exc)
         raise unprocessable(str(exc)) from exc
-    metadata = {
-        "revision": revision,
-        "confirmed_keys": sorted(text_values),
-    }
-    if model_profile and model_metadata is not None:
-        metadata.update(model_metadata(model_profile))
-    repo_.add_agent_message(
-        task_id,
-        role="assistant",
-        stage="word_conclusion_confirmed",
-        content="三段报告结论已确认，将开始生成最终 Word 报告。",
-        metadata=metadata,
-    )
+    job_id, revision = confirmed["job_id"], confirmed["revision"]
+    latest_task = repo_.get_task(task_id)
     background_tasks.add_task(
         run_confirmed_agent_report_job,
         job_id=job_id,
@@ -861,6 +824,29 @@ def confirm_agent_report_conclusions(
         "message": "agent conclusions confirmed; word report stage dispatched",
         "messages": repo_.list_agent_messages(task_id),
     }
+
+
+def _require_complete_agent_conclusions(
+    stored_values: dict, text_values: dict, *, model_name: str = "",
+) -> None:
+    """Confirm only what the report download gate will accept.
+
+    Confirmation merges the submitted text over the saved report; the same
+    three paragraphs that ``require_confirmed_agent_conclusions`` checks must
+    be non-empty, otherwise no job starts and no "generated" notice appears.
+    """
+    merged = {
+        **(stored_values or {}),
+        **{key: value for key, value in (text_values or {}).items()
+           if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)},
+    }
+    missing = missing_agent_conclusion_labels(merged)
+    if missing:
+        prefix = f"{model_name}：" if model_name else ""
+        raise unprocessable(
+            f"{prefix}{'、'.join(missing)}为空，不能生成报告。"
+            "请在报告表格补充这些段落，或让 Agent 重新生成报告结论后再确认。"
+        )
 
 
 _SKIPPED_BATCH_ITEM_STATUSES = frozenset({"failed", "cancelled"})
@@ -938,6 +924,10 @@ def confirm_all_batch_report_drafts(
         expected_revision = override.get("revision")
         if expected_revision is None:
             expected_revision = pending["report_revision"]
+        stored_values, _ = repo_.get_report_values(item.child_task_id)
+        _require_complete_agent_conclusions(
+            stored_values, text_values, model_name=item.model_name or item.child_task_id,
+        )
         confirmations.append({
             "task_id": item.child_task_id,
             "text_values": text_values,
@@ -1058,6 +1048,12 @@ def agent_chat_evidence(
     report_draft = latest_report_draft_context(conversation)
     if report_draft:
         evidence["report_draft"] = report_draft
+    if task.task_type == TASK_TYPE_VALIDATION:
+        from marvis.api_scan_helpers import material_dictionary_diagnostics
+
+        diagnostics = material_dictionary_diagnostics(task)
+        if diagnostics is not None:
+            evidence["material_diagnostics"] = diagnostics
     evidence["visible_stage_summaries"] = [
         {
             "stage": message["stage"],
@@ -1135,6 +1131,7 @@ def validation_stage_dependencies() -> ValidationStageDependencies:
         failure_summary=failure_summary,
         sync_agent_batch_after_child_report=sync_agent_batch_after_child_report,
         sync_agent_batch_child_progress=sync_agent_batch_child_progress,
+        diagnose_failure=diagnose_validation_failure,
     )
 
 
@@ -1147,6 +1144,25 @@ def add_agent_job_exception_summary(
     error: Exception,
 ) -> None:
     error_detail = f"{error.__class__.__name__}: {error}"
+    # B-line: a missing PMML dependency or unrecognized material is classified
+    # deterministically; anything else keeps the LLM explanation.
+    # Only the cheap classes are allowed here (no sample probes), and any
+    # problem with the diagnosis falls back to the LLM explanation.
+    diagnostic = diagnose_validation_failure(
+        settings=SimpleNamespace(db_path=repo_.db_path),
+        task=task,
+        stage="exception",
+        error=error_detail,
+        kinds=frozenset({"dependency", "material"}),
+    )
+    if diagnostic is not None:
+        add_agent_diagnostic_failure_message(
+            repo_,
+            task_id=task_id,
+            diagnostic=diagnostic,
+            model_profile=model_profile,
+        )
+        return
     add_and_stream_agent_message(
         repo_,
         task_id,

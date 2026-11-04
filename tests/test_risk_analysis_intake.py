@@ -5,6 +5,7 @@ from pathlib import Path
 
 import marvis.agent.risk_analysis_setup as risk_setup
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from marvis.agent.turn_handlers import _maybe_handle_adhoc_turn
@@ -132,7 +133,9 @@ def test_vtg_goal_moves_to_material_request_with_explicit_contract():
     assert "selection_rule=min_auxiliary_recovery" in result.content
     assert "一个 as_of_date 和一个 scenario" in result.content
     assert "不会由系统猜测" in result.content
-    assert registry.list_calls == 0
+    # The chosen goal looks for attached materials once; none are registered,
+    # so the contract request is the right next step.
+    assert registry.list_calls == 1
 
 
 def test_profitability_goal_lists_row_units_weights_and_tax_basis():
@@ -870,17 +873,24 @@ def test_vintage_http_flow_persists_intake_before_building_standard_plan(tmp_pat
         json={"content": "标准 Vintage"},
     )
     assert second.status_code == 202, second.text
-    assert second.json()["messages"][-1]["metadata"][
-        risk_setup.RISK_ANALYSIS_INTAKE_META_KEY
-    ] == {
+    asked = second.json()["messages"][-1]
+    # The panel is already attached: no upload request, only the label basis.
+    assert asked["metadata"][risk_setup.RISK_ANALYSIS_INTAKE_META_KEY] == {
         "phase": "request_materials",
         "analysis_kind": "standard_vintage",
+        "awaiting": "label_semantics",
         "analysis_scope": "标准 Vintage",
     }
+    assert "已找到你上传的" in asked["content"]
+    assert "材料已上传" not in asked["content"]
+    assert [reply["command"] for reply in asked["metadata"]["quick_replies"]] == [
+        "bad 是当期新增",
+        "bad 是截至当期状态",
+    ]
 
     third = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "材料已上传"},
+        json={"content": "bad 是当期新增"},
     )
     assert third.status_code == 202, third.text
     messages = third.json()["messages"]
@@ -897,3 +907,196 @@ def test_vintage_http_flow_persists_intake_before_building_standard_plan(tmp_pat
         == "standard_vintage"
     )
     assert messages[-1]["metadata"]["kind"] == "plan_overview"
+
+
+def test_opening_turn_that_names_the_analysis_is_an_answer_not_a_new_ask():
+    """Eval S7: the home page already chose 标准 Vintage; do not ask again."""
+
+    registry = _Registry()
+
+    result = _advance(registry, _Backend(), user_text="标准 Vintage")
+
+    assert "想分析什么" not in result.content
+    assert result.intake_state["analysis_kind"] == "standard_vintage"
+    assert result.intake_state["phase"] == "request_materials"
+
+
+def test_chosen_goal_checks_the_attached_table_instead_of_asking_for_upload():
+    dataset = _Dataset("vtg", "task-risk/vtg.parquet")
+    complete = [
+        "product",
+        "as_of_date",
+        "cohort",
+        "amount_unit",
+        "disbursement_amount",
+        "mob14_bad_rate",
+        "turnover",
+        "terminal_bad_rate",
+    ]
+
+    ready = _advance(
+        _Registry([dataset]),
+        _Backend({"vtg": complete}),
+        user_text="VTG终值与年化不良",
+        conversation=[_assistant_state("ask_goal")],
+    )
+    assert ready.template_id == "risk_analysis_report"
+    assert ready.intake_state["phase"] == "ready"
+
+    missing = _advance(
+        _Registry([dataset]),
+        _Backend({"vtg": complete[:-2]}),
+        user_text="VTG终值与年化不良",
+        conversation=[_assistant_state("ask_goal")],
+    )
+    assert missing.template_id is None
+    assert missing.intake_state["phase"] == "await_materials"
+    assert "turnover" in missing.content
+    assert "上传后" not in missing.content
+
+
+def test_attached_vintage_panel_asks_only_for_label_basis_then_plans(monkeypatch):
+    class _Proposal:
+        template_id = "vintage_analysis"
+        dataset_id = "panel"
+        dataset_name = "vintage_panel.csv"
+        cohort_col = "cohort"
+        mob_col = "mob"
+        bad_col = "bad"
+
+        def template_slots(self):
+            return {"dataset_id": "panel", "cohort_col": "cohort", "mob_col": "mob", "bad_col": "bad"}
+
+    monkeypatch.setattr(
+        risk_setup, "build_vintage_proposal", lambda *args, **kwargs: _Proposal()
+    )
+    registry = _Registry([_Dataset("panel", "task-risk/panel.parquet")])
+
+    asked = _advance(registry, _Backend(), user_text="标准 Vintage")
+    assert asked.template_id is None
+    assert "vintage_panel.csv" in asked.content
+    assert "请提供 Vintage panel" not in asked.content
+    assert [item["command"] for item in asked.metadata["quick_replies"]] == [
+        "bad 是当期新增",
+        "bad 是截至当期状态",
+    ]
+
+    ready = _advance(
+        registry,
+        _Backend(),
+        user_text=asked.metadata["quick_replies"][0]["command"],
+        conversation=[{"role": "assistant", "metadata": asked.metadata}],
+    )
+    assert ready.template_id == "vintage_analysis"
+    assert ready.slots["label_semantics"] == "incremental"
+    # A stated basis on the goal turn needs no question at all.
+    direct = _advance(registry, _Backend(), user_text="标准 Vintage，bad 是当期新增")
+    assert direct.template_id == "vintage_analysis"
+
+
+def test_label_chip_answers_the_intake_without_semantic_routing():
+    """Eval regression: the 「当期新增」 chip went to the LLM router, which
+    refused it at medium confidence. A short, non-question reply naming one
+    reading answers the intake's own question; anything else still routes."""
+    from types import SimpleNamespace
+
+    from marvis.agent.turn_handlers import vintage as vintage_lane
+
+    class _Plans:
+        def __init__(self, plans=()):
+            self.plans = list(plans)
+
+        def list_plans_for_task(self, _task_id):
+            return self.plans
+
+    asked = {
+        "role": "assistant",
+        "metadata": {
+            risk_setup.RISK_ANALYSIS_INTAKE_META_KEY: {
+                "phase": "request_materials",
+                "analysis_kind": "standard_vintage",
+                "awaiting": "label_semantics",
+            }
+        },
+    }
+    task = SimpleNamespace(id="t", task_type="vintage")
+    runtime = SimpleNamespace(plan_repo=_Plans())
+
+    def answers(text, conversation=(asked,), task=task, runtime=runtime):
+        return vintage_lane.is_pending_label_answer(
+            runtime, task, text=text, conversation=list(conversation)
+        )
+
+    assert answers("bad 是当期新增")
+    assert answers("bad 是截至当期状态")
+    assert answers("当期新增")
+    # Questions, both readings, or no reading go through normal routing.
+    assert not answers("bad 是当期新增吗？")
+    assert not answers("当期新增还是截至当期状态？")
+    assert not answers("先看看数据")
+    # Only while that exact question is open, on a vintage task, with no plan.
+    other_phase = {"role": "assistant", "metadata": {risk_setup.RISK_ANALYSIS_INTAKE_META_KEY: {"phase": "ask_goal"}}}
+    assert not answers("bad 是当期新增", conversation=(other_phase,))
+    assert not answers("bad 是当期新增", task=SimpleNamespace(id="t", task_type="strategy"))
+    running = SimpleNamespace(status="awaiting_confirm")
+    assert not answers("bad 是当期新增", runtime=SimpleNamespace(plan_repo=_Plans([running])))
+
+    dispatch_source = (
+        Path(__file__).resolve().parents[1] / "marvis/agent/turn_handlers/dispatch.py"
+    ).read_text(encoding="utf-8")
+    assert dispatch_source.index("vintage_lane.is_pending_label_answer(") < dispatch_source.index(
+        "semantic_decision = route_semantic_intent("
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "business_words", "code"),
+    [("bad 是当期新增", "按当期新增计", "incremental"), ("bad 是截至当期状态", "按截至当期状态计", "snapshot")],
+)
+def test_vintage_result_and_label_basis_read_in_business_chinese(
+    monkeypatch, answer, business_words, code
+):
+    # Eval S7: the result said 「趋势 deteriorating」 and the ready message
+    # 「标签语义 incremental」 — platform codes, not words.
+    from marvis.agent.renderers import _render_vintage_curve
+
+    text, _tables = _render_vintage_curve(
+        {"cohorts": ["2025-07", "2025-10"], "mob_axis": [0, 1], "summary": {"trend": "deteriorating"}}
+    )
+    assert "deteriorating" not in text
+    assert "整体在变差" in text
+
+    class _Proposal:
+        template_id = "vintage_analysis"
+        dataset_id = "panel"
+        dataset_name = "vintage_panel.csv"
+        cohort_col = "cohort"
+        mob_col = "mob"
+        bad_col = "bad"
+
+        def template_slots(self):
+            return {"dataset_id": "panel", "cohort_col": "cohort", "mob_col": "mob", "bad_col": "bad"}
+
+    monkeypatch.setattr(
+        risk_setup, "build_vintage_proposal", lambda *args, **kwargs: _Proposal()
+    )
+    registry = _Registry([_Dataset("panel", "task-risk/panel.parquet")])
+    ready = _advance(registry, _Backend(), user_text=f"标准 Vintage，{answer}")
+    assert ready.slots["label_semantics"] == code
+    assert business_words in ready.content
+    assert code not in ready.content
+    assert "标签语义" not in ready.content
+
+
+def test_vintage_result_names_the_worst_and_best_cohort():
+    # Eval S7: 「哪个月的资产质量最差」 had no answer in the result itself.
+    from marvis.agent.renderers import _render_vintage_curve
+
+    text, _tables = _render_vintage_curve({
+        "cohorts": ["2025-07", "2025-08", "2025-10", "2025-11"],
+        "mob_axis": [0, 1],
+        "summary": {"trend": "deteriorating", "at_ref": {"2025-07": 0.06, "2025-08": 0.02, "2025-10": 0.12}},
+    })
+    assert "最差的是 2025-10（12.0%）" in text
+    assert "最好的是 2025-08（2.0%）" in text
+    assert "2025-11 还没到参考 MOB" in text

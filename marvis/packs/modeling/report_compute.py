@@ -36,6 +36,15 @@ class ReportSectionStatus:
     reason: str | None = None
 
 
+_REPORT_INPUT_LABELS = {
+    "loan_month_col": "放款月份列",
+    "mob_observe_cols": "MOB 观察列",
+    "loan_amount_col": "放款金额列",
+    "interest_rate_col": "利率列",
+    "feature_dictionary": "特征字典",
+}
+
+
 def resolve_report_sections(
     business: BusinessColumns | None,
     dictionary_id: str | None,
@@ -57,7 +66,9 @@ def resolve_report_sections(
             ReportSectionStatus(
                 section=section,
                 available=not missing,
-                reason=None if not missing else f"缺少业务列/字典: {', '.join(missing)}",
+                reason=None if not missing else "缺少" + "、".join(
+                    _REPORT_INPUT_LABELS.get(column, column) for column in missing
+                ),
             )
         )
     return statuses

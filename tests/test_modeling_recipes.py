@@ -2353,8 +2353,8 @@ def test_build_modeling_proposal_surfaces_excluded_categorical_notice(tmp_path):
     notice = next((note for note in proposal.notes if "类别列未入模" in note), None)
     assert notice is not None
     assert "chan" in notice
-    assert "woe_encode_categorical" in notice
-    assert "catboost" in notice
+    assert "WOE 编码" in notice
+    assert "CatBoost" in notice
 
 
 def test_build_modeling_proposal_omits_categorical_notice_when_no_categorical_columns(tmp_path):

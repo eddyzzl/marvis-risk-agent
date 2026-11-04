@@ -110,6 +110,10 @@ def enrich_workflow_error_diagnostic(diagnostic: dict) -> dict:
     """Upgrade persisted generic failures when a safe current diagnosis exists."""
 
     result = dict(diagnostic or {})
+    if result.get("diagnosed_by") == "workflow_repair":
+        # B-line diagnoses are already deterministic and state their own
+        # reconciliation requirement (marvis/agent/workflow_repair.py).
+        return result
     if result.get("code") == "workflow_reconciliation_required" or requires_effect_reconciliation(
         f"{result.get('technical_detail') or ''} {result.get('cause') or ''}",
         result.get("error_kind"),

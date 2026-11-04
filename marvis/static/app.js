@@ -12,6 +12,17 @@ import { createInstitutionPanel } from "./js/institution_panel.js";
 import { createInstanceSynchronizationPanel } from "./js/instance_sync_panel.js";
 import { handleBusinessObjectiveEvent } from "./js/business-objective.js";
 import { api, sleep } from "./js/api.js";
+import {
+  getUiLocale,
+  installUiLanguage,
+  localizeHtml,
+  localizeText,
+  onUiLocaleChange,
+  seedReplyLanguage,
+  setQuickReplyCommands,
+  t,
+} from "./js/i18n.js";
+import { platformLabelSource } from "./js/platform-labels.js";
 import { createTaskSession } from "./js/task-session.js";
 import {
   createAgentMemoryPanelController,
@@ -25,6 +36,7 @@ import {
   agentTimelineStageDefinitions,
 } from "./js/agent-conversation-view.js";
 import {
+  lastGateMessageId,
   removeAgentTimelineBuckets as removeAgentTimelineBucketsDom,
   renderAgentTimeline as renderAgentTimelineDom,
   restoreResultScrollDefaultOrder as restoreResultScrollDefaultOrderDom,
@@ -41,6 +53,22 @@ import {
 import { installFormControlFocusRingGuard } from "./js/focus-ring.js";
 import { createLayoutResizeController } from "./js/layout-resize.js";
 import { createMaterialBindingDialogController } from "./js/material-binding-dialog.js";
+import { createWorkbenchChrome } from "./js/workbench-chrome.js";
+import { bindSuggestionAccept, latestSuggestedReply, suggestionFromPlaceholder } from "./js/composer-suggestion.js";
+import { createHomeComposer } from "./js/home-composer.js";
+import {
+  attachResultCardInteractions,
+  scoreEvidenceTile,
+  validationMetricCardHtml,
+  validationMetricCardModel,
+} from "./js/result-cards.js";
+import {
+  agentQuickReplies,
+  agentQuickRepliesHtml,
+  quickReplyBubbleText,
+  quickReplyLabelsByCommand,
+} from "./js/agent-quick-replies.js";
+import { agentFaceForStatus, agentFaceHtml, syncLiveAgentFaces } from "./js/agent-face.js";
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
@@ -48,8 +76,9 @@ import {
   collectReportDraftValues,
   hasReportDraftValues,
   latestPendingReportDraftMessageId,
-  reportDraftTableHtml,
+  reportDraftCardHtml,
   reportDraftFeedbackHtml,
+  reportDraftPreviewHtml,
 } from "./js/report-draft-table.js";
 import { createReportDraftState } from "./js/report-draft-state.js";
 import { bindTaskRowPreview } from "./js/task-row-preview.js";
@@ -62,6 +91,7 @@ import {
   renderCalibrationCard,
   renderMetricTableSection,
   renderScoreBandCard,
+  renderVintageCurvesCard,
 } from "./js/metric-tables.js";
 import { renderPrecisionConsistencyChart } from "./js/precision-consistency.js";
 import { stepCheckerHtml } from "./js/step-checker.js";
@@ -77,8 +107,8 @@ import {
   updateWorkspaceGreeting as updateWorkspaceGreetingView,
 } from "./js/task-workspace-view.js";
 import { createTaskSearchController } from "./js/task-search.js";
-import { actionStatusPresentation } from "./js/task-status.js";
-import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
+import { actionStatusPresentation, resolveTaskStatus } from "./js/task-status.js";
+import { defaultTaskType, taskTypeDefinitions, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
 import {
@@ -120,9 +150,13 @@ import {
   latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
   stripChatInstructions as stripChatInstructionsController,
 } from "./js/v2/driver_manual_analysis.js";
+import { resultSummaryHtml } from "./js/result-summary.js";
+import { conversationActionCardHtml, handleConversationActionChange, handleConversationActionClick, settledConversationActionIds } from "./js/conversation-action-cards.js";
+import { displayNumberText, fieldListHtml, fieldListModel, presentedCellHtml, readableValueText } from "./js/table-presentation.js";
 import {
   hasWorkflowErrorDiagnostic,
   workflowMessageContentHtml,
+  repairTimelineState,
 } from "./js/v2/workflow_error_card.js";
 import {
   confirmationSnapshotsEqual,
@@ -146,6 +180,7 @@ import {
   handleDedupConfirmClick as handleDedupConfirmClickController,
   handleDedupExcludeClick as handleDedupExcludeClickController,
   handleJoinKeyConfirmClick as handleJoinKeyConfirmClickController,
+  handleJoinKeyOptionChange,
   renderDedupPicker,
   renderJoinKeyPicker,
   renderJoinC1Form,
@@ -233,7 +268,6 @@ import {
   roleLabels,
   scanFailurePrefix,
   selectedTaskStorageKey,
-  statusLabels,
   terminalTaskStatuses,
   workflowSteps,
 } from "./js/state.js";
@@ -242,6 +276,8 @@ import {
   clamp,
   escapeHtml,
   fileName,
+  setHtmlIfChanged,
+  setTextIfChanged,
   signatureFromParts,
 } from "./js/ui-utils.js";
 
@@ -249,20 +285,20 @@ const taskSession = createTaskSession();
 const taskRequests = taskSession.requests;
 let taskCache = [];
 const initialTaskDeepLink = parseTaskDeepLink(window.location.search);
-let lastMetricValues = {};
-let lastMetricValuesTaskId = null;
-let lastMetricTableSections = [];
 const taskActivities = taskSession.activities;
 let createTaskInFlight = false;
 const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
 let actionStatusOverride = null;
+// D6: expression of the newest Agent avatar and the title face, from the
+// resolved task status (js/task-status.js face field).
+let liveAgentFace = "idle";
 const themeController = createThemeController({
   onChange: () => renderSettingsState(),
 });
 let taskSearchQuery = "";
 let taskSortMode = "created_desc";
-let taskGroupMode = "none";
+let taskGroupMode = "attention";
 let executionEnvironmentOptions = [];
 let executionEnvironmentSettings = null;
 let llmSettings = { default_model_id: "", models: [], enabled_models: [] };
@@ -301,18 +337,10 @@ let agentAutoScrollFrame = null;
 // at the moment the rerun is requested and rendered inline above the rerun
 // user message so chart history persists alongside the chat history.
 const taskFrozenSectionSnapshots = new Map();
-let pendingResultScrollRestoreTaskId = null;
 let resultScrollRestoreFrame = null;
 let resultScrollPersistFrame = null;
-let suppressAgentAutoScrollTaskId = null;
-let pendingTaskContentLoadTaskId = null;
 let taskContentSettleTimer = null;
 let projectedChildContentLoadVersion = 0;
-let latestNotebookSteps = [];
-let latestValidationInputContract = null;
-let latestValidationInputContractTaskId = "";
-let latestValidationInputContractContext = null;
-let validationInputContractLoadVersion = 0;
 let sidebarCollapsed = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
@@ -347,6 +375,32 @@ const createTaskDialog = createCreateTaskDialogController({
   },
 });
 const materialBindingDialog = createMaterialBindingDialogController({ $, api });
+// Batch 5 (2026-10-14 redesign, D7 + 5B): the home page creates tasks from one
+// sentence through the same create dialog (contract unchanged).
+const LAST_VALIDATOR_KEY = "marvis_last_validator";
+const homeComposer = createHomeComposer({
+  $,
+  taskTypeDefinitions,
+  taskTypeDisplayOrder,
+  hasEnabledAgent: () => Boolean(llmSettings.enabled_models?.length),
+  getTasks: () => [...taskCache].sort((left, right) => (
+    String(right.updated_at || right.created_at || "").localeCompare(String(left.updated_at || left.created_at || ""))
+  )),
+  statusOf: (task) => taskResolvedStatus(task),
+  taskName: (task) => taskDisplayName(task),
+  currentStepOf: (task) => homeTaskCurrentStep(task),
+  kindIconHtml: (task) => taskKindIconHtml(task),
+  openTask: (taskId) => {
+    const task = taskCache.find((item) => String(item.id) === String(taskId));
+    if (task) void requestTaskSelection(task);
+  },
+  onCreate: (draft) => createTaskFromHome(draft),
+  onAdvanced: (draft) => openHomeAdvancedSettings(draft),
+  onError: (error) => setActionStatus("任务已创建，但后续步骤失败。", "error", error?.message || "操作失败"),
+});
+// The sentence behind an open 高级设置 dialog, so creating from the dialog
+// still hands it to the new task's Agent (cleared when the dialog closes).
+let homeAdvancedDraft = null;
 const validationBatchErrorTitle = "批次操作失败。";
 
 function restoreValidationBatchActionStatusAfterRecovery({ parentTaskId, message } = {}) {
@@ -407,6 +461,11 @@ const validationBatchPanelController = createValidationBatchPanelController({
   },
   onLayoutChange: () => syncTaskHeroGlassLayout(),
   onBatchMeta: ({ itemCount } = {}) => stampValidationBatchItemCount(itemCount),
+  onBatchStatus: () => {
+    renderTaskList();
+    renderCurrentTask();
+    renderWorkflowStepper();
+  },
   confirmAllReportDrafts: confirmAllValidationBatchReportDrafts,
   onError: (message) => {
     setActionStatus(validationBatchErrorTitle, "error", message);
@@ -467,6 +526,8 @@ const portfolioSetupPanel = createPortfolioSetupPanel({
   isCurrentView: (view) => taskRequests.current(view),
   getElementById: $,
   api,
+  // Column boxes are prefilled from the uploaded table (eval S9).
+  listDatasets: (taskId) => api(`/api/tasks/${encodeURIComponent(taskId)}/datasets`),
   getSelectedTask: () => taskSession.task,
   getAgentMessages: () => taskSession.messages,
   onMessages: (messages, view) => {
@@ -671,10 +732,14 @@ const strategyCandidateLabController = createStrategyCandidateLabController({
   renderWorkflowStepper,
 });
 const strategyHistoryMappingPanel = createStrategyHistoryMappingPanel({ root: $("strategyHistoryMappingPanel") });
+// V3 5.7: data processing tasks map historical materials in their Inspector.
+const dataHistoryMappingPanel = createStrategyHistoryMappingPanel({
+  root: $("dataHistoryMappingPanel"), taskTypes: ["data_join"], registerSources: true, hideOutsideTaskTypes: true,
+});
 const governedCapabilitiesPanel = createGovernedCapabilitiesPanel({ container: $("governedCapabilitiesPanel") });
 const workerIsolationPanel = createWorkerIsolationPanel({ container: $("workerIsolationPanel"), onSettings: (settings) => {
   executionEnvironmentSettings = { ...executionEnvironmentSettings, ...settings };
-} });
+}, getPendingSettings: () => executionEnvironmentSettings });
 const institutionPanel = createInstitutionPanel({ container: $("institutionPanel"), onIdentityChange: () => window.location.reload() });
 const instanceSynchronizationPanel = createInstanceSynchronizationPanel({ container: $("instanceSynchronizationPanel"), getTaskId: () => taskSession.taskId });
 const taskSearchController = createTaskSearchController({
@@ -725,8 +790,10 @@ const layoutResizeController = createLayoutResizeController({
 const startResizeDrag = layoutResizeController.startResizeDrag;
 const handleResizeKey = layoutResizeController.handleResizeKey;
 const restoreLayoutWidths = layoutResizeController.restoreLayoutWidths;
+const resetSidebarWidth = layoutResizeController.resetSidebarWidth;
+const workbenchChrome = createWorkbenchChrome();
 const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);
-const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);
+const taskGroupModes = new Set(["attention", "none", "task_type", "validator", "created_month"]);
 const petReactionMoods = new Set(["success", "failed", "complete", "review"]);
 const petCatalog = globalThis.MarvisPetCatalog;
 const petDefinitions = petCatalog.definitions;
@@ -784,6 +851,18 @@ async function loadBranding() {
   } catch (_error) {
     applyBranding(defaultBranding);
   }
+}
+
+// 接着做 progress: a validation task's rail is its status-driven workflowSteps;
+// other tasks carry their latest plan's current step (task.current_step).
+function homeTaskCurrentStep(task) {
+  if (isValidationBatchTask(task)) return null;
+  if (task?.task_type === "validation") {
+    const index = workflowIndex(task.status, task);
+    const step = workflowSteps[index];
+    return step ? { number: index + 1, title: workflowStepForTask(step, task).title } : null;
+  }
+  return task?.current_step || null;
 }
 
 function usesPmmlScoringWorkflow(task = workbenchTask()) {
@@ -876,6 +955,8 @@ function workflowStepperSignature(task) {
     taskBusyAction(task.id) || "",
     stepFingerprint(notebookStepsForRail()),
     stepFingerprint(metricStepsForRail()),
+    // The PMML run button waits for confirmed fields (stepActionBlockedReason).
+    taskSession.panels.contract.taskId === task.id ? taskSession.panels.contract.value?.status || "" : "",
   ]);
 }
 
@@ -940,10 +1021,18 @@ function openTaskDialog(taskType = defaultTaskType) {
   createTaskDialog.openTaskDialog(taskType);
 }
 
-function openTaskDialogFromCard(event) {
+// D7 (batch 5): a work icon only fills the home input; nothing pops up.
+function pickWelcomeTaskType(event) {
   const card = event.target.closest("[data-task-kind]");
   if (!card) return;
-  createTaskDialog.openTaskDialogFromCard(event);
+  const definition = taskTypeDefinition(card.dataset.taskKind || defaultTaskType);
+  if (definition.available === false) {
+    const message = definition.unavailableMessage || "新功能开发中，敬请期待";
+    showComingSoonToast(message);
+    setActionStatus(message, "info", "这个入口会继续展示在任务启动页，但当前不会打开创建弹窗。");
+    return;
+  }
+  homeComposer.pickTaskType(event);
 }
 
 function openTaskTypeWelcome() {
@@ -1191,7 +1280,7 @@ function openWordPreviewDialog() {
   const task = workbenchTask();
   const title = task ? reportTitleForTask(task) : "Word 报告预览";
   $("wordPreviewTitle").textContent = `${title} · Word 报告预览`;
-  frame.src = `api/tasks/${taskId}/report/preview?t=${Date.now()}`;
+  frame.src = `api/tasks/${taskId}/report/preview?ui_locale=${getUiLocale()}&t=${Date.now()}`;
   $("wordPreviewDialog").showModal();
   setActionStatus("Word 报告预览已打开。", "success");
 }
@@ -1382,6 +1471,14 @@ function applyPetPreference(value, options = {}) {
   if (persist) {
     persistPetPreference(petPreference, explicit);
   }
+  // The Agent avatar wears the chosen pet's head (css/agent-face.css); no pet
+  // keeps the MARVIS head.
+  const root = document.documentElement;
+  if (petPreference && petPreference !== petCatalog.noneId && petDefinitions[petPreference]) {
+    root.dataset.agentPet = petPreference;
+  } else {
+    delete root.dataset.agentPet;
+  }
   renderPetState();
   ensurePetWithinViewport({ persist });
 }
@@ -1474,9 +1571,18 @@ function petWorkspaceOffset() {
   return pet.getBoundingClientRect().left - workspace.left;
 }
 
+// In a task the pet sits in its in-flow footer dock (css/app-shell.css). The
+// docked rect is not a free position: it must not be dragged, clamped, pinned
+// or saved over the welcome-screen placement.
+function petIsDocked() {
+  const pet = $("petCompanion");
+  return Boolean(pet) && !pet.classList.contains("hidden") && getComputedStyle(pet).position === "static";
+}
+
 function petIsPinnedToWorkspaceLeftEdge() {
   const pet = $("petCompanion");
   if (!pet || pet.classList.contains("hidden")) return false;
+  if (petIsDocked()) return false;
   const offset = petWorkspaceOffset();
   if (!Number.isFinite(offset)) return false;
   const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", 14);
@@ -1488,6 +1594,7 @@ function pinPetToWorkspaceLeftEdge(options = {}) {
   const pet = $("petCompanion");
   const workspace = $("validationWorkspace")?.getBoundingClientRect();
   if (!pet || !workspace || pet.classList.contains("hidden")) return;
+  if (petIsDocked()) return;
   const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", 14);
   const rect = pet.getBoundingClientRect();
   const next = clampPetPosition(workspace.left + minWorkspaceOffset, rect.top);
@@ -1507,6 +1614,7 @@ function ensurePetWithinViewport(options = {}) {
   const { persist = false } = options;
   const pet = $("petCompanion");
   if (!pet || pet.classList.contains("hidden")) return;
+  if (petIsDocked()) return;
   const rect = pet.getBoundingClientRect();
   const next = clampPetPosition(rect.left, rect.top);
   if (Math.round(next.left) === Math.round(rect.left) && Math.round(next.top) === Math.round(rect.top)) return;
@@ -1558,6 +1666,7 @@ function renderPetState() {
 function startPetDrag(event) {
   const pet = $("petCompanion");
   if (!pet || pet.classList.contains("hidden")) return;
+  if (petIsDocked()) return;
   if (event.button !== undefined && event.button !== 0) return;
   event.preventDefault();
   const rect = pet.getBoundingClientRect();
@@ -1603,7 +1712,7 @@ function normalizeTaskSortMode(value) {
 }
 
 function normalizeTaskGroupMode(value) {
-  return taskGroupModes.has(value) ? value : "none";
+  return taskGroupModes.has(value) ? value : "attention";
 }
 
 function saveTaskListSettings() {
@@ -1611,6 +1720,7 @@ function saveTaskListSettings() {
     localStorage.setItem("marvis_task_list_settings", JSON.stringify({
       sort: taskSortMode,
       group: taskGroupMode,
+      groupVersion: 2,
     }));
   } catch (_) {
     // Sidebar list preferences are optional in restricted notebook browsers.
@@ -1621,10 +1731,14 @@ function restoreTaskListSettings() {
   try {
     const stored = JSON.parse(localStorage.getItem("marvis_task_list_settings") || "{}");
     taskSortMode = normalizeTaskSortMode(stored.sort);
-    taskGroupMode = normalizeTaskGroupMode(stored.group);
+    // 2026-10-19: grouping by what needs you became the default (mockup
+    // sidebar). A "none" saved before that was the old default, not a choice.
+    taskGroupMode = stored.groupVersion === 2 || stored.group !== "none"
+      ? normalizeTaskGroupMode(stored.group)
+      : "attention";
   } catch (_) {
     taskSortMode = "created_desc";
-    taskGroupMode = "none";
+    taskGroupMode = "attention";
   }
 }
 
@@ -1663,8 +1777,17 @@ function taskDisplayName(task) {
     return formatValidationBatchTaskName(task.created_at, task.item_count);
   }
   const name = String(task.model_name || "").trim();
-  const version = String(task.model_version || "").trim();
+  const version = displayModelVersion(task.model_version);
   return version ? `${name} · ${version}` : name;
+}
+
+// Tasks the modeling delivery creates carry the internal artifact id as their
+// version (kept for traceability); the name shows what the task is instead.
+function displayModelVersion(value) {
+  const version = String(value || "").trim();
+  if (/^artifact_[0-9a-f]{8,}-challenger-backtest$/i.test(version)) return "挑战者回测";
+  if (/^artifact_[0-9a-f]{8,}$/i.test(version)) return "交付验证";
+  return version;
 }
 
 function stampValidationBatchItemCount(itemCount) {
@@ -1692,7 +1815,11 @@ function setCreateStatus(message, kind = "info") {
 
 function setExecutionEnvironmentStatus(message, kind = "info") {
   const status = $("executionEnvironmentStatus");
-  status.textContent = message;
+  if (Array.isArray(message)) {
+    status.innerHTML = message.map((part) => `<span>${escapeHtml(part)}</span>`).join(" · ");
+  } else {
+    status.textContent = message;
+  }
   status.className = `status ${kind}`;
 }
 
@@ -1707,12 +1834,17 @@ function actionStatusPill(
     stopped: taskStopped(task),
     usesPlanWorkflow,
     workflowSnapshot: usesPlanWorkflow ? taskPlanWorkflowStatusSnapshot(task) : null,
+    // The word comes from the same resolver as the sidebar row and the rail.
+    status: task ? taskResolvedStatus(task) : null,
   });
 }
 
 function describeActionStatus(message, kind, detail) {
   if (!message) return "";
-  const compactDetail = compactActionStatusDetail(detail);
+  // typeof guard: test harnesses slice this function without its helper.
+  const compactDetail = typeof compactActionStatusDetail === "function"
+    ? compactActionStatusDetail(detail)
+    : String(detail || "").split(/\r?\n/, 1)[0].trim();
   if (compactDetail && compactDetail !== message) return `${message} · ${compactDetail}`;
   return message;
 }
@@ -1723,10 +1855,16 @@ function compactActionStatusDetail(value, maxChars = 180) {
   return `${firstLine.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
-function setActionErrorDetail(message = "", kind = "info") {
+function setActionErrorDetail(message = "", kind = "info", parts = null) {
   const detail = $("actionErrorDetail");
   if (!detail) return;
-  detail.textContent = message || "";
+  if (parts) {
+    // Each platform phrase keeps its own canonical text node so locale
+    // changes can translate and restore it independently of the separator.
+    detail.innerHTML = parts.map((part) => `<span>${escapeHtml(part)}</span>`).join(" · ");
+  } else {
+    detail.textContent = message || "";
+  }
   detail.setAttribute("role", kind === "error" ? "alert" : "status");
   detail.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
   detail.className = `action-error-detail ${kind === "error" ? "error" : ""}`.trim();
@@ -1749,10 +1887,22 @@ function setActionStatus(message, kind = "info", detail = "") {
   if (pill) {
     pill.textContent = info ? info.label : "";
     pill.className = `task-pill ${info ? info.tone : ""}`.trim();
+    if (pill.dataset) pill.dataset.status = info ? info.key : "";
     const hero = pill.closest(".task-hero");
     if (hero) hero.dataset.tone = info ? info.tone : "";
   }
-  setActionErrorDetail(describeActionStatus(message, kind, detail), kind);
+  liveAgentFace = agentFaceForStatus(info);
+  const statusFace = $("taskStatusFace");
+  if (statusFace) {
+    statusFace.hidden = !info;
+    statusFace.dataset.face = liveAgentFace;
+  }
+  syncLiveAgentFaces($("resultScrollContent"), liveAgentFace);
+  const compactDetail = typeof compactActionStatusDetail === "function"
+    ? compactActionStatusDetail(detail)
+    : String(detail || "").split(/\r?\n/, 1)[0].trim();
+  const detailParts = [message, compactDetail !== message ? compactDetail : ""].filter(Boolean);
+  setActionErrorDetail(describeActionStatus(message, kind, detail), kind, detailParts);
   requestAnimationFrame(syncTaskHeroGlassLayout);
 }
 
@@ -1871,9 +2021,21 @@ function setTaskFailureActionStatus(task = taskSession.task) {
   }
   const message = taskFailureActionStatusMessage(task);
   if (!message) return false;
-  const kind = task.status === "review_required" ? "success" : "error";
+  const kind = task.status === "review_required" ? "review" : "error";
   setActionStatus(taskFailureActionStatusTitle(task), kind, message);
   return true;
+}
+
+// Platform refusals that reach the user verbatim.
+const ACTION_ERROR_TEXT = [
+  [/validation input contract requires confirmation/i, "请先确认上面的验证字段，再运行。"],
+  [/task already has an active stage/i, "这个任务正在执行另一步，请等它结束。"],
+];
+
+function humanizeActionError(message) {
+  const text = String(message || "");
+  const match = ACTION_ERROR_TEXT.find(([pattern]) => pattern.test(text));
+  return match ? match[1] : text;
 }
 
 function actionFailureStatusTitle(actionId) {
@@ -1927,9 +2089,12 @@ function taskActionStatusSnapshot(task = taskSession.task) {
     return { message: "计划执行进行中。", kind: "busy", detail: "当前步骤：执行已确认计划。" };
   }
   if (task.active_job_kind === "validation_batch") {
+    // Batch 4: kind "info" (not "busy") so the pill resolves through the batch's
+    // worst-first aggregation like the sidebar; an all-pending running batch
+    // still reads 执行中 there.
     return {
       message: "批次模型验证进行中。",
-      kind: "busy",
+      kind: "info",
       detail: "平台正在按顺序处理批次中的模型。",
     };
   }
@@ -2013,28 +2178,14 @@ function taskActionStatusSnapshot(task = taskSession.task) {
     case "review_required":
       return {
         message: "验证完成，需人工复核。",
-        kind: "success",
+        kind: "review",
         detail: "已完成：全部验证与报告输出；当前：等待人工复核。",
       };
     default:
-      return { message: "", kind: "info", detail: task.status_message || "" };
+      // An unrecognised status still resolves to 状态未知 in the pill, as it
+      // does in the sidebar and rail.
+      return { message: task.status ? "状态未知。" : "", kind: "info", detail: task.status_message || "" };
   }
-}
-
-function statusLabel(status) {
-  return statusLabels[status] || status || "未知";
-}
-
-function planWorkflowCompletionIsUnproven(task, planSnapshot) {
-  if (planSnapshot || !taskUsesPlanRail(task)) return false;
-  return [
-    "scanned",
-    "configured",
-    "executed",
-    "writing_artifacts",
-    "succeeded",
-    "review_required",
-  ].includes(String(task?.status || ""));
 }
 
 function taskPlanWorkflowStatusSnapshot(task) {
@@ -2049,37 +2200,54 @@ function taskPlanWorkflowStatusSnapshot(task) {
   return workflowStatusSnapshot(task?.workflow_status);
 }
 
-function taskStatusLabel(task) {
-  if (taskStopped(task)) return "停止";
-  const planSnapshot = taskPlanWorkflowStatusSnapshot(task);
-  if (planSnapshot?.label) return planSnapshot.label;
-  if (
-    typeof planWorkflowCompletionIsUnproven === "function"
-    && planWorkflowCompletionIsUnproven(task, planSnapshot)
-  ) return "待确认";
-  return statusLabel(task?.status);
+// D16 (2026-10-14 redesign, batch 4): the sidebar row, the title pill and the
+// collapsed rail resolve a record through js/task-status.js. This gathers the
+// structured inputs; typeof guards keep the isolated harnesses that slice
+// these helpers working.
+function taskStatusContext(task) {
+  const usesPlanWorkflow = typeof taskUsesPlanRail === "function" && taskUsesPlanRail(task);
+  const selected = Boolean(task?.id) && task.id === taskSession.taskId;
+  const batchPayload = (id) => (
+    id && typeof validationBatchPanelController !== "undefined"
+      ? validationBatchPanelController.batchPayload?.(id) || null
+      : null
+  );
+  // A batch parent aggregates its items (worst first): from the loaded batch
+  // payload when it is the selected batch, otherwise from the task list's
+  // batch_summary, so a row's dot does not change when it is clicked. The
+  // projected child reads its own item, so the rail matches that model's chip.
+  const batch = batchPayload(task?.id)
+    || (task?.task_type === "validation_batch" && task.batch_summary ? task.batch_summary : null);
+  const parentBatch = !batch && task?.id && task.id === taskSession.modelId
+    ? batchPayload(taskSession.taskId)
+    : null;
+  return {
+    usesPlanWorkflow,
+    planStatus: taskPlanWorkflowStatusSnapshot(task),
+    busy: Boolean(task?.id && typeof taskBusyAction === "function" && taskBusyAction(task.id)),
+    openGate: Boolean(
+      usesPlanWorkflow && selected && typeof latestOpenGateMessage === "function" && latestOpenGateMessage(),
+    ),
+    batch,
+    batchItem: parentBatch?.items?.find((item) => item.childTaskId === task.id) || null,
+    batchStatus: parentBatch?.status || "",
+  };
 }
 
-function statusTone(status) {
-  if (status === "failed") return "danger";
-  if (status === "review_required") return "success";
-  if (status === "succeeded" || status === "executed") return "success";
-  if (status === "running" || status === "computing_metrics") return "run";
-  return "";
+function taskResolvedStatus(task) {
+  return resolveTaskStatus(task, taskStatusContext(task));
+}
+
+function taskStatusLabel(task) {
+  return taskResolvedStatus(task).label;
 }
 
 function taskStatusTone(task) {
-  if (taskStopped(task)) return "";
-  const planSnapshot = taskPlanWorkflowStatusSnapshot(task);
-  if (planSnapshot) return planSnapshot.tone || "";
-  if (
-    typeof planWorkflowCompletionIsUnproven === "function"
-    && planWorkflowCompletionIsUnproven(task, planSnapshot)
-  ) return "";
-  if (task?.status === "writing_artifacts") {
-    return task.active_job_kind === "report" ? "run" : "success";
-  }
-  return statusTone(task?.status);
+  return taskResolvedStatus(task).tone;
+}
+
+function taskStatusDot(task) {
+  return taskResolvedStatus(task).dot;
 }
 
 function notebookReproducibilityComplete(task = taskSession.task) {
@@ -2201,6 +2369,12 @@ function renderBusyActivity(lease, active) {
   collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
+  // A gate widget is drawn read-only while a driver turn holds the task; the
+  // widget controllers render the reply before releasing it, so the release
+  // itself must redraw the conversation (eval S6: the re-diagnosed join key
+  // picker stayed read-only until a page reload). The render is signature-
+  // guarded and only rebuilds when a gate's actionable state flips.
+  if (!active && typeof renderAgentConversation === "function") renderAgentConversation();
 }
 
 function claimBusy(actionId, message = "", taskId = taskSession.taskId, operation = actionId) {
@@ -2401,12 +2575,12 @@ function addExecutionEnvironmentRow(list, option, selected) {
   const subParts = [];
   if (option.note) subParts.push(option.note);
   if (unavailable) subParts.push("不可用");
-  const sub = subParts.join(" · ");
+  const sub = subParts.map((part) => `<span>${escapeHtml(part)}</span>`).join(" · ");
   row.innerHTML =
     '<span class="exec-env-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"></path></svg></span>' +
     '<span class="exec-env-row-text">' +
     `<span class="exec-env-row-title">${escapeHtml(title)}</span>` +
-    (sub ? `<span class="exec-env-row-sub">${escapeHtml(sub)}</span>` : "") +
+    (sub ? `<span class="exec-env-row-sub">${sub}</span>` : "") +
     "</span>";
   list.appendChild(row);
 }
@@ -2552,7 +2726,7 @@ function renderExecutionEnvironmentValidation(validation = {}) {
     validation.network_capability?.message || "",
     validation.network_capability?.next_action || "",
   ].filter(Boolean);
-  setExecutionEnvironmentStatus(parts.join(" · ") || "执行环境已保存。", validation.ok === false ? "error" : "success");
+  setExecutionEnvironmentStatus(parts.length ? parts : "执行环境已保存。", validation.ok === false ? "error" : "success");
 }
 
 async function loadExecutionEnvironmentSettings({ silent = false } = {}) {
@@ -2588,6 +2762,14 @@ async function saveExecutionEnvironmentSettings(settings) {
     renderExecutionEnvironmentValidation(payload.validation);
     if (!payload.validation) setExecutionEnvironmentStatus("执行环境已保存。", "success");
   } catch (error) {
+    if (error?.detail?.code === "execution_settings_unreadable") {
+      // Unreadable settings are repaired in steps: keep each explicit choice
+      // (never the placeholder) until every unknown field has been chosen.
+      const chosen = Object.fromEntries(Object.entries(settings || {}).filter(([, value]) => value !== "settings_unreadable"));
+      executionEnvironmentSettings = { ...executionEnvironmentSettings, ...chosen };
+      setExecutionEnvironmentStatus(error.detail.message, "error");
+      return;
+    }
     // Revert the optimistic checkmark to the last known-good selection.
     populateExecutionEnvironmentForm(executionEnvironmentSettings, executionEnvironmentOptions);
     setExecutionEnvironmentStatus(error.message || "执行环境保存失败。", "error");
@@ -2687,11 +2869,20 @@ function restoreAgentComposerPreferences() {
 }
 
 function saveAgentComposerPreferences() {
-  localStorage.setItem(agentComposerPreferenceStorageKey, JSON.stringify({
+  const preferences = {
     model_id: agentSelectedModelId || "",
     effort: normalizeAgentEffort(agentSelectedEffort),
     acceptance_mode: normalizeAgentAcceptanceMode(agentAcceptanceMode),
-  }));
+  };
+  // The in-memory copy is the seed for new tasks and for tasks without their
+  // own override; keep it in step with what was just chosen (home chips write
+  // here while no task is selected).
+  Object.assign(agentComposerPreferences, preferences);
+  try {
+    localStorage.setItem(agentComposerPreferenceStorageKey, JSON.stringify(preferences));
+  } catch (_) {
+    // Restricted browsers keep the in-memory preference for this session.
+  }
 }
 
 function loadAgentTaskComposerOverrides() {
@@ -3149,14 +3340,13 @@ async function applyProjectedValidationChild(childTaskId, { force = false } = {}
     return true;
   }
   const childChanged = taskSession.modelId !== normalizedChildId;
-  if (childChanged) rememberValidationView();
   const loadVersion = childChanged
     ? ++projectedChildContentLoadVersion
     : projectedChildContentLoadVersion;
   if (childChanged) {
     resetAgentTypingState();
     beginTaskContentLoad(normalizedChildId);
-    suppressAgentAutoScrollTaskId = taskSession.taskId;
+    taskSession.panels.scroll.suppressAutoScrollTaskId = taskSession.taskId;
     const scrollContent = $("resultScrollContent");
     if (scrollContent) scrollContent.scrollTop = 0;
   }
@@ -3189,15 +3379,16 @@ async function applyProjectedValidationChild(childTaskId, { force = false } = {}
       await nextAnimationFrame();
       await nextAnimationFrame();
       if (!taskRequests.accepts(request)) return false;
-      selectValidationView(activeValidationView, { remember: false });
+      // The report layer belongs to the model that was open; the new one starts in the conversation.
+      setReportDraftExpanded(false);
     }
     return true;
   } finally {
     const ownsCompletion = taskRequests.accepts(request);
     taskRequests.finish(request);
     if (ownsCompletion && loadVersion === projectedChildContentLoadVersion) {
-      if (suppressAgentAutoScrollTaskId === taskSession.taskId) {
-        suppressAgentAutoScrollTaskId = null;
+      if (taskSession.panels.scroll.suppressAutoScrollTaskId === taskSession.taskId) {
+        taskSession.panels.scroll.suppressAutoScrollTaskId = null;
       }
       finishTaskContentLoad(normalizedChildId);
     }
@@ -3269,17 +3460,15 @@ function beginTaskContentLoad(taskId) {
     window.clearTimeout(taskContentSettleTimer);
     taskContentSettleTimer = null;
   }
-  pendingTaskContentLoadTaskId = taskId || null;
+  taskSession.panels.scroll.pendingContentLoadTaskId = taskId || null;
   const workspace = $("validationWorkspace");
   workspace?.classList.remove("is-task-content-settling");
   workspace?.classList.toggle("is-task-content-loading", Boolean(taskId));
-  $("validationWorkspaceNav")?.querySelectorAll("button").forEach((button) => { button.disabled = Boolean(taskId); });
 }
 
-function finishTaskContentLoad(taskId = pendingTaskContentLoadTaskId) {
-  if (taskId && pendingTaskContentLoadTaskId !== taskId) return;
-  pendingTaskContentLoadTaskId = null;
-  $("validationWorkspaceNav")?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+function finishTaskContentLoad(taskId = taskSession.panels.scroll.pendingContentLoadTaskId) {
+  if (taskId && taskSession.panels.scroll.pendingContentLoadTaskId !== taskId) return;
+  taskSession.panels.scroll.pendingContentLoadTaskId = null;
   const workspace = $("validationWorkspace");
   if (!workspace) return;
   workspace.classList.remove("is-task-content-loading");
@@ -3299,8 +3488,7 @@ function clearTaskContentLoad() {
     window.clearTimeout(taskContentSettleTimer);
     taskContentSettleTimer = null;
   }
-  pendingTaskContentLoadTaskId = null;
-  $("validationWorkspaceNav")?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+  taskSession.panels.scroll.pendingContentLoadTaskId = null;
   const workspace = $("validationWorkspace");
   workspace?.classList.remove("is-task-content-loading");
   workspace?.classList.remove("is-task-content-settling");
@@ -3321,8 +3509,8 @@ function cancelResultScrollRestoreFrame() {
 
 function prepareResultScrollRestoreForTask(taskId) {
   if (!taskId) return;
-  pendingResultScrollRestoreTaskId = taskId;
-  suppressAgentAutoScrollTaskId = taskId;
+  taskSession.panels.scroll.pendingRestoreTaskId = taskId;
+  taskSession.panels.scroll.suppressAutoScrollTaskId = taskId;
   // Reset on every task switch so a stale `false` from the previous task
   // does not stop the next task's typewriter from auto-following.
   agentAutoScrollFollows = true;
@@ -3363,12 +3551,12 @@ async function restoreResultScrollPositionAfterRender(taskId = taskSession.taskI
   await nextAnimationFrame();
   await nextAnimationFrame();
   if (taskSession.taskId !== taskId) {
-    if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+    if (taskSession.panels.scroll.suppressAutoScrollTaskId === taskId) taskSession.panels.scroll.suppressAutoScrollTaskId = null;
     return;
   }
   applyResultScrollPosition(taskId);
-  if (pendingResultScrollRestoreTaskId === taskId) pendingResultScrollRestoreTaskId = null;
-  if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+  if (taskSession.panels.scroll.pendingRestoreTaskId === taskId) taskSession.panels.scroll.pendingRestoreTaskId = null;
+  if (taskSession.panels.scroll.suppressAutoScrollTaskId === taskId) taskSession.panels.scroll.suppressAutoScrollTaskId = null;
   syncAgentAutoScrollFollowFromCurrentPosition(taskId);
 }
 
@@ -3381,7 +3569,7 @@ function scheduleTaskHeroGlassState() {
 }
 
 function handleResultScroll() {
-  if (pendingResultScrollRestoreTaskId !== taskSession.taskId) {
+  if (taskSession.panels.scroll.pendingRestoreTaskId !== taskSession.taskId) {
     rememberResultScrollPosition();
   }
   scheduleTaskHeroGlassState();
@@ -3414,7 +3602,7 @@ function routeWorkspaceWheelToResult(event) {
   if (!scrollContent || !appShell || !target) return;
   if (event.defaultPrevented || event.ctrlKey) return;
   if (!appShell.contains(target)) return;
-  if (scrollTargetIsWithin(target, "#taskSidebar, #progressRail, #workflowStepper")) return;
+  if (scrollTargetIsWithin(target, "#taskSidebar, #progressRail, #workflowStepper, #taskInspector")) return;
   if (scrollTargetIsWithin(target, "#resultScrollContent")) return;
   if (scrollTargetIsWithin(target, "dialog, textarea, select, input, .metric-table-scroll")) return;
 
@@ -3438,6 +3626,12 @@ function syncTaskHeroGlassLayout() {
   const headHeight = head.getBoundingClientRect().height;
   if (Number.isFinite(headHeight) && headHeight > 0) {
     workspace.style.setProperty("--workspace-head-space", `${Math.ceil(headHeight)}px`);
+    // The plan rail floats below the header row, which can wrap to two lines.
+    // Measured to the row's bottom so the folded-out details card (a floating
+    // panel on the left) does not push the rail down.
+    const row = head.querySelector(".task-hero-top");
+    const rowBottom = row ? row.getBoundingClientRect().bottom - head.getBoundingClientRect().top : headHeight;
+    $("validationWorkspace")?.style.setProperty("--task-head-height", `${Math.ceil(rowBottom > 0 ? rowBottom : headHeight)}px`);
   }
   syncAgentComposerClearance();
   updateTaskHeroGlassState({ measureScroll: true });
@@ -3467,7 +3661,7 @@ function setTaskHeroCollapsed(collapsed) {
 function handleTaskHeroToggle(event) {
   // Interactive descendants (path-copy button, form controls) keep their own
   // behaviour instead of folding the card.
-  if (event.target.closest("a[href], button:not(#taskHeroToggle), [data-copy], input, select, textarea, .task-hero-batch-switcher")) {
+  if (event.target.closest("a[href], button:not(#taskHeroToggle), [data-copy], input, select, textarea, .task-hero-batch-switcher, .task-hero-top-right, .task-thread-filter")) {
     return;
   }
   // Don't fold when the user is finishing a text selection inside the card.
@@ -3532,21 +3726,29 @@ function workflowStepStatus(index, activeIndex, task = taskSession.task) {
     if (step.id === failedStepId) return "failed";
     if (failedIndex >= 0) return index < failedIndex ? "succeeded" : "pending";
   }
+  // A user-stopped task parks the step it stopped on (D16: 已停止 on the rail
+  // as in the title), instead of showing it as an untouched pending step.
+  if (index === activeIndex && taskStopped(task)) return "stopped";
+  // D6: the step the platform waits for the user to start (待继续) carries the
+  // review state, so the rail shows the 等你 face on it as the title does.
+  const waitsOnUser = typeof taskResolvedStatus === "function"
+    && taskResolvedStatus(task)?.key === "awaiting_next";
+  const nextOrPending = (nextIndex) => (index === nextIndex && waitsOnUser ? "review" : "pending");
   if (status === "created") return "pending";
   if (status === "scanned" || status === "configured") {
-    return index < 1 ? "succeeded" : "pending";
+    return index < 1 ? "succeeded" : nextOrPending(1);
   }
   if (status === "running") {
     return index < 1 ? "succeeded" : index === 1 ? "running" : "pending";
   }
   if (status === "executed") {
-    return index < 2 ? "succeeded" : "pending";
+    return index < 2 ? "succeeded" : nextOrPending(2);
   }
   if (status === "computing_metrics") {
     return index < 2 ? "succeeded" : index === 2 ? "running" : "pending";
   }
   if (status === "writing_artifacts") {
-    return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction(task) === "report" ? "running" : "pending";
+    return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction(task) === "report" ? "running" : nextOrPending(3);
   }
   if (status === "review_required") return "succeeded";
   if (status === "succeeded") return "succeeded";
@@ -3572,24 +3774,65 @@ function completedReportReadyForDownloads(step, task = workbenchTask()) {
   );
 }
 
+// File-type icons (brand/file-icons/*.svg, css/workbench-shell.css): a proper
+// document icon with a coloured Word / Excel badge (2026-10-19 user feedback).
+const RAIL_ARTIFACT_ICONS = {
+  doc: '<span class="file-type-icon rail-artifact-icon" data-kind="word" aria-hidden="true"></span>',
+  sheet: '<span class="file-type-icon rail-artifact-icon is-sheet" data-kind="excel" aria-hidden="true"></span>',
+};
+
+// Mockup rail (2026-10-19): finished reports are listed as 产物 rows. The
+// button words stay "预览 / 下载Word / 下载Excel" because the Agent's
+// report-ready message points the user at exactly these labels.
 function stepDownloadActionsHtml(step) {
   if (!completedReportReadyForDownloads(step)) return "";
   return [
     '<div class="step-download-actions">',
+    '<p class="rail-artifacts-label">产物</p>',
+    '<div class="rail-artifact">',
+    RAIL_ARTIFACT_ICONS.doc,
+    '<span class="rail-artifact-name"><b>验证报告</b><small>Word</small></span>',
     '<button class="button compact step-action-button secondary" type="button" data-step-action="previewWordReport">',
     "预览",
     "</button>",
     '<button class="button compact step-action-button primary word" type="button" data-step-action="downloadWordReport">',
     "下载Word",
     "</button>",
+    "</div>",
+    '<div class="rail-artifact">',
+    RAIL_ARTIFACT_ICONS.sheet,
+    '<span class="rail-artifact-name"><b>指标明细</b><small>Excel</small></span>',
     '<button class="button compact step-action-button excel" type="button" data-step-action="downloadExcelAnalysis">',
     "下载Excel",
     "</button>",
     "</div>",
+    "</div>",
   ].join("");
 }
 
-function stepActionButtonHtml(step) {
+// Keep the existing readiness checks and actions while placing their controls
+// in the header's dedicated output popover instead of inside the progress rail.
+function renderTaskArtifacts() {
+  const body = $("taskArtifactsBody");
+  if (!body) return;
+  const task = workbenchTask();
+  const reportStep = workflowSteps.find((step) => step.action === "report");
+  const html = task?.task_type === "validation" && reportStep ? stepDownloadActionsHtml(reportStep) : "";
+  body.dataset.taskId = workbenchTaskId() || "";
+  setHtmlIfChanged(body, html);
+  workbenchChrome.syncArtifacts();
+}
+
+// The PMML run needs confirmed validation fields; without them the click
+// only came back as an English 422 nobody saw (eval S10).
+function stepActionBlockedReason(actionId) {
+  if (actionId !== "notebook" || !usesPmmlScoringWorkflow()) return "";
+  const taskId = workbenchTaskId() || taskSession.taskId || "";
+  if (!taskSession.panels.contract.value || taskSession.panels.contract.taskId !== taskId) return "";
+  return taskSession.panels.contract.value.status === "ready" ? "" : "请先确认上面的验证字段";
+}
+
+function stepActionButtonHtml(step, stepStatus = "") {
   if (selectedTaskIsAgentMode()) return "";
   if (!step.action || completedReportReadyForDownloads(step)) return "";
   const selectedBusy = selectedTaskIsBusy();
@@ -3597,7 +3840,8 @@ function stepActionButtonHtml(step) {
   const isStopAction = Boolean(stopAction);
   const action = stopAction || step.action;
   const canRunAction = isStopAction || canRunStepAction(step.action);
-  const disabled = !taskSession.taskId || (selectedBusy && !isStopAction) || !canRunAction;
+  const blockedReason = isStopAction ? "" : stepActionBlockedReason(step.action);
+  const disabled = !taskSession.taskId || (selectedBusy && !isStopAction) || !canRunAction || Boolean(blockedReason);
   const recommended = !isStopAction && recommendedAction() === step.action;
   const tone = isStopAction ? "danger" : recommended ? "primary" : "secondary";
   const label = isStopAction ? "停止" : step.actionLabel || "执行";
@@ -3606,7 +3850,9 @@ function stepActionButtonHtml(step) {
     : (selectedBusy && !isStopAction)
       ? "当前任务正在执行"
       : !canRunAction
-        ? "请先完成上一步"
+        ? (stepStatus === "succeeded" ? "这一步已完成" : "请先完成上一步")
+      : blockedReason
+        ? blockedReason
       : isStopAction
         ? "停止当前执行"
         : "";
@@ -3649,16 +3895,16 @@ function notebookStepsForRail() {
     ? usesPmmlScoringWorkflow()
     : Number(taskSession.task?.validation_workflow_version) === 2;
   if (pmmlWorkflow) {
-    return latestNotebookSteps.filter((step) => {
+    return taskSession.panels.notebook.steps.filter((step) => {
       const id = String(step?.id || "");
       return id.startsWith("system-repro-");
     });
   }
-  return latestNotebookSteps.filter((step) => stepWorkflowStage(step) === "notebook");
+  return taskSession.panels.notebook.steps.filter((step) => stepWorkflowStage(step) === "notebook");
 }
 
 function metricStepsForRail() {
-  return latestNotebookSteps.filter((step) => stepWorkflowStage(step) === "metrics");
+  return taskSession.panels.notebook.steps.filter((step) => stepWorkflowStage(step) === "metrics");
 }
 
 const v2WorkflowSubstepPlans = {
@@ -3689,7 +3935,7 @@ const v2WorkflowSubstepPlans = {
 function v2WorkflowSubsteps(stageId, parentStatus = "pending") {
   const plannedSteps = v2WorkflowSubstepPlans[stageId] || [];
   return plannedSteps.map((plannedStep, index) => {
-    const existingStep = latestNotebookSteps.find((step) => step?.id === plannedStep.id) || null;
+    const existingStep = taskSession.panels.notebook.steps.find((step) => step?.id === plannedStep.id) || null;
     const step = {
       ...(existingStep || {}),
       ...plannedStep,
@@ -3717,7 +3963,7 @@ function v2WorkflowSubsteps(stageId, parentStatus = "pending") {
 }
 
 function workflowStageCompleteFromEvidence(stepId) {
-  if (stepId === "scan") return latestNotebookSteps.length > 0;
+  if (stepId === "scan") return taskSession.panels.notebook.steps.length > 0;
   const stageSteps = stepId === "notebook"
     ? notebookStepsForRail()
     : stepId === "metrics"
@@ -3892,12 +4138,12 @@ function mergePendingSystemSteps(notebookSteps = []) {
 }
 
 function appendPendingReproducibilitySteps() {
-  latestNotebookSteps = mergePendingSystemSteps(latestNotebookSteps);
+  taskSession.panels.notebook.steps = mergePendingSystemSteps(taskSession.panels.notebook.steps);
   renderWorkflowStepper();
 }
 
 function appendPendingMetricSteps() {
-  latestNotebookSteps = mergePendingSystemSteps(latestNotebookSteps);
+  taskSession.panels.notebook.steps = mergePendingSystemSteps(taskSession.panels.notebook.steps);
   renderWorkflowStepper();
 }
 
@@ -3934,16 +4180,16 @@ function formatStepElapsed(step, nextStep = null) {
 }
 
 function stepAfterInLatestNotebookSteps(step) {
-  if (!step || !Array.isArray(latestNotebookSteps)) return null;
-  const index = latestNotebookSteps.findIndex((candidate) => (
+  if (!step || !Array.isArray(taskSession.panels.notebook.steps)) return null;
+  const index = taskSession.panels.notebook.steps.findIndex((candidate) => (
     candidate === step || (step.id && candidate.id === step.id)
   ));
-  return index >= 0 ? latestNotebookSteps[index + 1] || null : null;
+  return index >= 0 ? taskSession.panels.notebook.steps[index + 1] || null : null;
 }
 
 const expandedValidationStages = new Map();
 function renderNotebookStepRail(
-  notebookSteps = latestNotebookSteps,
+  notebookSteps = taskSession.panels.notebook.steps,
   title = "分段进度",
   parentNumber = "",
   parentStatus = "",
@@ -3963,9 +4209,7 @@ function renderNotebookStepRail(
     ? tones.findIndex((tone) => tone !== "succeeded" && tone !== "failed")
     : -1;
   const expansionKey = `${workbenchTaskId()}:${stageId}`;
-  const hasException = tones.some((tone) => ["failed", "review", "stopped"].includes(tone));
-  const expanded = expandedValidationStages.get(expansionKey)
-    ?? (hasException || ["running", "review", "failed", "stopped"].includes(parentStatus));
+  const expanded = expandedValidationStages.get(expansionKey) ?? true;
   const completed = tones.filter((tone) => tone === "succeeded").length;
   return [
     `<details class="notebook-step-group" data-validation-stage-expansion="${escapeHtml(expansionKey)}"${expanded ? " open" : ""}>`,
@@ -4025,17 +4269,33 @@ function refreshWorkflowStepperElapsedTimes() {
   });
 }
 
+// D16 (batch 4): the collapsed rail capsule reads the rail record's resolved
+// status from this attribute (js/workbench-chrome.js); step classes only give
+// the position.
+function syncRailStatus() {
+  const stepper = $("workflowStepper");
+  if (!stepper?.dataset) return;
+  const task = workbenchTask();
+  const key = task ? taskResolvedStatus(task).key : "";
+  if ((stepper.dataset.railStatus || "") !== key) stepper.dataset.railStatus = key;
+}
+
 function renderWorkflowStepper({ force = false } = {}) {
+  renderTaskArtifacts();
   const progressRail = $("progressRail");
   const railTitle = document.querySelector("#progressRail .step-rail-head h3");
   progressRail?.classList.remove("hidden");
   if (planRailController.render({ force, renderSignatures })) {
+    syncRailStatus();
     return;
   }
-  progressRail?.setAttribute("aria-label", "验证步骤");
+  syncRailStatus();
+  if (progressRail && progressRail.getAttribute("aria-label") !== "验证步骤") {
+    progressRail.setAttribute("aria-label", "验证步骤");
+  }
   planRailController.clearRetryPanel();
   planRailController.clearDriverActionsPanel();
-  if (railTitle) railTitle.textContent = "验证步骤";
+  setTextIfChanged(railTitle, "验证步骤");
   const task = workbenchTask();
   const nextSignature = workflowStepperSignature(task);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
@@ -4051,7 +4311,9 @@ function renderWorkflowStepper({ force = false } = {}) {
   const stepActionIds = ["scan", "notebook", "metrics", "report"];
   const renderTaskId = workbenchTaskId() || "";
   const previousScrollTop = stepper.dataset.taskId === renderTaskId ? stepper.scrollTop : 0;
-  stepper.innerHTML = "";
+  // Built off-screen and swapped in only when it differs: forced renders
+  // (renderAll on every poll) otherwise rebuilt identical steps each second.
+  const nextSteps = document.createElement("div");
   workflowSteps.forEach((step, index) => {
     if (step.action && !stepActionIds.includes(step.action)) return;
     const displayStep = workflowStepForTask(step, task);
@@ -4080,13 +4342,15 @@ function renderWorkflowStepper({ force = false } = {}) {
       : [];
     item.innerHTML = [
       '<div class="step-head">',
+      // The step waiting on the user shows the amber 等你 mark; the rail carries
+      // no mascot (2026-10-19 user feedback).
       stepCheckerHtml(stepStatus),
       `<span class="step-number">${index + 1}</span>`,
       '<span class="step-copy">',
       `<strong class="step-title">${escapeHtml(displayStep.title)}</strong>`,
       `<small class="step-hint">${escapeHtml(displayStep.hint)}</small>`,
       "</span>",
-      stepActionButtonHtml(displayStep),
+      stepActionButtonHtml(displayStep, stepStatus),
       "</div>",
       usesPmmlScoringWorkflow(task)
         ? renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)
@@ -4096,12 +4360,15 @@ function renderWorkflowStepper({ force = false } = {}) {
       !usesPmmlScoringWorkflow(task) && step.id === "metrics"
         ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics")
         : "",
-      stepDownloadActionsHtml(displayStep),
     ].join("");
-    stepper.appendChild(item);
+    nextSteps.appendChild(item);
   });
-  stepper.dataset.taskId = renderTaskId;
-  stepper.scrollTop = previousScrollTop;
+  if (stepper.dataset.taskId !== renderTaskId || (nextSteps.innerHTML !== stepper.innerHTML
+    && localizeHtml(nextSteps.innerHTML, { context: stepper }) !== stepper.innerHTML)) {
+    stepper.replaceChildren(...nextSteps.childNodes);
+  }
+  if (stepper.dataset.taskId !== renderTaskId) stepper.dataset.taskId = renderTaskId;
+  if (stepper.scrollTop !== previousScrollTop) stepper.scrollTop = previousScrollTop;
   refreshWorkflowStepperElapsedTimes();
 }
 
@@ -4229,24 +4496,27 @@ function taskRowAriaLabel(task) {
   const createdText = formatDate(task.created_at || task.updated_at);
   return [
     taskDisplayName(task),
-    taskStatusLabel(task),
-    `${ownerLabel} ${task.validator || "-"}`,
-    createdText ? `创建于 ${createdText}` : "",
+    localizeText(taskStatusLabel(task)),
+    `${localizeText(ownerLabel)} ${task.validator || "-"}`,
+    createdText ? localizeText(`创建于 ${createdText}`) : "",
   ].filter(Boolean).join("，");
 }
 
 // Builds the innerHTML for the `.task-row` button. Shared by fresh creation and
 // in-place content refresh so both paths stay byte-for-byte identical.
+// D6 (batch 4): a status dot replaces the word pill (blue pulse running, amber
+// waiting on the user, red failed, nothing otherwise); the word lives in the
+// row's aria-label and the hover card.
 function taskRowInnerHtml(task) {
-  const tone = taskStatusTone(task);
+  const dot = taskStatusDot(task);
   const displayName = taskDisplayName(task);
   return [
     '<span class="task-row-top">',
     '<span class="task-row-title">',
     taskKindIconHtml(task),
-    `<strong class="task-row-name">${escapeHtml(displayName)}</strong>`,
+    `<strong class="task-row-name" translate="no">${escapeHtml(displayName)}</strong>`,
     "</span>",
-    `<span class="task-row-badges"><span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span></span>`,
+    dot && dot !== "none" ? `<span class="task-status-dot ${escapeHtml(dot)}" aria-hidden="true"></span>` : "",
     "</span>",
   ].join("");
 }
@@ -4302,7 +4572,10 @@ function updateTaskRowShell(item, task) {
   // The click closure captures the task object; refresh it every tick so a
   // click always requests the latest task snapshot through the workspace
   // navigation guard even when the visible signature is unchanged.
-  if (row) row.onclick = () => requestTaskSelection(task);
+  if (row) {
+    row.onclick = () => requestTaskSelection(task);
+    row.setAttribute("aria-label", taskRowAriaLabel(task));
+  }
   const deleteButton = item.querySelector(".delete-task-button");
   if (deleteButton) {
     deleteButton.onclick = (event) => {
@@ -4316,7 +4589,6 @@ function updateTaskRowShell(item, task) {
   if (row) {
     row.className = "task-row" + (task.id === taskSession.taskId ? " selected" : "");
     row.setAttribute("aria-current", task.id === taskSession.taskId ? "true" : "false");
-    row.setAttribute("aria-label", taskRowAriaLabel(task));
     row.innerHTML = taskRowInnerHtml(task);
   }
 }
@@ -4380,12 +4652,59 @@ function renderTaskSnapshot() {
     taskKindIconHtml,
     runModeLabel,
   });
+  // The title capsule leads with the task kind's glyph, like the sidebar row.
+  setHtmlIfChanged($("currentTaskGlyph"), taskSession.task ? taskKindIconHtml(taskSession.task) : "");
+  // The capsule may cut a long name; the full name stays one hover away.
+  const title = $("currentTaskTitle");
+  title?.setAttribute("translate", taskSession.task ? "no" : "yes");
+  const fullTitle = String(title?.textContent || "").trim();
+  if (title && title.title !== fullTitle) title.title = fullTitle;
 }
 
 // Computes the ordered group plan for the current group mode: an array of
 // { key, name, tasks } entries. Plain (ungrouped) mode returns a single
 // synthetic group so the reconciler has one uniform shape to consume.
+const TASK_ATTENTION_GROUPS = [
+  { key: "attention:needs_you", name: "需要你" },
+  { key: "attention:running", name: "进行中" },
+  { key: "attention:recent", name: "最近" },
+];
+
+// Mockup sidebar: tasks waiting on the user first, then running ones, then the
+// rest, each keeping the chosen sort. Reads the same resolved status as the
+// row's dot, so a task never sits under a heading its dot contradicts.
+function taskAttentionGroupKey(task) {
+  // Grouped from the list payload only: an open gate is only known for the
+  // selected task, and a row must not jump groups when it is clicked.
+  // The plan rail's live snapshot and a loaded batch payload exist only for
+  // the selected task too, so the group reads the list's workflow_status and
+  // batch_summary instead.
+  const context = typeof taskStatusContext === "function" ? taskStatusContext(task) : {};
+  const tone = resolveTaskStatus(task, {
+    ...context,
+    openGate: false,
+    planStatus: workflowStatusSnapshot(task?.workflow_status),
+    batch: task?.task_type === "validation_batch" && task.batch_summary ? task.batch_summary : null,
+    batchItem: null,
+    batchStatus: "",
+  })?.tone;
+  if (tone === "review" || tone === "fail") return "attention:needs_you";
+  if (tone === "run") return "attention:running";
+  return "attention:recent";
+}
+
 function taskListGroupPlan(tasks) {
+  if (taskGroupMode === "attention") {
+    const buckets = new Map(TASK_ATTENTION_GROUPS.map((group) => [group.key, []]));
+    for (const task of tasks) buckets.get(taskAttentionGroupKey(task)).push(task);
+    // Every status group is listed, so the user sees the categories at once;
+    // an empty one says so (2026-10-19 user feedback).
+    return TASK_ATTENTION_GROUPS.map((group) => ({
+      ...group,
+      tasks: buckets.get(group.key),
+      showEmpty: true,
+    }));
+  }
   if (taskGroupMode === "validator") {
     const groups = new Map();
     for (const task of tasks) {
@@ -4438,9 +4757,14 @@ function reconcileTaskListGroups(list, plan) {
       existingHeadings.set(node.dataset.groupKey, node);
     }
   }
-  // Drop any stale empty-state placeholder left over from a previous render.
+  // Drop any stale empty-state placeholder left over from a previous render;
+  // per-group "没有对应的任务" lines are kept by key and reused below.
+  const existingGroupEmpties = new Map();
   for (const node of Array.from(list.children)) {
     if (node.classList && node.classList.contains("empty-state")) node.remove();
+    if (node.classList && node.classList.contains("task-group-empty") && node.dataset.groupKey) {
+      existingGroupEmpties.set(node.dataset.groupKey, node);
+    }
   }
   const keptTaskIds = new Set();
   let cursor = null;
@@ -4452,17 +4776,32 @@ function reconcileTaskListGroups(list, plan) {
         heading.className = "task-group-title";
         heading.dataset.groupKey = group.key;
       }
-      if (heading.textContent !== group.name) heading.textContent = group.name;
+      setTextIfChanged(heading, group.name);
       const desiredNext = cursor ? cursor.nextSibling : list.firstChild;
       if (heading !== desiredNext) list.insertBefore(heading, desiredNext);
       existingHeadings.delete(group.key);
       cursor = heading;
     }
+    if (group.showEmpty && !group.tasks.length) {
+      let empty = existingGroupEmpties.get(group.key);
+      if (!empty) {
+        empty = document.createElement("div");
+        empty.className = "task-group-empty";
+        empty.dataset.groupKey = group.key;
+        empty.textContent = "没有对应的任务";
+      }
+      const desiredNext = cursor ? cursor.nextSibling : list.firstChild;
+      if (empty !== desiredNext) list.insertBefore(empty, desiredNext);
+      existingGroupEmpties.delete(group.key);
+      cursor = empty;
+      continue;
+    }
     for (const task of group.tasks) keptTaskIds.add(task.id || "");
     cursor = reconcileTaskRows(list, group.tasks, { anchor: cursor, removeMissing: false });
   }
-  // Remove headings for groups that disappeared.
+  // Remove headings and empty lines for groups that disappeared or filled.
   for (const heading of existingHeadings.values()) heading.remove();
+  for (const empty of existingGroupEmpties.values()) empty.remove();
   // Remove task-row shells whose task is no longer present anywhere in the plan.
   for (const node of Array.from(list.children)) {
     if (
@@ -4476,6 +4815,13 @@ function reconcileTaskListGroups(list, plan) {
 }
 
 function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } = {}) {
+  // The home page's 接着做 list follows the same task list and status words;
+  // it is only worked out while the home page shows (renderAll renders the
+  // workspace first, so returning home refreshes it).
+  if ($("validationWorkspace")?.classList.contains("is-empty")) {
+    homeComposer.renderContinue();
+    if (typeof syncHomeComposerChips === "function") syncHomeComposerChips();
+  }
   const nextSignature = taskListSignature(tasks, taskCache.length);
   if (!force && renderSignatures.taskList === nextSignature) return;
   renderSignatures.taskList = nextSignature;
@@ -4567,7 +4913,6 @@ async function requestTaskSelection(task) {
 }
 
 function selectTask(task) {
-  rememberValidationView();
   rememberResultScrollPosition();
   if (taskSession.taskId === task.id && taskSession.task) {
     taskSession.refreshTask(task);
@@ -4603,6 +4948,7 @@ function selectTask(task) {
   const validationBatchLoadPromise = validationBatchPanelController.selectTask(task);
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   void strategyHistoryMappingPanel.selectTask(task);
+  if (typeof dataHistoryMappingPanel !== "undefined") void dataHistoryMappingPanel.selectTask(task);
   runAction(async () => {
     try {
       renderTaskList();
@@ -4637,7 +4983,7 @@ function deselectCurrentTask() {
   rememberSelectedTaskId(null);
   validationBatchPanelController.clear();
   dataWorkspacePanel.clear();
-  latestNotebookSteps = [];
+  taskSession.panels.notebook.steps = [];
   taskSession.replaceMessages(taskRequests.capture(), []);
   strategyCandidateLabController.clear();
   resetAgentComposerToGlobalDefaults();
@@ -4648,24 +4994,29 @@ function deselectCurrentTask() {
 }
 
 function renderMetricPreview(
-  metricValues = lastMetricValues,
+  metricValues = taskSession.panels.metrics.values,
   workbookSource = null,
-  sections = lastMetricTableSections,
+  sections = taskSession.panels.metrics.tableSections,
 ) {
+  const metrics = taskSession.panels.metrics;
   renderMetricSectionVisibility();
-  lastMetricValues = metricValues || {};
-  lastMetricValuesTaskId = taskSession.taskId || null;
-  lastMetricTableSections = Array.isArray(sections) ? sections : [];
+  metrics.values = metricValues || {};
+  metrics.valuesTaskId = taskSession.taskId || null;
+  metrics.tableSections = Array.isArray(sections) ? sections : [];
 
   // Identical metric payloads (same taskId + same values + same sections) must
   // leave the existing DOM intact so charts and KPI cards do not replay their
   // animations or drop hover state during the per-second polling loop.
-  const previewTaskId = lastMetricValuesTaskId || "";
+  const previewTaskId = metrics.valuesTaskId || "";
   const emptyMessage = metricPreviewEmptyMessage();
+  const scoreTile = metrics.scoreEvidence && metrics.scoreEvidence.taskId === workbenchTaskId()
+    ? scoreEvidenceTile(metrics.scoreEvidence)
+    : null;
+  const cardTitle = String(workbenchTask()?.model_name || "");
   const nextSignature = metricPreviewSignature(
     previewTaskId,
-    lastMetricValues,
-    lastMetricTableSections,
+    metrics.values,
+    [metrics.tableSections, scoreTile, cardTitle],
     emptyMessage,
   );
   if (
@@ -4687,7 +5038,7 @@ function renderMetricPreview(
   // its matching KPI card. The original section is dropped from the
   // visible list (we render 6 sections, not 7).
   let rocCurves = null;
-  const visibleSections = lastMetricTableSections.filter((section) => {
+  const visibleSections = metrics.tableSections.filter((section) => {
     const tables = Array.isArray(section && section.tables) ? section.tables : [];
     const isRocSection =
       (tables[0] && tables[0].layout === "roc_ks_curve")
@@ -4703,19 +5054,43 @@ function renderMetricPreview(
     renderMetricPreviewEmpty(emptyMessage);
     return;
   }
-  const sectionHtml = visibleSections
+  // D12 (batch 6a) + 2026-10-19 user feedback: one result card in the
+  // conversation, everything open and nothing twice. The card's summary
+  // already shows the overall KPIs, the monthly trend and the stress test, so
+  // only the other sections follow it (the stress section keeps its coverage
+  // table; the ROC/KS curves stand on their own).
+  const summarizedLayouts = new Set(["kpi_cards", "trend_table"]);
+  const detailSections = metrics.tableSections
+    .map((section) => {
+      const tables = Array.isArray(section?.tables) ? section.tables : [];
+      if (tables.some((table) => summarizedLayouts.has(table?.layout))) return null;
+      if (String(section?.title || "").includes("压力测试")) {
+        const coverage = tables.filter((table) => !(table?.headers || []).some((header) => /delta/i.test(String(header))));
+        return coverage.length
+          ? { ...section, title: coverage.length === 1 ? (coverage[0].title || section.title) : section.title, tables: coverage }
+          : null;
+      }
+      return section;
+    })
+    .filter(Boolean);
+  const sectionHtml = detailSections
     .map((section, index) => renderMetricTableSection(section, index, { rocCurves, animate: shouldAnimateMetricBars }))
     .join("");
-  $("metricPreview").innerHTML = sectionHtml;
+  $("metricPreview").innerHTML = validationMetricCardHtml(
+    validationMetricCardModel(metrics.tableSections),
+    { title: cardTitle, scoreTile, detailsHtml: sectionHtml },
+  );
   attachRocInteractions($("metricPreview"));
   attachMetricTooltip($("metricPreview"));
+  attachResultCardInteractions($("resultScrollContent"));
   if (shouldAnimateMetricBars) {
     renderSignatures.metricPreviewAnimatedTaskId = previewTaskId;
   }
 }
 
 function currentMetricPreviewHasValues(taskId = taskSession.taskId) {
-  return lastMetricValuesTaskId === taskId && lastMetricTableSections.length > 0;
+  const metrics = taskSession.panels.metrics;
+  return metrics.valuesTaskId === taskId && metrics.tableSections.length > 0;
 }
 
 function roleCounts(artifacts) {
@@ -4767,28 +5142,62 @@ function renderScanResult(result, notebookCells = []) {
             : check.status === "warning"
               ? "提示"
               : "通过";
+          // Mockup step rows (2026-10-19): a round mark carries the state —
+          // check, exclamation or cross — and the status word stays for
+          // screen readers.
+          const mark = check.status === "error" ? "×" : check.status === "warning" ? "!" : "✓";
           return [
             `<div class="preflight-check-item ${tone}${contractClass}" data-check-id="${escapeHtml(check.id || "")}">`,
-            `<span class="pill ${tone}">${escapeHtml(statusText)}</span>`,
+            `<span class="preflight-check-mark" aria-hidden="true">${mark}</span>`,
+            `<span class="visually-hidden">${escapeHtml(statusText)}</span>`,
             `<strong>${escapeHtml(check.label || check.id || "检查项")}</strong>`,
-            `<small>${escapeHtml(check.message || "")}</small>`,
+            `<small>${escapeHtml(typeof scanCheckMessage === "function" ? scanCheckMessage(check) : check.message || "")}</small>`,
             "</div>",
           ].join("");
         }),
         "</div>",
       ].join("")
     : "";
-  $("scanSummary").className = "result-summary";
-  $("scanSummary").innerHTML = [
+  if ($("scanSummary").className !== "result-summary") $("scanSummary").className = "result-summary";
+  setHtmlIfChanged($("scanSummary"), [
     `<strong>识别到 ${artifacts.length} 个材料文件。</strong>`,
     `<div class="chip-row">${materialChecks}</div>`,
     preflightChecks,
-  ].join("");
+  ].join(""));
   renderValidationInputContract(result.validation_input_contract || null, {
     taskId: workbenchTaskId(),
+    source: "scan",
   });
+  syncScanContractCheck();
   updateAgentScanSectionVisibility();
   renderNotebookSteps(result.notebook_steps || [], result.notebook_cells || notebookCells);
+}
+
+// The scan card's 验证输入契约 line was written at scan time ("等待用户确认");
+// once the fields are confirmed it says so (eval S10). Used both when the
+// card is built and when the contract arrives later, so polls write the same
+// text and leave the card alone.
+const SCAN_CONTRACT_CONFIRMED_TEXT = "验证字段已确认。";
+
+function scanContractConfirmed() {
+  const taskId = workbenchTaskId() || taskSession.taskId || "";
+  return taskSession.panels.contract.taskId === taskId && taskSession.panels.contract.value?.status === "ready";
+}
+
+function scanCheckMessage(check) {
+  if (check?.id === "validation_input_contract" && check.status !== "error" && scanContractConfirmed()) {
+    return SCAN_CONTRACT_CONFIRMED_TEXT;
+  }
+  return check?.message || "";
+}
+
+function syncScanContractCheck() {
+  const item = document.querySelector('#scanSummary [data-check-id="validation_input_contract"]');
+  const line = item?.querySelector("small");
+  // Only the confirmed wording is patched in; the card's own rebuild owns
+  // every other state (no extra attributes, so polls compare equal).
+  if (!line || item.classList.contains("error") || !scanContractConfirmed()) return;
+  setTextIfChanged(line, SCAN_CONTRACT_CONFIRMED_TEXT);
 }
 
 function validationContractCandidates(contract, key) {
@@ -4810,7 +5219,10 @@ function validationContractSelectHtml(contract, key, label, { requireExplicit = 
     `<label>${escapeHtml(label)}<select name="${escapeHtml(key)}"${requireExplicit ? " required" : ""}>`,
     requireExplicit ? '<option value="" selected disabled>请选择候选值</option>' : "",
     ...values.map((value, index) => {
-      const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+      // Structured candidates read as business words, not JSON (eval S1/S2).
+      const text = value && typeof value === "object"
+        ? (typeof readableValueText === "function" ? readableValueText(value) : JSON.stringify(value))
+        : String(value);
       return `<option value="${index}">${escapeHtml(text)}</option>`;
     }),
     "</select></label>",
@@ -4844,6 +5256,18 @@ function renderValidationInputContract(record, options = {}) {
   );
   const panel = $(panelId);
   if (!panel) return;
+  // The scan result carries the contract as it was at scan time; once the
+  // contract endpoint's record is on screen for this task, an older copy
+  // from the scan must not replace it (polling ran both, so the confirmed
+  // panel flashed back to the pending form every second).
+  if (
+    options.source === "scan"
+    && panel.dataset.renderSource === "api"
+    && panel.dataset.renderTaskId === taskId
+    && !panel.classList.contains("hidden")
+  ) {
+    return;
+  }
   const batchMode = Boolean(parentTaskId);
   const matchesWorkspace = batchMode
     ? taskSession.taskId === parentTaskId && selectedTaskIsValidationBatch()
@@ -4851,21 +5275,41 @@ function renderValidationInputContract(record, options = {}) {
   if (!record || !matchesWorkspace) {
     panel.classList.add("hidden");
     panel.innerHTML = "";
-    if (latestValidationInputContractContext?.panelId === panelId) {
-      latestValidationInputContract = null;
-      latestValidationInputContractTaskId = "";
-      latestValidationInputContractContext = null;
+    delete panel.dataset.renderSignature;
+    delete panel.dataset.renderSource;
+    delete panel.dataset.renderTaskId;
+    if (taskSession.panels.contract.context?.panelId === panelId) {
+      taskSession.panels.contract.value = null;
+      taskSession.panels.contract.taskId = "";
+      taskSession.panels.contract.context = null;
     }
     return;
   }
-  latestValidationInputContract = record;
-  latestValidationInputContractTaskId = taskId;
-  latestValidationInputContractContext = {
+  const previousContractState = `${taskSession.panels.contract.taskId}|${taskSession.panels.contract.value?.status || ""}`;
+  taskSession.panels.contract.value = record;
+  taskSession.panels.contract.taskId = taskId;
+  // The PMML run button and the scan card's contract line follow the
+  // contract (stepActionBlockedReason, syncScanContractCheck).
+  if (previousContractState !== `${taskId}|${record.status || ""}`) {
+    if (typeof renderWorkflowStepper === "function") renderWorkflowStepper();
+    if (typeof syncScanContractCheck === "function") syncScanContractCheck();
+  }
+  taskSession.panels.contract.context = {
     taskId,
     parentTaskId,
     item,
     panelId,
   };
+  // Evidence polling reloads the contract every few seconds (a batch's
+  // projected child is polled like any other task). Rebuilding an unchanged
+  // form would wipe what the user typed and swap the submit button mid-click.
+  const renderSignature = [panelId, taskId, parentTaskId, record.status || "", record.revision ?? ""].join("|");
+  panel.dataset.renderSource = options.source === "scan" ? "scan" : "api";
+  panel.dataset.renderTaskId = taskId;
+  if (panel.dataset.renderSignature === renderSignature && panel.innerHTML && !panel.classList.contains("hidden")) {
+    return;
+  }
+  panel.dataset.renderSignature = renderSignature;
   panel.classList.remove("hidden");
   const modelLabel = [item?.modelName, item?.modelVersion].filter(Boolean).join(" · ");
   const batchHead = batchMode
@@ -4937,17 +5381,21 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
   const parentTaskId = String(options.parentTaskId || "");
   const batchMode = Boolean(parentTaskId);
   if (!taskId || (!batchMode && !usesPmmlScoringWorkflow())) return null;
-  const loadVersion = ++validationInputContractLoadVersion;
+  const loadVersion = ++taskSession.panels.contract.loadVersion;
   const request = taskRequests.begin("validation-contract");
   const renderOptions = { ...options, taskId, parentTaskId };
   if (batchMode && taskSession.taskId === parentTaskId) {
     const panel = $("batchValidationContractPanel");
     panel?.classList.remove("hidden");
-    if (panel) panel.innerHTML = '<div class="validation-batch-loading" role="status">正在读取此模型的验证字段合同…</div>';
+    if (panel) {
+      panel.innerHTML = '<div class="validation-batch-loading" role="status">正在读取此模型的验证字段合同…</div>';
+      delete panel.dataset.renderSignature;
+      delete panel.dataset.renderSource;
+    }
   }
   try {
     const record = await api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`, { signal: request.signal });
-    if (!taskRequests.accepts(request) || loadVersion !== validationInputContractLoadVersion) return null;
+    if (!taskRequests.accepts(request) || loadVersion !== taskSession.panels.contract.loadVersion) return null;
     if (batchMode) {
       if (taskSession.taskId !== parentTaskId || !selectedTaskIsValidationBatch()) return null;
       renderValidationInputContract(record, renderOptions);
@@ -4956,12 +5404,14 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
     }
     return record;
   } catch (error) {
-    if (!taskRequests.accepts(request) || loadVersion !== validationInputContractLoadVersion) return null;
+    if (!taskRequests.accepts(request) || loadVersion !== taskSession.panels.contract.loadVersion) return null;
     if (batchMode && taskSession.taskId === parentTaskId) {
       const panel = $("batchValidationContractPanel");
       panel?.classList.remove("hidden");
       if (panel) {
         panel.innerHTML = `<div class="validation-batch-load-error" role="alert"><strong>验证字段合同读取失败</strong><span>${escapeHtml(error?.message || "请稍后重试。")}</span></div>`;
+        delete panel.dataset.renderSignature;
+        delete panel.dataset.renderSource;
       }
     }
     if (options.throwOnError) throw error;
@@ -4973,14 +5423,14 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
 }
 
 async function submitValidationInputContract(form) {
-  const record = latestValidationInputContract;
+  const record = taskSession.panels.contract.value;
   const taskId = form.dataset.validationContractTaskId || workbenchTaskId() || taskSession.taskId;
   const parentTaskId = form.dataset.validationContractParentTaskId || "";
-  const context = latestValidationInputContractContext || {};
+  const context = taskSession.panels.contract.context || {};
   if (
     !record
     || !taskId
-    || latestValidationInputContractTaskId !== taskId
+    || taskSession.panels.contract.taskId !== taskId
     || record.status !== "pending_confirmation"
   ) return;
   if (parentTaskId) {
@@ -5045,7 +5495,7 @@ async function submitValidationInputContract(form) {
       await validationBatchPanelController.selectTask(taskSession.task, { force: true });
       if (taskSession.taskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;
       const remaining = validationBatchPanelController.markContractConfirmed(taskId);
-      if (latestValidationInputContractTaskId === taskId) {
+      if (taskSession.panels.contract.taskId === taskId) {
         renderValidationInputContract(confirmed, context);
       }
       const modelLabel = [context.item?.modelName, context.item?.modelVersion]
@@ -5062,7 +5512,19 @@ async function submitValidationInputContract(form) {
     }
     if (!isWorkbenchTaskId(taskId)) return;
     renderValidationInputContract(confirmed, { taskId });
-    setActionStatus("验证字段已确认，正在继续 PMML 打分测试。", "success");
+    // The header reads 待确认 from the task record; reload it (eval S10).
+    try {
+      await refreshTasks();
+    } catch (_) {
+      // The confirmation stands; the next poll refreshes the header.
+    }
+    if (!isWorkbenchTaskId(taskId)) return;
+    setActionStatus(
+      selectedTaskIsAgentMode()
+        ? "验证字段已确认，正在继续 PMML 打分测试。"
+        : "验证字段已确认，下一步点右侧「运行」做 PMML 打分测试。",
+      "success",
+    );
     if (selectedTaskIsAgentMode()) {
       const input = $("agentComposerInput");
       input.value = "继续";
@@ -5071,6 +5533,11 @@ async function submitValidationInputContract(form) {
   } catch (error) {
     button.disabled = false;
     if (status) status.textContent = error?.message || "字段确认失败";
+    // B-line: in Agent mode the backend also posts a diagnosis card with
+    // ways forward; show it now instead of on the next poll.
+    if (!parentTaskId && isWorkbenchTaskId(taskId) && selectedTaskIsAgentMode()) {
+      void loadAgentMessages(taskId).catch(() => {});
+    }
     throw error;
   }
 }
@@ -5078,7 +5545,7 @@ async function submitValidationInputContract(form) {
 if (typeof document !== "undefined") {
   document.addEventListener("click", (event) => {
     if (!event.target?.closest?.("[data-validation-contract-close]")) return;
-    validationInputContractLoadVersion += 1;
+    taskSession.panels.contract.loadVersion += 1;
     renderValidationInputContract(null, {
       panelId: "batchValidationContractPanel",
       parentTaskId: taskSession.taskId,
@@ -5150,7 +5617,7 @@ function renderMetricPreviewEmpty(message = metricPreviewEmptyMessage()) {
 }
 
 function resetEvidenceSummaries() {
-  latestNotebookSteps = [];
+  taskSession.panels.notebook.steps = [];
   evidenceEmpty("reproducibilitySummary", reproducibilityEmptyMessage());
   renderMetricPreviewEmpty();
   resetReproducibilityRenderSignatures();
@@ -5199,7 +5666,7 @@ function normalizeNotebookSteps(notebookSteps = [], notebookCells = []) {
 }
 
 function renderNotebookSteps(notebookSteps = [], notebookCells = []) {
-  latestNotebookSteps = mergePendingSystemSteps(normalizeNotebookSteps(notebookSteps, notebookCells));
+  taskSession.panels.notebook.steps = mergePendingSystemSteps(normalizeNotebookSteps(notebookSteps, notebookCells));
   renderReproducibilitySectionVisibility();
   renderMetricSectionVisibility();
   renderWorkflowStepper();
@@ -5247,10 +5714,23 @@ function currentReproducibilityTaskId() {
   return taskSession.taskId || "unselected";
 }
 
+function rememberScoreEvidence(kind, data, taskId) {
+  const metrics = taskSession.panels.metrics;
+  const populated = data && Object.keys(data).length;
+  // Polls can arrive empty between populated ones; keep what this model showed.
+  if (!populated && metrics.scoreEvidence?.taskId === taskId) return;
+  const next = populated ? { kind, taskId, data } : null;
+  if (JSON.stringify(next) === JSON.stringify(metrics.scoreEvidence)) return;
+  metrics.scoreEvidence = next;
+  // The sections on screen may still be another model's while a switch loads.
+  if (metrics.tableSections.length && metrics.sectionsOwnerId === taskId) renderMetricPreview();
+}
+
 function renderPmmlScoringEvidence(scoring = {}) {
   const element = $("reproducibilitySummary");
   if (!element) return;
   const taskId = currentReproducibilityTaskId();
+  rememberScoreEvidence("pmml", scoring, workbenchTaskId());
   if (!scoring || Object.keys(scoring).length === 0) {
     const emptyMessage = reproducibilityEmptyMessage();
     evidenceEmpty("reproducibilitySummary", emptyMessage);
@@ -5310,6 +5790,7 @@ function renderReproducibilityEvidence(reproducibility = {}) {
   const rows = Array.isArray(reproducibility?.rows) ? reproducibility.rows : [];
   const element = $("reproducibilitySummary");
   const taskId = currentReproducibilityTaskId();
+  rememberScoreEvidence("reproducibility", reproducibility, workbenchTaskId());
   if (!summary || Object.keys(summary).length === 0) {
     const emptyMessage = reproducibilityEmptyMessage();
     // While polling an active run, evidence payloads may transiently arrive
@@ -5504,7 +5985,7 @@ function renderStoredStateSummaries() {
   const scanEmptyText = taskSession.taskId ? "点击\"扫描材料\"开始" : "选择任务后点击\"扫描材料\"开始";
   $("scanSummary").className = "result-summary empty";
   $("scanSummary").textContent = selectedTaskIsAgentMode() ? "" : scanEmptyText;
-  validationInputContractLoadVersion += 1;
+  taskSession.panels.contract.loadVersion += 1;
   renderValidationInputContract(null);
   renderValidationInputContract(null, { panelId: "batchValidationContractPanel" });
   updateAgentScanSectionVisibility();
@@ -5695,8 +6176,8 @@ function autoAcceptLabel(taskType) {
 
 function requestAgentConversationScrollToLatest() {
   if (!selectedTaskIsAgentMode()) return;
-  if (workbenchTask()?.task_type === "validation" && activeValidationView !== "conversation") return;
-  if (suppressAgentAutoScrollTaskId === taskSession.taskId) return;
+  if (taskSession.panels.reportDraft.expanded) return;
+  if (taskSession.panels.scroll.suppressAutoScrollTaskId === taskSession.taskId) return;
   if (!agentAutoScrollFollows) return;
   const scrollContent = $("resultScrollContent");
   if (!scrollContent) return;
@@ -5711,10 +6192,10 @@ function requestAgentConversationScrollToLatest() {
 }
 
 const reportDraftState = createReportDraftState({ api, onChange: updateReportDraftSaveStatus });
-const validationViewState = new Map();
-let activeValidationViewTaskId = "";
-let activeValidationView = "conversation";
-let renderedReportDraftSignature = "";
+// D13 (batch 6a): the report draft is a card in the conversation, and 展开全文
+// opens that same element as an editing layer over the conversation, so there
+// is one editor for one edit buffer. Its open/owner/signature state is
+// taskSession.panels.reportDraft.
 
 function updateReportDraftSaveStatus(taskId, entry) {
   if (taskId !== workbenchTaskId()) return;
@@ -5729,42 +6210,144 @@ function updateReportDraftSaveStatus(taskId, entry) {
   panel?.querySelectorAll("[data-report-draft-save], [data-report-draft-revise], [data-report-draft-resolve]").forEach((button) => { button.disabled = Boolean(entry.confirming); });
 }
 
-function rememberValidationView() {
-  if (!activeValidationViewTaskId) return;
-  const state = validationViewState.get(activeValidationViewTaskId) || { view: activeValidationView, scroll: {} };
-  const scroller = activeValidationView === "report" ? $("reportDraftWorkspace") : $("resultScrollContent");
-  state.view = activeValidationView;
-  state.scroll[activeValidationView] = scroller?.scrollTop || 0;
-  validationViewState.set(activeValidationViewTaskId, state);
+// restoreFocus: a user open/close (button, Esc) moves focus; a close forced by
+// a task or model switch leaves focus where the user put it.
+function setReportDraftExpanded(open, { restoreFocus = false } = {}) {
+  const panel = $("reportDraftWorkspace");
+  const next = Boolean(open) && Boolean(panel) && !panel.hidden;
+  if (next === taskSession.panels.reportDraft.expanded && panel?.classList.contains("is-expanded") === next) return;
+  taskSession.panels.reportDraft.expanded = next;
+  if (!panel) return;
+  panel.classList.toggle("is-expanded", next);
+  $("resultWorkspace")?.classList.toggle("report-layer-open", next);
+  const expand = panel.querySelector("[data-report-draft-expand]");
+  if (expand) {
+    expand.textContent = next ? "收起" : "展开全文";
+    expand.setAttribute("aria-expanded", String(next));
+  }
+  if (next) {
+    setReportCardMoreOpen(panel, true);
+    panel.querySelectorAll(".report-card-row.is-editing").forEach((row) => row.classList.remove("is-editing"));
+  } else {
+    refreshReportCardPreviews(panel);
+  }
+  placeReportDraftCard();
+  if (!restoreFocus) return;
+  if (next) panel.querySelector("[data-report-draft-key]")?.focus({ preventScroll: true });
+  else panel.querySelector("[data-report-draft-expand]")?.focus({ preventScroll: true });
 }
 
-function selectValidationView(view, { remember = true } = {}) {
-  if (remember) rememberValidationView();
-  activeValidationView = view;
-  const workspace = $("resultWorkspace");
-  workspace.dataset.validationView = view;
-  $("reportDraftWorkspace").hidden = view !== "report";
-  $("resultScrollContent").hidden = view === "report";
-  $("validationWorkspaceNav")?.querySelectorAll("[data-validation-view]").forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.validationView === view));
+function setReportCardMoreOpen(panel, open) {
+  const more = panel?.querySelector("[data-report-card-more]");
+  if (more) more.hidden = !open;
+  panel?.querySelector("[data-report-card-more-toggle]")?.setAttribute("aria-expanded", String(open));
+}
+
+function refreshReportCardPreviews(panel) {
+  panel?.querySelectorAll("[data-report-card-row]").forEach((row) => {
+    const field = row.querySelector("[data-report-draft-key]");
+    const preview = row.querySelector("[data-report-card-preview]");
+    if (!field || !preview) return;
+    preview.innerHTML = reportDraftPreviewHtml(field.value);
+    row.toggleAttribute("data-empty", !String(field.value || "").trim());
   });
-  const state = validationViewState.get(activeValidationViewTaskId) || { scroll: {} };
-  state.view = view;
-  validationViewState.set(activeValidationViewTaskId, state);
-  const scroller = view === "report" ? $("reportDraftWorkspace") : $("resultScrollContent");
-  if (scroller) scroller.scrollTop = state.scroll[view] || 0;
+}
+
+function beginReportCardEdit(row) {
+  if (!row || taskSession.panels.reportDraft.expanded) return;
+  row.classList.add("is-editing");
+  const field = row.querySelector("[data-report-draft-key]");
+  if (!field) return;
+  field.focus();
+  const end = String(field.value || "").length;
+  field.setSelectionRange?.(end, end);
+}
+
+function endReportCardEdit(row) {
+  if (!row?.classList.contains("is-editing")) return;
+  row.classList.remove("is-editing");
+  refreshReportCardPreviews(row.closest("[data-report-draft-table]"));
+}
+
+// Parked beside the conversation while the timeline is rebuilt (rebuilding
+// clears the message buckets), then slotted back under the latest draft
+// message; an edit in progress keeps its caret.
+// Moving a focused field blurs it (except with moveBefore). While the card
+// moves, the blur is not "leaving the field": the focused field, its caret and
+// the open item are remembered and restored once the card is back in place.
+let reportCardRelocating = false;
+let reportCardFocusMemo = null;
+
+function rememberReportCardFocus(panel) {
+  const active = document.activeElement;
+  if (!active || !panel.contains(active) || active === panel) return;
+  reportCardFocusMemo = {
+    key: active.dataset?.reportDraftKey || "",
+    selector: active.matches?.("[data-report-draft-expand]") ? "[data-report-draft-expand]" : "",
+    selection: typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null,
+    editingRow: active.closest(".report-card-row.is-editing")?.dataset.reportCardRow || "",
+  };
+}
+
+function moveReportCard(panel, parent, before = null) {
+  reportCardRelocating = true;
+  try {
+    if (typeof parent.moveBefore === "function" && panel.isConnected && parent.isConnected) {
+      parent.moveBefore(panel, before);
+    } else {
+      parent.insertBefore(panel, before);
+    }
+  } finally {
+    reportCardRelocating = false;
+  }
+}
+
+function restoreReportCardFocus(panel) {
+  const memo = reportCardFocusMemo;
+  reportCardFocusMemo = null;
+  if (!memo || !panel.isConnected) return;
+  const row = memo.editingRow
+    ? panel.querySelector(`[data-report-card-row="${CSS.escape(memo.editingRow)}"]`)
+    : null;
+  row?.classList.add("is-editing");
+  const target = memo.key
+    ? panel.querySelector(`[data-report-draft-key="${CSS.escape(memo.key)}"]`)
+    : memo.selector ? panel.querySelector(memo.selector) : null;
+  if (!target || document.activeElement === target) return;
+  target.focus({ preventScroll: true });
+  if (memo.selection) target.setSelectionRange?.(memo.selection[0], memo.selection[1]);
+}
+
+function parkReportDraftCard() {
+  const panel = $("reportDraftWorkspace");
+  const home = $("resultWorkspace");
+  if (!panel || !home || taskSession.panels.reportDraft.expanded || panel.parentElement === home) return;
+  rememberReportCardFocus(panel);
+  moveReportCard(panel, home, $("resultScrollContent"));
+}
+
+function placeReportDraftCard() {
+  const panel = $("reportDraftWorkspace");
+  if (!panel) return;
+  const home = $("resultWorkspace");
+  const slot = $("resultScrollContent")?.querySelector("[data-report-draft-slot]");
+  const target = taskSession.panels.reportDraft.expanded ? home : !panel.hidden && slot ? slot : home;
+  if (target && panel.parentElement !== target) {
+    if (!reportCardFocusMemo) rememberReportCardFocus(panel);
+    if (target === home) moveReportCard(panel, home, $("resultScrollContent"));
+    else moveReportCard(panel, target, null);
+  }
+  restoreReportCardFocus(panel);
 }
 
 function renderReportDraftWorkspace({ force = false } = {}) {
   const enabled = workbenchTask()?.task_type === "validation" && selectedTaskIsAgentMode();
-  const nav = $("validationWorkspaceNav");
-  if (!nav) return;
-  nav.hidden = !enabled;
+  const panel = $("reportDraftWorkspace");
+  if (!panel) return;
   if (!enabled) {
-    activeValidationViewTaskId = "";
-    $("reportDraftWorkspace").hidden = true;
-    $("resultScrollContent").hidden = false;
-    delete $("resultWorkspace").dataset.validationView;
+    taskSession.panels.reportDraft.cardTaskId = "";
+    if (taskSession.panels.reportDraft.expanded) setReportDraftExpanded(false);
+    panel.hidden = true;
     return;
   }
   const taskId = workbenchTaskId();
@@ -5787,24 +6370,39 @@ function renderReportDraftWorkspace({ force = false } = {}) {
     entry.status = "草稿已确认或撤回 · 当前修改仍保留";
   }
   const values = entry?.values || message?.metadata?.draft_values || {};
-  const signature = JSON.stringify([taskId, message?.id, editable, entry?.messageId, entry?.revision]);
-  if (force || signature !== renderedReportDraftSignature) {
-    const title = workbenchTask()?.model_name || "当前模型";
-    $("reportDraftWorkspace").innerHTML = `<div class="report-workspace-title"><span>当前模型</span><h2>${escapeHtml(title)}</h2></div>` + (message
-      ? reportDraftTableHtml(values, { editable, taskId, state: entry, revision: entry?.revision ?? message.metadata.report_revision, messageId: entry?.messageId || message.id })
-      : '<div class="report-workspace-empty"><h3>报告尚未就绪</h3><p>完成验证后，Agent 会在此起草报告。可以返回对话查看进展或处理待补材料。</p><button type="button" class="button compact" data-validation-view="conversation">返回对话</button></div>');
-    renderedReportDraftSignature = signature;
+  if (taskSession.panels.reportDraft.cardTaskId !== taskId) {
+    taskSession.panels.reportDraft.cardTaskId = taskId;
+    if (taskSession.panels.reportDraft.expanded) setReportDraftExpanded(false);
   }
-  if (activeValidationViewTaskId !== taskId) {
-    activeValidationViewTaskId = taskId;
-    selectValidationView(validationViewState.get(taskId)?.view || activeValidationView, { remember: false });
+  // No draft yet: there is no card (the conversation shows the progress).
+  panel.hidden = !message;
+  const signature = JSON.stringify([taskId, message?.id, editable, entry?.messageId, entry?.revision]);
+  if (force || signature !== taskSession.panels.reportDraft.renderedSignature) {
+    const title = workbenchTask()?.model_name || "当前模型";
+    panel.innerHTML = message
+      ? reportDraftCardHtml(values, {
+        editable,
+        taskId,
+        state: entry,
+        title,
+        expanded: taskSession.panels.reportDraft.expanded,
+        revision: entry?.revision ?? message.metadata.report_revision,
+        messageId: entry?.messageId || message.id,
+      })
+      : "";
+    taskSession.panels.reportDraft.renderedSignature = signature;
   }
   if (entry) updateReportDraftSaveStatus(taskId, entry);
   if (entry && !entry.dirty && !entry.pending) {
-    $("reportDraftWorkspace").querySelectorAll("[data-report-draft-key]").forEach((field) => {
+    let changed = false;
+    panel.querySelectorAll("[data-report-draft-key]").forEach((field) => {
       const value = String(entry.values[field.dataset.reportDraftKey] || "");
-      if (field.value !== value) field.value = value;
+      if (field.value !== value) {
+        field.value = value;
+        changed = true;
+      }
     });
+    if (changed) refreshReportCardPreviews(panel);
   }
 }
 
@@ -5829,14 +6427,22 @@ function renderAgentConversation() {
   workspace?.classList.toggle("agent-composer-active", isAgent || showManualRiskIntake);
   const composerInput = $("agentComposerInput");
   if (composerInput) {
-    composerInput.placeholder = showManualRiskIntake
+    // V3 UI-6: the Agent's suggested reply for this turn shows as the
+    // placeholder and → takes it; otherwise the plain prompt (not takeable).
+    const suggestion = isAgent && !showManualRiskIntake && typeof latestSuggestedReply === "function"
+      ? latestSuggestedReply(taskSession.messages)
+      : "";
+    if (composerInput.dataset) composerInput.dataset.suggestion = suggestion;
+    composerInput.placeholder = suggestion || (showManualRiskIntake
       ? "输入分析类型或材料口径"
-      : "输入执行步骤或问题";
+      : "输入执行步骤或问题");
   }
   syncRiskMaterialUploadControl();
   renderAgentAcceptanceModePreference();
   renderAgentModelOptions();
   renderAgentEffortPreference();
+  renderAgentQuickReplies();
+  workbenchChrome.setThreadFilterAvailable(showConversation && isAgent, taskSession.taskId);
   requestAnimationFrame(syncAgentComposerClearance);
   panel.classList.remove("driver-analysis-mode");
   panel.setAttribute("aria-label", "Agent 对话");
@@ -5885,11 +6491,23 @@ function renderAgentConversation() {
       ]),
     }
     : null;
-  const structuralSignature = agentStructuralSignature(displayedMessages, visibleStages);
+  // The report-ready message's 产物卡 follows the task's readiness, which can
+  // change after the message arrived; a change rebuilds the timeline.
+  const reportArtifactsReady = typeof completedReportReadyForDownloads === "function"
+    && completedReportReadyForDownloads({ action: "report" });
+  // A gate's actionable state (task busy -> idle, step status) changes its
+  // widget markup, which the content-only fast path never touches: a join key
+  // picker drawn while the diagnosis job was finishing stayed read-only until
+  // a reload (eval S6 regression).
+  const gateStateSignature = driverPlanSignature
+    ? JSON.stringify(driverPlanSignature.stepStatuses.map(([id, status, state]) => [id, status, Boolean(state?.actionable)]))
+    : "";
+  const structuralSignature = `${agentStructuralSignature(displayedMessages, visibleStages)}|report:${reportArtifactsReady ? 1 : 0}|gates:${gateStateSignature}`;
   const signature = JSON.stringify({
     messages: taskSession.messages,
     visibleStages,
     driverPlanSignature,
+    reportArtifactsReady,
   });
   if (signature === lastAgentRenderSignature) return;
   if (
@@ -5912,7 +6530,10 @@ function renderAgentConversation() {
   // keeps every previous run's chart visible at its chronological position.
   freezeAgentSectionSnapshotsForReruns();
   clearAgentStageMessages();
+  parkReportDraftCard();
   renderAgentTimeline(displayedMessages);
+  placeReportDraftCard();
+  syncLiveAgentFaces($("resultScrollContent"), liveAgentFace);
   attachCalibrationInteractions($("agentMessages"));
   requestAgentConversationScrollToLatest();
   // The conversation just changed (a driver turn likely created/advanced the
@@ -5936,16 +6557,7 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
   // OLD gate's widget stuck rendered as interactive (and the new one stuck
   // read-only) under the fast path, which only patches .agent-message-content
   // text and never touches widget markup.
-  const latestGateId = (() => {
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (message?.role !== "assistant") continue;
-      const meta = message?.metadata || {};
-      if (meta.kind === "gate" || meta.join_c1) return String(message.id || "");
-      return "";
-    }
-    return "";
-  })();
+  const latestGateId = lastGateMessageId(messages);
   const latestPendingDraftId = latestPendingReportDraftMessageId(messages);
   let previousAssistantLabel = "";
   const skeleton = messages.map((message) => {
@@ -5957,6 +6569,8 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
     const hasWorkflowPresentation = role === "assistant" && (
       hasWorkflowErrorDiagnostic(metadata)
       || (Array.isArray(metadata.ingest_notices) && metadata.ingest_notices.length > 0)
+      || Boolean(metadata.repair_report)
+      || Boolean(metadata.repair_undo)
     );
     return {
       id: message?.id || "",
@@ -5974,6 +6588,11 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        // D-6/D-8: a proposal/form card flips to settled when a later
+        // message answers it, so the settled state is structural.
+        conversation_action: metadata.conversation_action
+          ? `${metadata.conversation_action.kind}:${settledConversationActionIds(taskSession.messages).has(String(message?.id || ""))}`
+          : "",
         // Live tuning messages commonly keep one stable message id while only
         // metadata.progress changes. The in-place fast path patches prose only,
         // so progress must participate in the structural key to rebuild the
@@ -5994,6 +6613,8 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
             content: message?.content || "",
             error_diagnostic: metadata.error_diagnostic || null,
             ingest_notices: metadata.ingest_notices || [],
+            repair_report: metadata.repair_report || null,
+            repair_undo: metadata.repair_undo || null,
           }
           : null,
         is_latest_gate: Boolean(latestGateId) && String(message?.id || "") === latestGateId,
@@ -6034,7 +6655,17 @@ function updateAgentMessageContentsInPlace(messages = []) {
     visibleContent: agentVisibleContent,
     formatMessageContent: formatAgentMessageContent,
     memoryReferencesHtml: agentMemoryReferencesHtml,
+    hasStructuredContent: agentMessageHasStructuredContent,
   });
+}
+
+function agentMessageHasStructuredContent(message) {
+  if (message?.role === "user") return false;
+  const metadata = message?.metadata || {};
+  return hasWorkflowErrorDiagnostic(metadata)
+    || (Array.isArray(metadata.ingest_notices) && metadata.ingest_notices.length > 0)
+    || Boolean(metadata.repair_report)
+    || Boolean(metadata.repair_undo);
 }
 
 function agentFrozenStageConfig(stage) {
@@ -6164,6 +6795,9 @@ function agentPersistentTimelineElementIds() {
 }
 
 function restoreResultScrollDefaultOrder() {
+  // Clearing the timeline destroys the message buckets; the report card that
+  // may sit in one of them is parked first (batch 6a).
+  parkReportDraftCard();
   restoreResultScrollDefaultOrderDom({
     getElementById: $,
     persistentElementIds: agentPersistentTimelineElementIds(),
@@ -6234,6 +6868,7 @@ function clearAgentStageMessages() {
 }
 
 function removeAgentTimelineBuckets() {
+  parkReportDraftCard();
   removeAgentTimelineBucketsDom(document);
 }
 
@@ -6441,6 +7076,13 @@ function agentMessageIsThinking(message) {
 }
 
 function agentVisibleContent(message) {
+  if (message?.role === "user" && getUiLocale() === "en") {
+    // D-10: a quick-reply command shows its English chip label (display only).
+    const messages = typeof taskSession !== "undefined" && Array.isArray(taskSession?.messages)
+      ? taskSession.messages
+      : [];
+    return quickReplyBubbleText(message, messages, t);
+  }
   const content = String(message?.content || "");
   const messageId = message?.id || "";
   if (!messageId) return content;
@@ -6523,13 +7165,13 @@ function agentMemoryReferencesHtml(references = []) {
       sourceCount ? `来源记忆 ${sourceCount}` : "",
       reference.support_count !== undefined ? `支持 ${reference.support_count}` : "",
       confidence ? `置信度 ${confidence}` : "",
-    ].filter(Boolean).map(escapeHtml).join(" · ");
+    ].filter(Boolean).map((part) => `<span>${escapeHtml(part)}</span>`).join(" · ");
     return [
       '<li class="agent-memory-reference">',
       '<span class="agent-memory-reference-main">',
-      `<strong>${escapeHtml(memoryId || type)}</strong>`,
+      `<strong translate="no">${escapeHtml(memoryId || type)}</strong>`,
       meta ? `<small>${meta}</small>` : "",
-      reason ? `<span>${escapeHtml(reason)}</span>` : "",
+      reason ? `<span translate="no">${escapeHtml(reason)}</span>` : "",
       "</span>",
       memoryId
         ? `<button class="agent-memory-reference-action" type="button" data-agent-memory-inline-inspect="${escapeHtml(memoryId)}" data-agent-memory-inline-kind="${escapeHtml(kind)}">查看</button>`
@@ -6553,9 +7195,9 @@ function driverColumnKindFromHeader(headerLabel) {
   const label = String(headerLabel || "").trim();
   if (!label) return "text";
   if (/^PSI$/i.test(label)) return "psi";
-  if (/(匹配率|命中率|缺失率|占比|比例|坏率|坏账率|审批率|通过率)/i.test(label)) return "databar-percent";
-  if (/^(KS|KS\(%\)|AUC|AUC\(%\)|IV|VIF|重要性|相关系数|预期利润|Gain|Lift|lift)/i.test(label)) return "databar";
-  if (/(行数|列数|样本数|记录数|新增列|特征数|数量|个数)/i.test(label)) return "integer";
+  if (/(匹配率|命中率|缺失率|占比|比例|坏率|坏账率|审批率|通过率|match rate|hit rate|missing rate|share|proportion|bad rate|bad.debt rate|approval rate|pass rate)/i.test(label)) return "databar-percent";
+  if (/^(KS|KS\(%\)|AUC|AUC\(%\)|IV|VIF|重要性|相关系数|预期利润|Gain|Lift|Importance|Correlation|Expected profit)/i.test(label)) return "databar";
+  if (/(行数|列数|样本数|记录数|新增列|特征数|数量|个数|row count|column count|sample count|record count|new columns|feature count|quantity|count)/i.test(label)) return "integer";
   return "text";
 }
 
@@ -6569,13 +7211,21 @@ function driverIntegerText(value) {
 // renderers.py:350); render that as a highlighted row instead of a literal star.
 function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fractionsForColumn) {
   const raw = value ?? "";
+  const platformValue = /^(状态|结果|检查结果|校验结果|判断|结论|建议|Agent建议|Agent 建议|风险等级|Status|Result|Check result|Validation result|Verdict|Conclusion|Recommendation|Suggestion|Agent suggestion|Risk level)$/i.test(String(headerLabel || "").trim());
   if (columnIndex === 0 && typeof value === "string" && /\s★$/.test(value)) {
     const label = String(raw).replace(/\s★$/, "");
     return {
       cls: "cell-text cell-champion",
-      html: `<span class="champion-badge" data-tip="表现最优，当前推荐候选">${escapeHtml(label)}</span>`,
+      html: `<span class="champion-badge" data-tip="表现最优，当前推荐候选"><span translate="no">${escapeHtml(label)}</span></span>`,
+      platform: true,
     };
   }
+  // Status codes read as tags and evidence strings as metric chips
+  // (js/table-presentation.js); the raw text stays in the tooltip.
+  const identifierColumn = /特征|变量|字段|名称|文件|路径|列名|类别|分类|数据源|feature|variable|field|name|file|path|column|category|source|^id$/i.test(String(headerLabel || ""));
+  const presented = !identifierColumn && (columnIndex > 0 || platformValue) && typeof presentedCellHtml === "function"
+    ? presentedCellHtml(raw) : null;
+  if (presented) return { ...presented, platform: true };
   if (kind === "psi") {
     const numeric = parseNumeric(raw);
     const thresholds = [0.02, 0.10];
@@ -6586,6 +7236,7 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
       : `<i class="psi-marker" style="left:${Math.min(Math.abs(numeric) / 0.20, 1) * 100}%"></i>`;
     return {
       cls: "cell-psi",
+      platform: true,
       html: `<span class="psi-cell" data-tip="${escapeHtml(tip)}">`
         + `<span class="psi-value" data-tier="${tier}">${escapeHtml(String(raw))}</span>`
         + `<span class="psi-strip"><span></span><span></span><span></span>${stripMarker}</span>`
@@ -6595,12 +7246,26 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
   if (kind === "integer") {
     return { cls: "cell-number cell-integer", html: escapeHtml(driverIntegerText(raw)) };
   }
+  if (kind === "matrix-heat") {
+    // Migration matrix: each cell is shaded by its own 0..1 rate (U13). The
+    // printed value stays the platform's; 无观测 cells stay plain.
+    const numeric = parseNumeric(raw);
+    if (numeric === null) return { cls: "cell-matrix-heat is-empty", html: escapeHtml(String(raw)), platform: raw === "无观测" };
+    const heat = Math.max(0, Math.min(1, numeric));
+    const strong = heat >= 0.65 ? " data-strong" : "";
+    return {
+      cls: "cell-matrix-heat",
+      platform: true,
+      html: `<span class="matrix-heat" style="--heat:${heat.toFixed(4)}"${strong} title="${escapeHtml(`${headerLabel} ${raw}`)}">${escapeHtml(String(raw))}</span>`,
+    };
+  }
   if (kind === "databar" || kind === "databar-percent") {
     const fraction = fractionsForColumn.get(rowIndex);
     if (fraction !== undefined && parseNumeric(raw) !== null) {
       const tip = `${headerLabel} ${raw}`;
       return {
         cls: "cell-databar",
+        platform: true,
         // VD-9: driver-timeline tables render once and are never rebuilt in
         // place (see comment on agentMessageTablesHtml below), so the entry
         // animation is always safe to play here - no data-animation gate
@@ -6619,7 +7284,7 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
   if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
     return { cls: "cell-number", html: escapeHtml(String(raw)) };
   }
-  return { cls: "cell-text", html: escapeHtml(String(raw)) };
+  return { cls: "cell-text", html: escapeHtml(String(raw)), platform: platformValue };
 }
 
 // Inline rich tables carried by the generic plan driver (data_join / future
@@ -6630,6 +7295,8 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
 // validation metric preview already uses (render-metrics.js). Each driver
 // message is appended whole, so this renders once on the full timeline
 // rebuild — no streaming fast-path interaction.
+const FIELD_LABEL_HEADERS = /^(特征|特征A|特征B|字段|变量|列|feature|field|column)$/i;
+
 function agentMessageTablesHtml(message) {
   const tables = message?.metadata?.tables;
   if (!Array.isArray(tables) || !tables.length) return "";
@@ -6640,9 +7307,22 @@ function agentMessageTablesHtml(message) {
     .filter((table) => !String(table?.title || "").startsWith("择键建议"))
     .map((table, tableIndex) => {
       const columns = Array.isArray(table?.columns) ? table.columns : [];
-      const rows = Array.isArray(table?.rows) ? table.rows.map((row) => (Array.isArray(row) ? row : [row])) : [];
+      // Over-long decimals are trimmed for reading; the values stay the
+      // platform's own (js/table-presentation.js).
+      const trim = typeof displayNumberText === "function" ? displayNumberText : (cell) => cell;
+      const rows = Array.isArray(table?.rows)
+        ? table.rows.map((row) => (Array.isArray(row) ? row : [row]).map((cell) => (
+          typeof cell === "number" || typeof cell === "string" ? trim(cell) : cell
+        )))
+        : [];
       if (!columns.length && !rows.length) return "";
-      const kinds = columns.map((col) => driverColumnKindFromHeader(col));
+      // A table may declare matrix-heat cells (the migration matrix); other
+      // column kinds are still read off the header.
+      const specs = Array.isArray(table?.column_specs) ? table.column_specs : [];
+      const fieldLabels = table?.field_labels && typeof table.field_labels === "object" ? table.field_labels : {};
+      const kinds = columns.map((col, index) => (
+        specs[index]?.kind === "matrix-heat" ? "matrix-heat" : driverColumnKindFromHeader(col)
+      ));
       const fractionsByColumn = new Map();
       kinds.forEach((kind, columnIndex) => {
         if (kind === "databar" || kind === "databar-percent") {
@@ -6650,7 +7330,7 @@ function agentMessageTablesHtml(message) {
         }
       });
       const head = columns.length
-        ? `<thead><tr>${columns.map((col) => `<th>${escapeHtml(String(col))}</th>`).join("")}</tr></thead>`
+        ? `<thead><tr>${columns.map((col) => `<th>${escapeHtml(platformLabelSource(col))}</th>`).join("")}</tr></thead>`
         : "";
       const body = `<tbody>${rows
         .map((cells, rowIndex) => {
@@ -6663,24 +7343,94 @@ function agentMessageTablesHtml(message) {
               kinds[columnIndex] || "text",
               fractionsByColumn.get(columnIndex) || new Map(),
             );
-            return `<td class="${rendered.cls}">${rendered.html}</td>`;
+            const explicitPlatformValue = ["enum", "status", "tag", "platform-label", "split-badge"].includes(specs[columnIndex]?.kind);
+            const rawLabel = /^(特征|特征名|字段|字段名|名称|文件名|路径|类别|数据源|feature|feature name|field|field name|name|file name|path|category|source)$/i.test(String(columns[columnIndex] || "").trim());
+            const platformCell = rendered.platform || (explicitPlatformValue && !rawLabel);
+            // V3 5.7: a confirmed business name sits under the field code; the
+            // code stays the cell's value.
+            const alias = typeof cell === "string" && typeof FIELD_LABEL_HEADERS !== "undefined"
+              && FIELD_LABEL_HEADERS.test(String(columns[columnIndex] || "").trim())
+              ? fieldLabels[cell] : "";
+            const aliasHtml = typeof alias === "string" && alias ? `<small class="field-alias">${escapeHtml(alias)}</small>` : "";
+            return `<td class="${rendered.cls}"${platformCell ? "" : ' translate="no"'}>${rendered.html}${aliasHtml}</td>`;
           });
           return `<tr>${tds.join("")}</tr>`;
         })
         .join("")}</tbody>`;
       const chartHtml = driverTableChartHtml(table?.chart);
       const title = String(table?.title || `结果组件 ${tableIndex + 1}`);
-      return `<div class="agent-inline-table">${renderWorkflowDataWidget({
+      // A field/value table (验证字段候选, 最优 trial 指标 …) reads as a list.
+      const fieldList = typeof fieldListModel === "function" ? fieldListModel(table) : null;
+      return {
         title,
-        chartHtml,
-        tableHtml: `<table>${head}${body}</table>`,
-        rowCount: rows.length,
-        columnCount: columns.length,
-        index: tableIndex,
-      })}</div>`;
+        rows: rows.length,
+        columns: columns.length,
+        hasChart: Boolean(chartHtml),
+        html: `<div class="agent-inline-table">${renderWorkflowDataWidget({
+          title,
+          chartHtml,
+          tableHtml: fieldList ? fieldListHtml(fieldList) : `<table>${head}${body}</table>`,
+          rowCount: rows.length,
+          columnCount: columns.length,
+          index: tableIndex,
+        })}</div>`,
+      };
     })
-    .join("");
-  return blocks ? `<div class="agent-message-tables">${blocks}</div>` : "";
+    .filter(Boolean);
+  if (!blocks.length) return "";
+  // D12 (batch 6b): one result card per message. The step's first table (the
+  // platform's own order) stays open; the others fold into one line each and
+  // open in place. Every table, value and chart is the same as before.
+  // A confirmation gate never folds: its tables are the evidence being
+  // confirmed. Risk tables (red flags, leakage, blocking questions) stay open
+  // everywhere.
+  const isGate = message?.metadata?.kind === "gate";
+  const messageKey = String(message?.id || "");
+  // 2026-10-19: the card leads with its headline — metric tiles and one bar
+  // chart copied from the platform tables (js/result-summary.js). With a
+  // headline the tables fold beneath it, except in a gate, whose tables are
+  // the evidence being confirmed and stay open.
+  const summaryHtml = typeof resultSummaryHtml !== "function" ? "" : resultSummaryHtml(tables);
+  // Platform titles of tables that must never start folded.
+  // A table that carries its own chart (Vintage curves) opens with it: the
+  // chart is what the user came for (U13).
+  const open = (block, index) => isGate
+    || (index === 0 && !summaryHtml)
+    || block.hasChart
+    || /红旗|泄漏|风险|警告|待补充|阻断/.test(block.title);
+  const remembered = typeof openResultTableFolds === "undefined" ? new Set() : openResultTableFolds;
+  const openHtml = blocks.filter(open).map((block) => block.html).join("");
+  const rest = blocks.map((block, index) => ({ block, index })).filter(({ block, index }) => !open(block, index));
+  const folded = rest.length
+    ? [
+      '<div class="result-tables-more" role="list">',
+      rest.map(({ block, index }) => {
+        const foldKey = `${messageKey}:${index}`;
+        return [
+          '<div role="listitem">',
+          `<details class="result-more result-table-more" data-fold-key="${escapeHtml(foldKey)}"${messageKey && remembered.has(foldKey) ? " open" : ""}>`,
+          `<summary><span class="result-grow">${escapeHtml(block.title)}</span>`,
+          `<span class="result-row-value">${block.rows} 行 · ${block.columns} 列</span></summary>`,
+          block.html,
+          "</details>",
+          "</div>",
+        ].join("");
+      }).join(""),
+      "</div>",
+    ].join("")
+    : "";
+  return `<div class="agent-message-tables result-tables-card">${summaryHtml}${openHtml}${folded}</div>`;
+}
+
+// Folds the user opened survive conversation rebuilds (new messages redraw it).
+const openResultTableFolds = new Set();
+if (typeof document !== "undefined") {
+  document.addEventListener("toggle", (event) => {
+    const key = event.target?.dataset?.foldKey;
+    if (!key || !event.target.matches?.("details.result-table-more")) return;
+    if (event.target.open) openResultTableFolds.add(key);
+    else openResultTableFolds.delete(key);
+  }, true);
 }
 
 // VD-4: renders the calibration reliability curve / score-band bar+line chart
@@ -6699,6 +7449,10 @@ function driverTableChartHtml(chart) {
   if (chart.kind === "score_band_bars") {
     if (!Array.isArray(chart.bands) || chart.bands.length === 0) return "";
     return `<div class="agent-inline-table-chart">${renderScoreBandCard(chart)}</div>`;
+  }
+  if (chart.kind === "vintage_curves" && typeof renderVintageCurvesCard === "function") {
+    const html = renderVintageCurvesCard(chart);
+    return html ? `<div class="agent-inline-table-chart">${html}</div>` : "";
   }
   return "";
 }
@@ -6820,6 +7574,19 @@ if (typeof document !== "undefined") {
   document.addEventListener("input", handleModelingSetupInteraction);
   document.addEventListener("click", handleModelingWeightAdjustClick);
   document.addEventListener("click", handleAdoptionConfirmClick);
+  // V3 D-6/D-8: SQL proposal and monitoring form cards in the conversation.
+  document.addEventListener("change", (event) => handleConversationActionChange(event, {
+    getMessages: () => taskSession.messages,
+  }));
+  document.addEventListener("click", (event) => handleConversationActionClick(event, {
+    getSelectedTaskId: () => taskSession.taskId,
+    getMessages: () => taskSession.messages,
+    api,
+    refreshAgentMessages: async (taskId) => {
+      await loadAgentMessages(taskId);
+      if (taskSession.taskId === taskId) renderAgentConversation();
+    },
+  }));
   document.addEventListener("click", handleFeatureBinningClick);
   document.addEventListener("click", handleSpecialValueClick);
   document.addEventListener("click", handleStrategyClarificationSubmit);
@@ -6982,6 +7749,7 @@ function handleDedupExcludeClick(event) {
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleJoinKeyConfirmClick);
+  document.addEventListener("change", handleJoinKeyOptionChange);
   document.addEventListener("click", handleDedupConfirmClick);
   document.addEventListener("click", handleDedupExcludeClick);
 }
@@ -7047,8 +7815,12 @@ if (typeof document !== "undefined") {
     if (table) reportDraftState.edit(table.dataset.reportDraftTaskId, collectReportDraftValues(table));
   });
   document.addEventListener("click", (event) => {
-    const view = event.target?.closest?.("[data-validation-view]");
-    if (view) selectValidationView(view.dataset.validationView);
+    const expand = event.target?.closest?.("[data-report-draft-expand]");
+    if (expand) setReportDraftExpanded(!taskSession.panels.reportDraft.expanded, { restoreFocus: true });
+    const more = event.target?.closest?.("[data-report-card-more-toggle]");
+    if (more) setReportCardMoreOpen(more.closest("[data-report-draft-table]"), more.getAttribute("aria-expanded") !== "true");
+    const preview = event.target?.closest?.("[data-report-card-preview]");
+    if (preview && !event.target.closest("a")) beginReportCardEdit(preview.closest("[data-report-card-row]"));
     const save = event.target?.closest?.("[data-report-draft-save]");
     if (save) void reportDraftState.save(workbenchTaskId()).catch(() => {});
     const resolution = event.target?.closest?.("[data-report-draft-resolve]");
@@ -7058,7 +7830,7 @@ if (typeof document !== "undefined") {
     }
     const revise = event.target?.closest?.("[data-report-draft-revise]");
     if (revise) {
-      selectValidationView("conversation");
+      setReportDraftExpanded(false);
       const input = $("agentComposerInput");
       input.value = `请根据当前证据修订当前模型报告的「${revise.dataset.reportDraftRevise}」：`;
       input.focus();
@@ -7066,12 +7838,42 @@ if (typeof document !== "undefined") {
     }
   });
   document.addEventListener("keydown", (event) => {
+    const inReport = Boolean(event.target?.closest?.("#reportDraftWorkspace"));
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s"
       && workbenchTask()?.task_type === "validation" && selectedTaskIsAgentMode()
-      && activeValidationView === "report") {
+      && (inReport || taskSession.panels.reportDraft.expanded)) {
       event.preventDefault();
       void reportDraftState.save(workbenchTaskId()).catch(() => {});
+      return;
     }
+    const preview = event.target?.closest?.("[data-report-card-preview]");
+    if (preview && ["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      beginReportCardEdit(preview.closest("[data-report-card-row]"));
+      return;
+    }
+  });
+  // Esc runs before the Inspector's own Escape handler (capture), and is left
+  // alone while an IME candidate is open.
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
+    const row = event.target?.closest?.(".report-card-row.is-editing");
+    const inspectorOpen = $("taskInspector") && !$("taskInspector").hidden;
+    if (row) {
+      endReportCardEdit(row);
+      row.querySelector("[data-report-card-preview]")?.focus();
+    } else if (taskSession.panels.reportDraft.expanded && (event.target?.closest?.("#reportDraftWorkspace") || !inspectorOpen)) {
+      setReportDraftExpanded(false, { restoreFocus: true });
+    } else {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+  document.addEventListener("focusout", (event) => {
+    if (reportCardRelocating) return;
+    const row = event.target?.closest?.(".report-card-row.is-editing");
+    if (row && !row.contains(event.relatedTarget)) endReportCardEdit(row);
   });
   window.addEventListener("beforeunload", (event) => {
     if (reportDraftState.hasUnsaved()) { event.preventDefault(); event.returnValue = ""; }
@@ -7081,7 +7883,7 @@ if (typeof document !== "undefined") {
 async function submitVisibleReportDraft(button) {
   const table = button.closest("[data-report-draft-table]");
   const taskId = table?.dataset.reportDraftTaskId;
-  if (!table || !taskId || taskId !== workbenchTaskId() || pendingTaskContentLoadTaskId
+  if (!table || !taskId || taskId !== workbenchTaskId() || taskSession.panels.scroll.pendingContentLoadTaskId
     || reportDraftState.isConfirming(taskId)) return;
   const originalLabel = button.textContent;
   button.disabled = true;
@@ -7188,11 +7990,75 @@ function agentMessageResultDatasetHtml(message) {
     '<section class="result-dataset-download">',
     '<div class="result-dataset-download-copy">',
     `<strong>${escapeHtml(title)}</strong>`,
-    `<span>数据集 ${escapeHtml(datasetId)}</span>`,
+    // The dataset id is for tracing only; it rides in the tooltip.
+    `<span title="${escapeHtml(datasetId)}">包含这一步处理后的全部样本行</span>`,
     '</div>',
     `<a class="button compact primary" data-result-dataset-download href="${escapeHtml(href)}" download>${escapeHtml(downloadLabel)}</a>`,
     '</section>',
   ].join("");
+}
+
+// 2026-10-19 (plan batch 3 follow-up): a finished validation report shows its
+// files in the conversation as well as in the rail's 产物 list. The actions
+// reuse the rail's handlers, so preview and download behave identically.
+function artifactCardHtml(rows = []) {
+  const items = rows.filter(Boolean);
+  if (!items.length) return "";
+  const icons = typeof RAIL_ARTIFACT_ICONS === "undefined" ? {} : RAIL_ARTIFACT_ICONS;
+  return [
+    '<section class="artifact-card" aria-label="产物">',
+    ...items.map((row) => [
+      '<div class="artifact-row">',
+      icons[row.icon] || icons.doc || "",
+      '<span class="artifact-row-name">',
+      `<b>${escapeHtml(row.name)}</b>`,
+      row.detail ? `<small>${escapeHtml(row.detail)}</small>` : "",
+      "</span>",
+      '<span class="artifact-row-actions">',
+      ...(row.actions || []).map((action) => (
+        `<button type="button" class="artifact-action" data-artifact-action="${escapeHtml(action.action)}">${escapeHtml(action.label)}</button>`
+      )),
+      "</span>",
+      "</div>",
+    ].join("")),
+    "</section>",
+  ].join("");
+}
+
+function agentMessageValidationArtifactsHtml(message) {
+  if (message?.stage !== "word_report_ready" || message?.metadata?.report_ready !== true) return "";
+  // Same readiness check as the rail's 产物 rows: the report exists, the task
+  // finished, and no report job is rewriting it right now.
+  if (!completedReportReadyForDownloads({ action: "report" })) return "";
+  return artifactCardHtml([
+    {
+      icon: "doc",
+      name: "验证报告",
+      detail: "Word，按确认后的报告文案生成",
+      actions: [
+        { label: "预览", action: "previewWordReport" },
+        { label: "下载Word", action: "downloadWordReport" },
+      ],
+    },
+    {
+      icon: "sheet",
+      name: "指标明细",
+      detail: "Excel，平台计算的全部指标",
+      actions: [{ label: "下载Excel", action: "downloadExcelAnalysis" }],
+    },
+  ]);
+}
+
+function handleArtifactActionClick(event) {
+  const button = event.target?.closest?.("[data-artifact-action]");
+  if (!button || !$("resultScrollContent")?.contains(button)) return;
+  event.preventDefault();
+  const actionId = button.dataset.artifactAction;
+  const config = workflowActionConfig(actionId);
+  if (config) runAction(config.action, { actionId, busyText: config.busyText });
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleArtifactActionClick);
 }
 
 function agentMessageReportDownloadHtml(message) {
@@ -7221,10 +8087,12 @@ function agentMessageReportDownloadHtml(message) {
       && href.includes("driver-report/download")
       ? "下载组合分析报告"
       : storedLabel;
-    const detail = [report.recipe, report.experiment_id].filter(Boolean).join(" · ");
+    // Readable "实验 N · 算法"; the experiment id only rides in the tooltip.
+    const detail = String(report.detail_label || report.recipe || "");
+    const detailTitle = report.experiment_id ? ` title="${escapeHtml(String(report.experiment_id))}"` : "";
     return [
       '<div class="report-result-download-item">',
-      detail ? `<span>${escapeHtml(detail)}</span>` : "",
+      detail ? `<span${detailTitle}>${escapeHtml(detail)}</span>` : "",
       `<a class="button compact primary" data-agent-report-download href="${escapeHtml(href)}" download>${escapeHtml(label)}</a>`,
       '</div>',
     ].join("");
@@ -7346,7 +8214,25 @@ function normalizeAgentConversationGateContent(content) {
     .replace(
       /请查看当前节点并回复「确认」或给出调整指令以继续。/g,
       "请查看当前节点；认可后可直接用自然语言表达同意并继续，或说明具体调整。",
-    );
+    )
+    // D-10: the same hand-offs as the English UI receives them
+    // (marvis/ui_locale_messages_en.py).
+    .split("To confirm, reply `确认` to continue; you can also use the controls below, or describe the parameters to change.")
+    .join("If the current result looks right, just say so in your own words to continue; you can also use the controls below or describe what to change.")
+    .split("If correct, reply `确认`; to change, pick the roles/target column below and click “Confirm roles”.")
+    .join("If the roles and target column are right, just say so in your own words to continue; to change them, say what to change or use the controls below.")
+    .split("In Agent mode reply `继续` or `确认`; to adjust, just describe it in your own words.")
+    .join("In Agent mode just say you agree to continue; to adjust, describe what you need.")
+    .split("The previous step is done. Reply `继续`, or describe what to adjust.")
+    .join("The previous step is done. Just say you agree to continue, or describe what to adjust.")
+    .split("In manual mode click “Start”; in Agent mode reply `开始` or `继续`.")
+    .join("In manual mode click “Start”; in Agent mode just say you agree to start.")
+    .split("Got it. To accept the current result, reply `确认` to continue.")
+    .join("Got it. If the current result looks right, just say so in your own words to continue.")
+    .split("If correct, reply `确认`, or adjust with the controls below and click “Confirm roles”.")
+    .join("If correct, just say so in your own words to continue; you can also adjust with the controls below.")
+    .split("Review the current node and reply `确认`, or give an adjustment, to continue.")
+    .join("Review the current node; if it looks right, just say so to continue, or describe what to change.");
 }
 
 function agentMessageGateBodyHtml(message, interactive, options = {}) {
@@ -7367,6 +8253,16 @@ function agentMessageGateBodyHtml(message, interactive, options = {}) {
 
 function agentMessageStrategyClarificationBodyHtml(message, interactive) {
   return agentMessageStrategyClarificationHtml(message, { interactive });
+}
+
+// B-line: a repair report reads "已撤销" once a later message undoes it, and
+// only the newest still-undoable report keeps its undo button. The full
+// timeline is the source, since incremental pages miss earlier reports.
+function currentRepairTimelineState() {
+  const messages = typeof taskSession !== "undefined" && Array.isArray(taskSession?.messages)
+    ? taskSession.messages
+    : [];
+  return repairTimelineState(messages);
 }
 
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
@@ -7410,19 +8306,35 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const contentHtml = thinking
     ? agentThinkingHtml()
     : role === "assistant"
-      ? workflowMessageContentHtml(message, () => legacyContentHtml)
+      ? workflowMessageContentHtml(message, () => legacyContentHtml, {
+        repairState: message?.metadata?.repair_report ? currentRepairTimelineState() : null,
+      })
       : legacyContentHtml;
   const memoryReferencesHtml = role === "assistant"
     ? agentMemoryReferencesHtml(message?.metadata?.memory_references)
     : "";
-  const messageId = message?.id ? String(message.id) : "";
-  const reportDraftHtml = hasDraftTable
-    ? '<section class="report-draft-link"><strong>报告草稿已就绪</strong><p>在报告视图中编辑结论、保存草稿并生成文件。</p><button type="button" class="button compact" data-validation-view="report">查看并编辑报告</button></section>'
+  // Batch 3b: Agent-mode-only reply guidance travels as structured metadata so
+  // the message content stays mode-neutral (marvis/agent/quick_replies.py).
+  const replyHint = role === "assistant" && !thinking
+    ? String(message?.metadata?.reply_hint || "").trim()
     : "";
+  const replyHintHtml = replyHint ? `<p class="agent-reply-hint">${escapeHtml(replyHint)}</p>` : "";
+  const messageId = message?.id ? String(message.id) : "";
+  // Batch 3a: a regenerated draft supersedes the earlier one, so only the newest
+  // revision offers the report entry point (multi-model batches showed two).
+  const supersededDraft = hasDraftTable && options.isLatestReportDraft === false;
+  const reportDraftHtml = !hasDraftTable
+    ? ""
+    : supersededDraft
+      ? '<p class="report-draft-superseded">这一版报告草稿已被后面的新版本取代。</p>'
+      : '<div class="report-draft-slot" data-report-draft-slot></div>';
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
   const stageAttr = message?.stage
     ? ` data-agent-stage="${escapeHtml(String(message.stage))}"`
     : "";
+  const resultAttr = agentMessageIsResult(message) ? ' data-agent-result="true"' : "";
+  // D17 (batch 6b): the plan rail's step jumps to its latest message.
+  const planStepAttr = planStepMessageAttrs(message?.metadata);
   // VD-2/UX-2: only the latest typed gate (stale-protection identical to manual
   // mode's latestInteractiveScreenMessageId / lastAssistantMessageId) renders
   // its widgets as interactive; earlier gate cards render the same widgets as
@@ -7445,7 +8357,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
       ? agentMessageGateBodyHtml(message, interactive, { conversationOnly })
       : "",
     role === "assistant" ? renderModelTuningMessageProgress(message) : "",
-    role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}${agentMessageResultDatasetHtml(message)}${agentMessageReportDownloadHtml(message)}` : "",
+    role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}${agentMessageResultDatasetHtml(message)}${conversationActionCardHtml(message, taskSession.messages)}${agentMessageReportDownloadHtml(message)}${agentMessageValidationArtifactsHtml(message)}` : "",
     role === "assistant" && !conversationOnly ? agentMessageGateButtonHtml(message) : "",
   ].join("");
   const bodyHtml = agentConversationOnly
@@ -7454,16 +8366,41 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     ? stripGateButtonsHtml(rawBodyHtml)
     : rawBodyHtml;
   return [
-    `<article class="${className}"${idAttr}${stageAttr}>`,
-    role === "assistant" && (!options.hideMeta || isTuningProgress) ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+    `<article class="${className}"${idAttr}${stageAttr}${resultAttr}${planStepAttr}${role === "assistant" && !options.hideMeta ? ' data-run-start="true"' : ""}>`,
+    // D6: the first message of each consecutive Agent run shows the mascot
+    // avatar (data-run-start). Every Agent message carries a face so the
+    // 只看结果 filter can show one on a result whose run-start is filtered out;
+    // CSS hides the rest. Faces render idle and syncLiveAgentFaces sets the
+    // newest run-start live, so a status change never re-renders the messages.
+    role === "assistant"
+      ? agentFaceHtml(!options.hideMeta ? { face: "idle", label: agentStageLabel(labelStage) } : { face: "idle" })
+      : "",
+    role === "assistant" && (!options.hideMeta || isTuningProgress) ? agentMessageMetaHtml(agentMessageMetaLabel(message, labelStage), agentStageLabel(labelStage)) : "",
     // Agent prose stays in the normal conversation flow.  Functional widgets
     // inside bodyHtml (ingest notice, C1 table, screening panel, etc.) retain
     // their own visual shells; the entire reply is no longer wrapped in a
     // large coloured gate card.
     bodyHtml,
+    replyHintHtml,
     memoryReferencesHtml,
     "</article>",
   ].join("");
+}
+
+// Batch 3a "只看结果": a message is a result when it carries platform output
+// (tables, downloads, model delivery, a report draft). Read from metadata only.
+function agentMessageIsResult(message) {
+  if (message?.role !== "assistant") return false;
+  const metadata = message?.metadata || {};
+  if (Array.isArray(metadata.tables) && metadata.tables.length) return true;
+  if (Array.isArray(metadata.report_downloads) && metadata.report_downloads.length) return true;
+  if (metadata.report_download?.download_url) return true;
+  if (metadata.result_dataset?.dataset_id) return true;
+  if (["sql_query_result", "monitoring_schedule_created"].includes(metadata.conversation_action?.kind)) return true;
+  if (metadata.model_delivery) return true;
+  if (metadata.risk_analysis_report) return true;
+  if (metadata.summary_download_url) return true;
+  return message?.stage === "word_conclusion_draft" && hasReportDraftValues(metadata.draft_values);
 }
 
 function agentThinkingHtml() {
@@ -7502,6 +8439,20 @@ function agentMessageMetaLabel(message, labelStage = message?.stage) {
 
 function agentMessagePlanStep(metadata = {}) {
   return planRailController.planStep(metadata, taskSession.taskId);
+}
+
+// D6: the avatar replaces the default speaker word; a brand.json validator alias
+// and the phase / step / round context stay visible
+// ("Agent · 特征 · 筛选特征" -> "特征 · 筛选特征").
+function agentMessageMetaHtml(label, speaker) {
+  const text = String(label || "");
+  const visible = speaker === "Agent" && text.startsWith("Agent")
+    ? text.slice("Agent".length).replace(/^ · /, "")
+    : text;
+  const parts = visible.split(" · ").map((part, index) => (
+    `<span${index === 0 && part === speaker ? ' translate="no"' : ""}>${escapeHtml(part)}</span>`
+  ));
+  return visible ? `<div class="agent-message-meta">${parts.join(" · ")}</div>` : "";
 }
 
 function formatAgentMessageContent(content, { markdown = false } = {}) {
@@ -7555,7 +8506,17 @@ async function loadAgentMessages(taskId = workbenchTaskId(), { preserveOptimisti
       if (mergeIncrementalAgentMessages(nextMessages)) renderAgentConversation();
       return;
     }
-    if (preserveOptimistic && shouldPreserveOptimisticAgentMessages(nextMessages)) return;
+    if (preserveOptimistic && shouldPreserveOptimisticAgentMessages(nextMessages)) {
+      // Keep local messages while refreshing matching server metadata (for
+      // example labels returned after the UI language changes).
+      const nextById = new Map(nextMessages.filter((message) => message.id).map((message) => [message.id, message]));
+      const existingIds = new Set(taskSession.messages.map((message) => message.id).filter(Boolean));
+      const merged = taskSession.messages.map((message) => nextById.get(message.id) || message);
+      merged.push(...nextMessages.filter((message) => !message.id || !existingIds.has(message.id)));
+      taskSession.replaceMessages(request, merged, taskId);
+      renderAgentConversation();
+      return;
+    }
     taskSession.replaceMessages(request, nextMessages, taskId);
     renderAgentConversation();
   } catch (error) {
@@ -7652,9 +8613,38 @@ async function handleAgentMaterialSelectionRequest(taskId) {
   await refreshTasks();
   await reloadDataWorkspace(taskId, { silent: true });
   if (taskSession.taskId === taskId) {
-    setActionStatus("材料选择已保存。", "success", "下一步：请重新扫描材料。");
+    if ((selectedMaterialsTask.run_mode || task.run_mode) === "agent") {
+      setActionStatus("材料选择已保存，正在重新扫描。", "info");
+      continueAgentAfterMaterialSelection(taskId);
+    } else {
+      setActionStatus("材料选择已保存。", "success", "下一步：请重新扫描材料。");
+    }
   }
   return true;
+}
+
+// Saving new materials is the go-ahead to rescan (eval round 1: the Agent
+// said "保存后再重新扫描", then nothing happened until the user typed 继续).
+// Sent like a quick reply once the Agent request that opened the dialog has
+// released its busy claim.
+function continueAgentAfterMaterialSelection(taskId, attempt = 0) {
+  setTimeout(() => {
+    if (taskSession.taskId !== taskId) return;
+    if (taskBusyAction(taskId) || agentSendIsStopMode()) {
+      if (attempt < 50) continueAgentAfterMaterialSelection(taskId, attempt + 1);
+      return;
+    }
+    const input = $("agentComposerInput");
+    if (!input) return;
+    input.value = "继续验证";
+    autoGrowComposerInput();
+    updateAgentSendDisabled();
+    runAction(startAgentValidation, {
+      actionId: "agent",
+      busyText: "Agent 正在处理...",
+      taskId: workbenchTaskId(),
+    });
+  }, attempt ? 120 : 0);
 }
 
 async function startAgentValidation() {
@@ -7719,7 +8709,7 @@ async function startAgentValidation() {
       if (error?.name === "AbortError") {
         autoGrowComposerInput();
         updateAgentSendDisabled();
-        setActionStatus("已停止当前动作，请问有什么指示？", "success");
+        setActionStatus("已停止当前动作，请问有什么指示？", "stopped");
         return;
       }
       input.value = originalValue;
@@ -7838,7 +8828,7 @@ async function stopAgentValidation(taskId = workbenchTaskId()) {
       await waitForAgentValidation(normalizedTaskId, { stopping: true });
       return;
     }
-    setActionStatus(result.message || "已停止当前动作，请问有什么指示？", "success");
+    setActionStatus(result.message || "已停止当前动作，请问有什么指示？", "stopped");
   } finally {
     releaseBusy(busy);
   }
@@ -7902,7 +8892,7 @@ async function waitForAgentValidation(taskId, { stopping = false } = {}) {
       await loadReportFields(taskId);
       if (!taskRequests.current(selection)) return finalTask;
       if (stopping || agentValidationStopped(finalTask || workbenchTask())) {
-        setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
+        setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "stopped");
         return finalTask;
       }
       if (agentValidationPaused(finalTask || workbenchTask())) {
@@ -8104,14 +9094,31 @@ function setCreateTaskSubmitting(isSubmitting) {
   button.dataset.createBusy = isSubmitting ? "true" : "false";
 }
 
-async function createTask() {
+function rememberLastValidator(task) {
+  const validator = String(task?.validator || $("validator")?.value || "").trim();
+  if (!validator) return;
+  try {
+    localStorage.setItem(LAST_VALIDATOR_KEY, validator);
+  } catch (_) {
+    // Optional per-viewer convenience.
+  }
+}
+
+// onCreated fires as soon as the task exists, before the loads below, so a
+// later failure is reported on the task rather than on the home card.
+async function createTask({ onCreated = null } = {}) {
   const task = await createTaskDialog.createTask();
   if (!task) return null;
+  rememberLastValidator(task);
+  // Created from the home card or its 高级设置 dialog: the home page starts fresh.
+  homeComposer.reset();
+  onCreated?.(task);
   setSelectedTask(task);
   rememberSelectedTaskId(task.id);
   renderStoredStateSummaries();
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   void strategyHistoryMappingPanel.selectTask(task);
+  if (typeof dataHistoryMappingPanel !== "undefined") void dataHistoryMappingPanel.selectTask(task);
   await refreshTasks();
   await reloadDataWorkspace(task.id, { silent: true });
   await loadReportFields();
@@ -8148,12 +9155,22 @@ async function ensureValidationMaterialSelection(task) {
   if (!task || (task.task_type || "validation") !== "validation") return task;
   const selectedMaterialsTask = await materialBindingDialog.ensureMaterialSelection(task);
   if (!selectedMaterialsTask) {
+    // The task already exists when the user chooses materials later: open it
+    // (and list it) instead of leaving the home page in front of it.
+    if (task.id) {
+      await refreshTasks();
+      await requestTaskSelection(taskSession.taskId === task.id ? (taskSession.task || task) : task);
+    }
     setActionStatus("等待选择验证材料。", "info");
     return null;
   }
   setSelectedTask(selectedMaterialsTask);
   rememberSelectedTaskId(selectedMaterialsTask.id);
   await refreshTasks();
+  // Manual validation goes straight on to the scan without a full render;
+  // show the task now so the workspace does not stay on the home page.
+  renderCurrentTask();
+  renderTaskList();
   return taskSession.task || selectedMaterialsTask;
 }
 
@@ -8187,18 +9204,21 @@ async function scanCurrentTask() {
   }
 }
 
-async function createTaskAndScan() {
+// firstMessage (home page, batch 5): in agent mode the sentence the user typed
+// on the home page becomes the task's first Agent message. onCreated: see
+// createTask.
+async function createTaskAndScan({ firstMessage = "", onCreated = null } = {}) {
   if (createTaskInFlight) {
     setCreateStatus("任务正在创建，请稍候。");
-    return;
+    return null;
   }
   createTaskInFlight = true;
   setCreateTaskSubmitting(true);
   try {
-    let task = await createTask();
-    if (!task) return;
+    let task = await createTask({ onCreated });
+    if (!task) return null;
     task = await ensureValidationMaterialSelection(task);
-    if (!task) return;
+    if (!task) return null;
     const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";
     if (usesAgentValidationWorkbench(task)) {
       await requestTaskSelection(task);
@@ -8213,6 +9233,10 @@ async function createTaskAndScan() {
       await loadAgentMessages(taskId);
       renderAll();
       if (!isValidationTask && task.task_type === "vintage") {
+        // The home card already chose the analysis, and the intake takes a
+        // first message that names one as its answer: starting first only
+        // asked 「你想分析什么」 again (eval round 1, S7).
+        if (await sendFirstAgentMessage(task, firstMessage)) return;
         await dispatchDriverStart(taskId);
         renderAll();
         setActionStatus("风险分析任务已创建，请先告诉 Agent 要分析什么。", "success");
@@ -8224,6 +9248,7 @@ async function createTaskAndScan() {
         setActionStatus("组合分析任务已创建，请填写经业务确认的组合口径。", "success");
         return;
       }
+      if (await sendFirstAgentMessage(task, firstMessage)) return;
       if (!isValidationTask && definition.initialGoal) {
         // createTask() already seeded the conversation composer via
         // prefillAgentTaskInstruction; just focus it (the V2 plan dialog is retired).
@@ -8240,6 +9265,8 @@ async function createTaskAndScan() {
       const taskId = task.id || taskSession.taskId;
       await dispatchDriverStart(taskId);
       renderAll();
+      // Manual risk intake parses the analysis command deterministically.
+      if (task.task_type === "vintage" && await sendFirstAgentMessage(task, firstMessage)) return;
       setActionStatus(`${taskTypeDefinition(task.task_type).label}任务已创建，请在下方逐步确认。`, "success");
       return;
     }
@@ -8251,10 +9278,93 @@ async function createTaskAndScan() {
     } finally {
       releaseBusy(busy);
     }
+    return task;
   } finally {
     createTaskInFlight = false;
     setCreateTaskSubmitting(false);
   }
+}
+
+// "创建并开始" is the user's explicit go-ahead, so the first Agent message leads
+// with the workflow's own start command (the governed router never creates a
+// plan from a bare goal) and carries the home sentence as the goal. Validation
+// sends the bare command: its start check rejects any question form and the
+// run takes no free-text goal. Vintage has no start command; its first
+// question is what to analyse, which the sentence answers.
+function homeFirstAgentMessage(task, sentence) {
+  const goal = String(sentence || "").trim();
+  if (!goal) return "";
+  const command = taskTypeDefinition(task?.task_type).initialGoal || "";
+  if (!command) return goal;
+  if (task?.task_type === "validation" || goal === command) return command;
+  return `${command}。我的目标：${goal}`;
+}
+
+// Sent through the normal Agent send path (same busy, model and error rules).
+// Not awaited: the turn can run for minutes and must not hold the create lock;
+// startAgentValidation reads the composer before its first await.
+async function sendFirstAgentMessage(task, firstMessage) {
+  const content = homeFirstAgentMessage(task, firstMessage);
+  const input = $("agentComposerInput");
+  const manualRiskIntake = task?.run_mode === "manual" && task?.task_type === "vintage";
+  if (!content || !input || taskSession.taskId !== task?.id) return false;
+  if (task.run_mode !== "agent" && !manualRiskIntake) return false;
+  input.value = content;
+  autoGrowComposerInput();
+  updateAgentSendDisabled();
+  void runAction(startAgentValidation, {
+    actionId: "agent",
+    busyText: "Agent 正在处理...",
+    taskId: workbenchTaskId(),
+  });
+  return true;
+}
+
+// The risk intake takes the chosen analysis command, not free text.
+function homeDraftFirstMessage(draft) {
+  return draft?.taskType === "vintage" ? draft.analysis || "" : draft?.text || "";
+}
+
+// Resolves as soon as the task exists; the rest of the start (material
+// selection, scan, first Agent message) carries on on the task itself, and
+// its failures are reported there.
+function createTaskFromHome(draft) {
+  createTaskDialog.prefillTaskDialog(draft);
+  return new Promise((resolve, reject) => {
+    let created = false;
+    createTaskAndScan({
+      firstMessage: homeDraftFirstMessage(draft),
+      onCreated: () => {
+        created = true;
+        resolve(true);
+      },
+    }).then(() => {
+      if (created) return;
+      // The dialog's own checks stay the contract; show their message on the card.
+      const message = $("statusMessage")?.textContent?.trim();
+      reject(new Error(message ? `${message}可以在「高级设置」里补充。` : "没有创建任务，请检查后重试。"));
+    }).catch((error) => {
+      if (!created) {
+        reject(error);
+        return;
+      }
+      setActionStatus("任务已创建，但后续步骤失败。", "error", error?.message || "操作失败");
+      renderAll();
+    });
+  });
+}
+
+function openHomeAdvancedSettings(draft) {
+  createTaskDialog.prefillTaskDialog(draft, { show: true });
+  homeAdvancedDraft = draft;
+}
+
+// Create from the dialog; when it was opened from the home card for the same
+// task type, the home sentence still becomes the first Agent message.
+function createTaskFromDialog() {
+  const draft = homeAdvancedDraft;
+  const sameType = draft && ($("taskType")?.value || createTaskDialog.activeTaskType()) === draft.taskType;
+  return createTaskAndScan(sameType ? { firstMessage: homeDraftFirstMessage(draft) } : {});
 }
 
 // Start a driver-based task's deterministic flow (manual mode, no LLM): POST the
@@ -8347,7 +9457,7 @@ async function pollValidationProgress(
       const reachedTerminalStatus = doneStatuses.has(status) && !serverBusyAction;
       if (stopping && !serverBusyAction) {
         if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background) {
-          setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
+          setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "stopped");
         }
       }
       // Agent-stage exceptions may occur before a deterministic stage updates
@@ -8407,7 +9517,7 @@ async function validateCurrentTask(options = {}) {
   const finalTask = await pollValidationProgress(new Set(["executed", "failed", "scanned"]), taskId);
   if (taskSession.taskId !== taskId) return;
   if (finalTask?.status === "scanned" || taskSession.task?.status === "scanned") {
-    setActionStatus("Notebook 已停止，可重新运行。", "success");
+    setActionStatus("Notebook 已停止，可重新运行。", "stopped");
     return;
   }
   await loadReportFields(taskId);
@@ -8431,7 +9541,7 @@ async function cancelCurrentNotebook() {
   if (finalTask?.status === "failed" || taskSession.task?.status === "failed") {
     setTaskFailureActionStatus(finalTask || taskSession.task);
   } else {
-    setActionStatus("Notebook 已停止，可重新运行。", "success");
+    setActionStatus("Notebook 已停止，可重新运行。", "stopped");
   }
 }
 
@@ -8448,7 +9558,7 @@ async function cancelCurrentMetrics() {
   } else if (finalTask?.status === "writing_artifacts" || taskSession.task?.status === "writing_artifacts") {
     setActionStatus("指标与 Excel 已生成。", "success");
   } else {
-    setActionStatus("指标生成已停止，可重新生成。", "success");
+    setActionStatus("指标生成已停止，可重新生成。", "stopped");
   }
 }
 
@@ -8465,7 +9575,7 @@ async function cancelCurrentReport() {
   } else if ((finalTask?.report_available || taskSession.task?.report_available) === true) {
     setActionStatus("Word 报告已生成，可下载。", "success");
   } else {
-    setActionStatus("报告生成已停止，可重新生成。", "success");
+    setActionStatus("报告生成已停止，可重新生成。", "stopped");
   }
 }
 
@@ -8485,7 +9595,7 @@ async function generateMetrics() {
   if (taskSession.task?.status === "failed") {
     setTaskFailureActionStatus(taskSession.task);
   } else if (finalTask?.status === "executed" || taskSession.task?.status === "executed") {
-    setActionStatus("指标生成已停止，可重新生成。", "success");
+    setActionStatus("指标生成已停止，可重新生成。", "stopped");
   } else {
     setActionStatus("指标与 Excel 已生成。", "success");
     scrollToManualWorkflowSection("metrics");
@@ -8502,6 +9612,7 @@ async function loadReportFields(taskId = workbenchTaskId()) {
   try {
     const payload = await api(`api/tasks/${taskId}/report-fields`, { signal: request.signal });
     if (!taskRequests.accepts(request) || !isWorkbenchTaskId(taskId)) return;
+    taskSession.panels.metrics.sectionsOwnerId = taskId;
     renderMetricPreview(
       payload.metric_values || {},
       payload.workbook_source,
@@ -8606,9 +9717,18 @@ async function loadTaskPurgeSummary(task) {
       ? validatedValidationBatchPurgeSummary(preview)
       : preview && preview.purge_summary ? preview.purge_summary : null;
     if (!summary) return [];
+    // V3 UI-4: readable names behind each count (uploaded file names, plan
+    // templates, model types); the dialog lists them instead of bare counts.
+    const names = preview?.purge_names && typeof preview.purge_names === "object"
+      ? preview.purge_names
+      : {};
     const items = [];
     for (const [key, label] of PURGE_SUMMARY_FIELDS) {
-      if (summary[key]) items.push({ key, label, count: summary[key] });
+      if (!summary[key]) continue;
+      const item = { key, label, count: summary[key] };
+      if (Array.isArray(names[key])) item.names = names[key];
+      if (key === "datasets" && names.derived_datasets) item.extra = names.derived_datasets;
+      items.push(item);
     }
     return items;
   } catch (error) {
@@ -8724,7 +9844,7 @@ async function runAction(action, options = {}) {
     if (taskScoped && !taskRequests.current(selection)) return;
     shouldRenderAfter = true;
     if (error?.name === "AbortError") {
-      if (actionId && taskScoped) setActionStatus(actionCancelledStatusTitle(actionId), "success");
+      if (actionId && taskScoped) setActionStatus(actionCancelledStatusTitle(actionId), "stopped");
       return;
     }
     if (taskSession.taskId && taskScoped) {
@@ -8740,6 +9860,11 @@ async function runAction(action, options = {}) {
     if (actionId === "draftTools") setDraftToolsStatus(message, "error");
     if (actionId && taskScoped) renderActionError(actionId, message);
     if (actionId && taskScoped) setActionStatus(actionFailureStatusTitle(actionId), "error", message);
+    // The status pill only carries a label and is re-rendered right after;
+    // a failed step button says why where the user is looking (eval S10).
+    if (actionId && taskScoped && ["scan", "notebook", "metrics", "report"].includes(actionId)) {
+      showComingSoonToast(`${actionFailureStatusTitle(actionId)}${humanizeActionError(message)}`, { durationMs: 5200 });
+    }
     else if (!actionId) setCreateStatus(message, "error");
   } finally {
     releaseBusy(busy);
@@ -8823,9 +9948,55 @@ function workflowActionConfig(actionId) {
   return null;
 }
 
+// D17: a step jump lands on its card and briefly pulses it (neutral fill).
+function flashLocated(element) {
+  if (!element) return;
+  element.classList.remove("is-located");
+  void element.offsetWidth;
+  element.classList.add("is-located");
+  window.setTimeout(() => element.classList.remove("is-located"), 1400);
+}
+
 function scrollStepTarget(targetId) {
   if (!targetId) return;
-  $(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const target = $(targetId);
+  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  flashLocated(target);
+}
+
+// Plan-rail substeps (data, feature, modeling, strategy, risk, portfolio):
+// a finished, failed or waiting step jumps to the step's latest message
+// (step_id, or the expected_step_id a decision message hands off to); a step
+// with no message of its own lands on the plan's latest result message.
+function planStepMessageAttrs(metadata = {}) {
+  const stepId = String(metadata?.step_id || metadata?.expected_step_id || "");
+  const planId = String(metadata?.plan_id || metadata?.expected_plan_id || "");
+  return [
+    stepId ? ` data-plan-step-message="${escapeHtml(stepId)}"` : "",
+    planId ? ` data-plan-message="${escapeHtml(planId)}"` : "",
+  ].join("");
+}
+
+function locatePlanStepMessage(stepId) {
+  if (!stepId) return false;
+  const visible = (selector) => [...($("resultScrollContent")?.querySelectorAll(selector) || [])]
+    .filter((node) => node.offsetParent !== null);
+  let matches = visible(`[data-plan-step-message="${CSS.escape(stepId)}"]`);
+  if (!matches.length) {
+    const planId = stepId.replace(/-step-\d+$/, "");
+    matches = visible(`[data-plan-message="${CSS.escape(planId)}"]`);
+  }
+  const target = matches[matches.length - 1];
+  if (!target) return false;
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+  flashLocated(target);
+  return true;
+}
+
+function planSubstepFromEvent(event) {
+  const substep = event.target.closest(".notebook-step[data-plan-step-id]");
+  if (!substep || !substep.closest(".plan-rail-substeps")) return null;
+  return /\b(succeeded|skipped|failed|review)\b/.test(substep.className) ? substep : null;
 }
 
 function scrollToManualWorkflowSection(stepId) {
@@ -8862,6 +10033,8 @@ function handleWorkflowStepperClick(event) {
     if (config) runAction(config.action, { actionId, busyText: config.busyText });
     return;
   }
+  const substep = planSubstepFromEvent(event);
+  if (substep && locatePlanStepMessage(substep.dataset.planStepId)) return;
   const step = event.target.closest(".step[data-step-target]");
   if (step) scrollStepTarget(step.dataset.stepTarget);
 }
@@ -8869,6 +10042,12 @@ function handleWorkflowStepperClick(event) {
 function handleWorkflowStepperKeydown(event) {
   if (event.target.closest("[data-validation-stage-expansion] > summary")) return;
   if (!["Enter", " "].includes(event.key)) return;
+  const substep = planSubstepFromEvent(event);
+  if (substep) {
+    event.preventDefault();
+    locatePlanStepMessage(substep.dataset.planStepId);
+    return;
+  }
   const step = event.target.closest(".step[data-step-target]");
   if (!step || event.target.closest("[data-step-action]")) return;
   event.preventDefault();
@@ -8879,7 +10058,11 @@ $("createTaskOpenButton").onclick = openTaskTypeWelcome;
 $("configureAgentModelButton").onclick = openLLMSettingsDialog;
 $("createConfigureAgentModelButton").onclick = openLLMSettingsDialog;
 $("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;
-$("welcomeTaskCards").onclick = openTaskDialogFromCard;
+$("welcomeTaskCards").onclick = pickWelcomeTaskType;
+homeComposer.bind();
+$("taskDialog").addEventListener("close", () => {
+  homeAdvancedDraft = null;
+});
 $("closeTaskDialogButton").onclick = closeTaskDialog;
 $("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);
 $("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;
@@ -8908,8 +10091,9 @@ $("sidebarCollapseButton").onclick = toggleSidebarCollapsed;
 $("sidebarBrandTrigger").onclick = expandSidebarFromBrand;
 $("sidebarBrandTrigger").onkeydown = handleSidebarBrandKeydown;
 $("createTaskButton").onclick = () =>
-  runAction(createTaskAndScan);
+  runAction(createTaskFromDialog);
 $("workflowStepper").onclick = handleWorkflowStepperClick;
+$("taskArtifacts").onclick = handleWorkflowStepperClick;
 $("workflowStepper").onkeydown = handleWorkflowStepperKeydown;
 // The editable "编辑参数后重试" form now lives in the middle workspace
 // (#planRetryPanel), not the rail. Route its clicks (submit / schema fields)
@@ -8922,6 +10106,39 @@ $("taskSearchInput").oninput = (event) => {
   renderTaskList();
 };
 $("taskSearchToggle").onclick = toggleTaskSearch;
+// Mockup sidebar: ⌘K / Ctrl+K opens task search from anywhere.
+// Many models: a vertical wheel scrolls the header's model chips sideways.
+document.addEventListener(
+  "wheel",
+  (event) => {
+    const list = event.target?.closest?.(".task-hero-top .validation-batch-switcher-list");
+    if (!list || list.scrollWidth <= list.clientWidth) return;
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    const previousLeft = list.scrollLeft;
+    list.scrollLeft += event.deltaY;
+    // At either end the wheel goes back to scrolling the page.
+    if (list.scrollLeft !== previousLeft) event.preventDefault();
+  },
+  { passive: false },
+);
+
+const taskSearchShortcutIsMac = typeof navigator !== "undefined"
+  && /Mac|iPhone|iPad/.test(String(navigator.platform || navigator.userAgent || ""));
+document.addEventListener("keydown", (event) => {
+  // ⌘K on macOS (Ctrl+K there edits text), Ctrl+K elsewhere; never behind a dialog.
+  const modifier = taskSearchShortcutIsMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  if (!modifier || event.altKey || event.shiftKey || event.isComposing) return;
+  if (String(event.key || "").toLowerCase() !== "k") return;
+  if (document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  taskSearchController.openTaskSearch();
+});
+{
+  const toggle = $("taskSearchToggle");
+  toggle?.setAttribute("aria-keyshortcuts", taskSearchShortcutIsMac ? "Meta+K" : "Control+K");
+  const hint = toggle?.querySelector(".list-search-kbd");
+  if (hint) hint.textContent = taskSearchShortcutIsMac ? "⌘K" : "Ctrl K";
+}
 $("taskSearchClose").onclick = () => closeTaskSearch({ focusToggle: true });
 $("searchScrim").onclick = () => closeTaskSearch({ focusToggle: true });
 $("taskList").addEventListener("click", () => closeTaskSearch());
@@ -8933,6 +10150,7 @@ bindTaskRowPreview({
   displayName: taskDisplayName,
   typeLabel: taskTypeLabel,
   ownerLabel: (task) => taskTypeDefinition(task.task_type).validatorLabel || "负责人",
+  status: taskResolvedStatus,
 });
 $("settingsMenu").onchange = handleSettingsMenuChange;
 $("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
@@ -8991,16 +10209,36 @@ $("agentEffortSelect").onchange = (event) => {
 $("agentAcceptanceModeSelect").onchange = (event) => {
   const previousMode = agentAcceptanceMode;
   agentAcceptanceMode = normalizeAgentAcceptanceMode(event.target.value);
-  event.target.value = agentAcceptanceMode;
-  renderAgentAcceptanceModePreference();
-  persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
+  event.target.blur();
   // Phase 0B: AUTO only operates low-risk nodes.  Mandatory business decisions
   // and effect authorizations always stay with the local human principal.
+  // V3 UI-23: switching into AUTO asks first (every task type and the home
+  // composer, which mirrors this select); cancel returns to 默认权限.
   if (agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept") {
-    setAgentComposerNotice("自动模式仅处理低风险节点；强制业务决策与副作用授权始终需要人工操作。", "info");
+    applyAgentAcceptanceMode(previousMode, { persist: false });
+    void confirmAutoAcceptanceMode();
+    return;
   }
-  event.target.blur();
+  applyAgentAcceptanceMode(agentAcceptanceMode);
 };
+
+async function confirmAutoAcceptanceMode() {
+  const confirmed = await showPlatformConfirm({
+    title: "开启自动审查",
+    message: "自动模式仅处理低风险节点；强制业务决策与副作用授权始终需要人工操作。",
+    confirmText: "开启",
+    cancelText: "取消",
+  });
+  applyAgentAcceptanceMode(confirmed ? "auto_accept" : "normal");
+}
+
+function applyAgentAcceptanceMode(mode, { persist = true } = {}) {
+  agentAcceptanceMode = normalizeAgentAcceptanceMode(mode);
+  $("agentAcceptanceModeSelect").value = agentAcceptanceMode;
+  renderAgentAcceptanceModePreference();
+  syncHomeComposerChips();
+  if (persist) persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
+}
 
 // Per-task overrides take precedence; without a selected task the change
 // belongs in the global preference store (used as the seed for new tasks).
@@ -9018,6 +10256,57 @@ function blurChipSelectIfFocused() {
   focused.blur();
 }
 const agentComposerSelectIds = ["agentAcceptanceModeSelect", "agentModelSelect", "agentEffortSelect"];
+
+// Mockup home composer (2026-10-19): its chips mirror the task composer's
+// selects in both directions. A pick on the home screen goes through the task
+// composer's own change handler, so it persists as the seed for the new task.
+function syncHomeComposerChip(home) {
+  const source = $(home?.dataset?.mirrors || "");
+  if (!home || !source) return;
+  const options = [...source.options].map((option) => [option.value, option.textContent]);
+  const current = [...home.options].map((option) => [option.value, option.textContent]);
+  if (JSON.stringify(options) !== JSON.stringify(current)) {
+    home.replaceChildren(...options.map(([value, label]) => new Option(label, value)));
+  }
+  if (home.value !== source.value) home.value = source.value;
+  home.disabled = source.disabled;
+  const chip = home.closest(".agent-composer-chip");
+  if (chip) {
+    chip.hidden = !source.options.length;
+    if (chip.classList.contains("agent-composer-acceptance")) chip.dataset.acceptanceMode = source.value;
+  }
+}
+
+function bindHomeComposerChips() {
+  document.querySelectorAll("#homeComposer select[data-mirrors]").forEach((home) => {
+    const source = $(home.dataset.mirrors);
+    if (!source) return;
+    home.addEventListener("change", () => {
+      if (source.value === home.value) return;
+      source.value = home.value;
+      source.dispatchEvent(new Event("change", { bubbles: true }));
+      syncHomeComposerChip(home);
+    });
+    source.addEventListener("change", () => syncHomeComposerChip(home));
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(() => syncHomeComposerChip(home)).observe(source, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["disabled"],
+      });
+    }
+    syncHomeComposerChip(home);
+  });
+}
+
+// Programmatic value changes on the task composer fire no event; the home
+// screen re-syncs whenever it is shown.
+function syncHomeComposerChips() {
+  if (typeof document === "undefined") return;
+  document.querySelectorAll("#homeComposer select[data-mirrors]").forEach(syncHomeComposerChip);
+}
+bindHomeComposerChips();
 document.addEventListener(
   "mousedown",
   (event) => {
@@ -9093,6 +10382,8 @@ $("agentComposerInput").addEventListener("keydown", (event) => {
     taskId: workbenchTaskId(),
   });
 });
+bindSuggestionAccept($("agentComposerInput"), () => $("agentComposerInput")?.dataset.suggestion || "");
+bindSuggestionAccept($("homeComposerInput"), () => suggestionFromPlaceholder($("homeComposerInput")?.placeholder));
 $("agentComposerInput").addEventListener("input", () => {
   autoGrowComposerInput();
   updateAgentSendDisabled();
@@ -9147,6 +10438,58 @@ function updateAgentSendDisabled() {
   if (!input || !button) return;
   const stopMode = renderAgentSendButtonState();
   button.disabled = stopMode ? false : !input.value.trim();
+  renderAgentQuickReplies();
+}
+
+// D11 quick replies: shown wherever the composer is (agent mode and the
+// deterministic manual risk intake) while the platform waits for the user;
+// hidden while it is working (the send button is then a stop button).
+function renderAgentQuickReplies() {
+  // D-10 §2.4: the reply-language hint follows the open task's latest typed
+  // message; quick-reply commands are platform phrases and do not count.
+  setQuickReplyCommands(quickReplyLabelsByCommand(taskSession.messages).keys());
+  seedReplyLanguage(taskSession.messages, { taskId: taskSession.taskId });
+  const box = $("agentQuickReplies");
+  if (!box) return;
+  const composer = $("agentComposer");
+  const enabled = Boolean(composer) && !composer.classList.contains("hidden")
+    && (selectedTaskIsAgentMode() || selectedTaskNeedsManualRiskIntake())
+    && !agentSendIsStopMode();
+  const replies = enabled ? agentQuickReplies(taskSession.messages) : [];
+  const html = agentQuickRepliesHtml(replies);
+  const shownHtml = localizeHtml(html, { context: box });
+  const changed = box.innerHTML !== shownHtml || box.hidden !== !replies.length;
+  if (box.innerHTML !== shownHtml) box.innerHTML = html;
+  box.hidden = !replies.length;
+  if (changed && typeof requestAnimationFrame === "function") requestAnimationFrame(syncAgentComposerClearance);
+}
+
+function handleAgentQuickReplyClick(event) {
+  const chip = event.target?.closest?.("[data-agent-quick-reply]");
+  if (!chip || !taskSession.taskId) return;
+  event.preventDefault();
+  const command = String(chip.dataset.agentQuickReply || "").trim();
+  const input = $("agentComposerInput");
+  if (!command || !input || agentSendIsStopMode()) return;
+  input.value = command;
+  autoGrowComposerInput();
+  updateAgentSendDisabled();
+  runAction(startAgentValidation, {
+    actionId: "agent",
+    busyText: "Agent 正在处理...",
+    taskId: workbenchTaskId(),
+  });
+}
+// V3 D-7: an Inspector quick action only opens that panel; nothing is sent.
+function handleAgentInspectorActionClick(event) {
+  const chip = event.target?.closest?.("[data-agent-inspector-item]");
+  if (!chip) return;
+  event.preventDefault();
+  workbenchChrome.openInspectorItem(String(chip.dataset.agentInspectorItem || ""));
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleAgentQuickReplyClick);
+  document.addEventListener("click", handleAgentInspectorActionClick);
 }
 
 updateAgentSendDisabled();
@@ -9168,6 +10511,7 @@ materialBindingDialog.bind();
 strategyCandidateLabController.bind(document);
 mountGovernanceExtensions();
 createOperationsController({root: $("operationsDialog"), openButton: $("operationsOpenButton")}).bind();
+workbenchChrome.bind();
 onSelectedTierChange(syncCreateTaskTierDefault);
 createTaskDialog.bindMaterialSourceControls();
 const pet = $("petCompanion");
@@ -9175,6 +10519,7 @@ if (pet) pet.addEventListener("pointerdown", startPetDrag);
 $("leftResizeHandle").onpointerdown = (event) => startResizeDrag("left", event);
 $("rightResizeHandle").onpointerdown = (event) => startResizeDrag("right", event);
 $("leftResizeHandle").onkeydown = (event) => handleResizeKey("left", event);
+$("leftResizeHandle").ondblclick = resetSidebarWidth;
 $("rightResizeHandle").onkeydown = (event) => handleResizeKey("right", event);
 $("resultScrollContent").addEventListener("scroll", handleResultScroll, { passive: true });
 document.addEventListener("wheel", routeWorkspaceWheelToResult, { passive: false });
@@ -9184,8 +10529,28 @@ document.addEventListener("wheel", noteAgentUserScrollInput, { passive: true });
 document.addEventListener("touchstart", noteAgentUserScrollInput, { passive: true });
 document.addEventListener("touchmove", noteAgentUserScrollInput, { passive: true });
 window.addEventListener("resize", syncTaskHeroGlassLayout);
+// The header row also re-wraps when the sidebar or the rail is toggled, which
+// is not a window resize.
+if (typeof ResizeObserver === "function") {
+  const heroRow = document.querySelector("#resultWorkspace .task-hero-top");
+  if (heroRow) new ResizeObserver(() => requestAnimationFrame(syncTaskHeroGlassLayout)).observe(heroRow);
+}
 
 $("taskHero")?.addEventListener("click", handleTaskHeroToggle);
+// The details card floats over the conversation: a press anywhere outside the
+// task header (or Escape) folds it again (2026-10-19 user feedback).
+document.addEventListener("pointerdown", (event) => {
+  const hero = $("taskHero");
+  if (!hero || hero.classList.contains("is-collapsed")) return;
+  if (event.target instanceof Node && hero.contains(event.target)) return;
+  setTaskHeroCollapsed(true);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const hero = $("taskHero");
+  if (!hero || hero.classList.contains("is-collapsed") || document.querySelector("dialog[open]")) return;
+  setTaskHeroCollapsed(true);
+});
 // Re-measure once the fold animation settles so scroll padding and the glass
 // tint reflect the hero's final height, not its mid-transition height.
 $("taskHeroDetails")?.addEventListener("transitionend", () => syncTaskHeroGlassLayout());
@@ -9204,7 +10569,7 @@ document.addEventListener("keydown", (event) => {
     !event.isComposing
   ) {
     event.preventDefault();
-    runAction(createTaskAndScan);
+    runAction(createTaskFromDialog);
   }
 });
 
@@ -9217,6 +10582,34 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("click", closeSidebarSettingsOnOutsideClick);
 
+// D-10: platform UI language (sidebar 中文 | English). Frontend text swaps in
+// place; backend labels follow on the next fetch, so re-read the open task.
+installUiLanguage();
+let uiLocaleRenderGeneration = 0;
+onUiLocaleChange(async () => {
+  const generation = ++uiLocaleRenderGeneration;
+  planRailController.invalidateLocale();
+  const redrawLocalizedWidgets = () => {
+    // Accessible row labels combine raw task names with localized status and
+    // owner labels; rebuild those attributes even when task data is unchanged.
+    renderSignatures.taskList = null;
+    // The streaming fast path updates prose only. Fixed tables and widgets
+    // need a structural render when their API-provided labels change.
+    lastAgentRenderSignature = null;
+    lastAgentStructuralSignature = null;
+    lastDriverManualAnalysisSignature = null;
+    renderAll();
+  };
+  redrawLocalizedWidgets();
+  if ($("wordPreviewDialog")?.open && workbenchTaskId()) {
+    $("wordPreviewFrame").src = `api/tasks/${workbenchTaskId()}/report/preview?ui_locale=${getUiLocale()}&t=${Date.now()}`;
+  }
+  await Promise.allSettled([
+    refreshTasks(),
+    loadAgentMessages(undefined, { preserveOptimistic: true }),
+  ]);
+  if (generation === uiLocaleRenderGeneration) redrawLocalizedWidgets();
+});
 installFormControlFocusRingGuard();
 themeController.restoreTheme();
 themeController.watchSystemTheme();
@@ -9266,6 +10659,7 @@ async function initializeApp() {
     const validationBatchLoadPromise = validationBatchPanelController.selectTask(taskSession.task);
     const candidateLabLoadPromise = strategyCandidateLabController.selectTask(taskSession.task);
     void strategyHistoryMappingPanel.selectTask(taskSession.task);
+    if (typeof dataHistoryMappingPanel !== "undefined") void dataHistoryMappingPanel.selectTask(taskSession.task);
     renderStoredStateSummaries();
     await loadReportFields();
     await loadTaskEvidence();

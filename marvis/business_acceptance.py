@@ -209,6 +209,12 @@ class BusinessEvidence:
     causal_identification_ref: str | None = None
 
 
+# Shown to users when a plan has no business objective. The wording matches the
+# plan completion line; llm_outbound_business maps it (and the historical text
+# stored in older results) to the reason code ``objective_not_configured``.
+OBJECTIVE_NOT_CONFIGURED_REASON = "这次没有设置业务验收标准，所以只说明流程已跑完，不判断业务是否达标。"
+
+
 def evaluate_business_acceptance(
     objective: BusinessObjective | None, evidence: BusinessEvidence | None
 ) -> dict:
@@ -223,7 +229,7 @@ def evaluate_business_acceptance(
         "reasons": [],
     }
     if objective is None:
-        result["reasons"] = ["未配置业务验收标准；流程完成不代表业务达标。"]
+        result["reasons"] = [OBJECTIVE_NOT_CONFIGURED_REASON]
         return result
     if not objective.applicable:
         result.update(

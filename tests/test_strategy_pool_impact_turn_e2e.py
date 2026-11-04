@@ -204,6 +204,7 @@ def test_nan_confirmation_binds_pool_revision_and_refuses_new_revision(
     class _MessageRepository:
         def __init__(self) -> None:
             self.messages: list[dict] = []
+            self.db_path = tmp_path / "marvis.sqlite"
 
         def add_agent_message(self, task_id: str, **message) -> None:
             assert task_id == "task-1"

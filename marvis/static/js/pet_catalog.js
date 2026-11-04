@@ -97,8 +97,11 @@
     return definitions[normalized]?.asset ? normalized : defaultId;
   }
 
-  function resolveStoredPreference(value, explicitNone) {
-    if (!value || (value === noneId && !explicitNone)) return defaultId;
+  // The companion is opt-in (2026-10-14 redesign, batch 4): nothing stored, or
+  // a stored "none", shows no pet; a stored pick still wins. The explicit-none
+  // flag stays in the signature for the two call sites but no longer decides.
+  function resolveStoredPreference(value, _explicitNone) {
+    if (!value || value === noneId) return noneId;
     return normalizePreference(value);
   }
 

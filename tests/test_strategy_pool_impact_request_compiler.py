@@ -217,6 +217,32 @@ def test_pool_impact_negated_nan_drop_cannot_authorize_true() -> None:
     assert "drop_nan_labels=true" in result.clarification_fields
 
 
+def test_pool_impact_ungrounded_controls_are_named_in_business_terms() -> None:
+    result = _compile(
+        "请测算审批策略池相对基线 strategy-base-a 或 strategy-base-b 的影响，"
+        "但不丢弃空标签。",
+        {
+            "strategy_type": "approval",
+            "comparison_mode": "vs_baseline",
+            "baseline_strategy_id": "strategy-base-a",
+            "drop_nan_labels": True,
+            "month_col": "other_month",
+        },
+    )
+
+    assert result.clarification_fields == (
+        "strategy-base-a",
+        "month_col other_month",
+        "drop_nan_labels=true",
+    )
+    assert (
+        "当前无法核对：基线策略 ID「strategy-base-a」、月份列「other_month」、"
+        "空标签处理（删除空标签样本）。"
+    ) in result.clarification
+    for internal in ("month_col", "drop_nan_labels", "Strategy Pool", "hash", "LLM"):
+        assert internal not in result.clarification
+
+
 @pytest.mark.parametrize("selected_type", ["approval", "reject"])
 def test_pool_impact_conflicting_pool_types_require_clarification(
     selected_type: str,

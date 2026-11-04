@@ -82,6 +82,7 @@ def _ensure_active_data_workspace(client: TestClient, task_id: str) -> str:
         target_col=task.target_col,
         field_roles=roles,
         business_names=workspace.semantic_mapping.business_names,
+        risk_directions=workspace.semantic_mapping.risk_directions,
     )
     if workspace.semantic_mapping != mapping:
         workspace = workspace_repo.save(
@@ -221,3 +222,26 @@ def materialize_mature_strategy_sample_design(
         "sample_design_content_hash": output["content_hash"],
         "partition": "development",
     }
+
+
+def confirm_strategy_score_direction(
+    client: TestClient, task_id: str, *, direction: str
+) -> None:
+    """Declare fixture semantics through the same governed confirmation service."""
+    from marvis.data.field_directions import confirm_field_directions
+    from marvis.data.workspace import data_semantic_mapping_hash
+    from marvis.repositories.data_workspace import DataWorkspaceRepository
+
+    _ensure_active_data_workspace(client, task_id)
+    settings = client.app.state.settings
+    snapshot = DataWorkspaceRepository(settings.db_path).get_or_default(task_id)
+    confirm_field_directions(
+        settings,
+        task_id=task_id,
+        actor_id="fixture-maker",
+        expected_revision=snapshot.revision,
+        expected_semantic_mapping_hash=data_semantic_mapping_hash(snapshot.semantic_mapping),
+        dataset_id=snapshot.active_dataset_id,
+        dataset_content_hash=snapshot.active_dataset_content_hash,
+        directions={"score": direction},
+    )

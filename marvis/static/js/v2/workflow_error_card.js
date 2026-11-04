@@ -12,6 +12,7 @@ function escapedText(value) {
   return escapeHtml(value === undefined || value === null ? "" : String(value));
 }
 
+// What the platform checked: where it stopped plus each evidence item.
 function diagnosticFactsHtml(diagnostic) {
   const facts = [];
   const location = cleanText(diagnostic.location);
@@ -37,14 +38,14 @@ function diagnosticFactsHtml(diagnostic) {
   ].join("");
 }
 
-function diagnosticActionsHtml(actions) {
+function diagnosticActionsHtml(actions, { hasRecovery = false } = {}) {
   const items = Array.isArray(actions)
     ? actions.map(cleanText).filter(Boolean)
     : [];
   if (!items.length) return "";
   return [
     '<div class="workflow-error-card__section">',
-    "<h4>处理步骤</h4>",
+    `<h4>${hasRecovery ? "处理方式" : "你可以这样处理"}</h4>`,
     '<ol class="workflow-error-card__actions">',
     ...items.map((item) => `<li>${escapeHtml(item)}</li>`),
     "</ol>",
@@ -81,11 +82,23 @@ function diagnosticRecoveryHtml(diagnostic) {
     '<div class="workflow-error-card__recovery">',
     prompt ? `<p>${escapeHtml(prompt)}</p>` : "",
     actions.length ? '<div class="workflow-error-card__recovery-actions">' : "",
-    ...actions.map((action) => {
+    ...actions.filter((action) => cleanText(action.command)).map((action, index) => {
       const label = cleanText(action.label) || "继续处理";
       const command = cleanText(action.command);
-      if (!command) return "";
-      return `<button type="button" class="button compact primary" data-workflow-recovery-command="${escapeHtml(command)}">${escapeHtml(label)}</button>`;
+      // D14: an option's consequence is shown only when the platform states it.
+      const effect = cleanText(action.consequence || action.effect || action.description);
+      // B-line: an auto-tier option is reversible; say so next to the button.
+      const reversible = cleanText(action.tier) === "auto";
+      return [
+        `<span class="workflow-error-card__option"${action.tier ? ` data-repair-tier="${escapeHtml(cleanText(action.tier))}"` : ""}>`,
+        `<button type="button" class="button compact${index === 0 ? " primary" : ""}" data-workflow-recovery-command="${escapeHtml(command)}">${escapeHtml(label)}</button>`,
+        // Read-only copy of the label for Agent mode, where the button is
+        // stripped and the same command is offered as a quick reply.
+        `<span class="workflow-error-card__option-label">${escapeHtml(label)}</span>`,
+        reversible ? '<span class="workflow-error-card__tier">可撤销</span>' : "",
+        effect ? `<small>${escapeHtml(effect)}</small>` : "",
+        "</span>",
+      ].join("");
     }),
     actions.length ? "</div>" : "",
     "</div>",
@@ -96,44 +109,137 @@ export function hasWorkflowErrorDiagnostic(metadata = {}) {
   return isRecord(metadata?.error_diagnostic);
 }
 
-export function workflowErrorDiagnosticHtml(diagnostic) {
+export function workflowErrorDiagnosticHtml(diagnostic, { role = "alert" } = {}) {
   if (!isRecord(diagnostic)) return "";
   const code = cleanText(diagnostic.code);
-  const workflow = cleanText(diagnostic.workflow);
   const title = cleanText(diagnostic.title) || "工作流执行失败";
   const summary = cleanText(diagnostic.summary)
     || "当前步骤未能完成，请根据诊断信息处理后再试。";
   const cause = cleanText(diagnostic.cause);
+  const impact = cleanText(diagnostic.impact);
+  const facts = diagnosticFactsHtml(diagnostic);
+  const recovery = diagnosticRecoveryHtml(diagnostic);
   const retryable = diagnostic.retryable === true
     ? { value: "true", label: "可重试" }
     : diagnostic.retryable === false
       ? { value: "false", label: "需人工处理" }
       : null;
-  const eyebrow = [workflow, code].filter(Boolean).map(escapeHtml).join(" · ");
   return [
-    `<section class="workflow-error-card" role="alert" aria-label="${escapeHtml(title)}"`
+    `<section class="workflow-error-card" role="${role === "status" ? "status" : "alert"}" aria-label="${escapeHtml(title)}"`
       + `${code ? ` data-error-code="${escapeHtml(code)}"` : ""}`
       + `${retryable ? ` data-retryable="${retryable.value}"` : ""}>`,
     '<header class="workflow-error-card__header">',
     '<span class="workflow-error-card__icon" aria-hidden="true">!</span>',
     '<div class="workflow-error-card__heading">',
-    eyebrow ? `<div class="workflow-error-card__eyebrow">${eyebrow}</div>` : "",
+    // Batch 3a: internal workflow / error codes stay in 技术信息 below, not in
+    // the heading the user reads first.
     `<h3>${escapeHtml(title)}</h3>`,
     "</div>",
     retryable
       ? `<span class="workflow-error-card__retry">${retryable.label}</span>`
       : "",
     "</header>",
-    `<p class="workflow-error-card__summary">${escapeHtml(summary)}</p>`,
-    cause
-      ? `<div class="workflow-error-card__section"><h4>问题原因</h4><p>${escapeHtml(cause)}</p></div>`
-      : "",
-    diagnosticFactsHtml(diagnostic),
-    diagnosticActionsHtml(diagnostic.actions),
-    diagnosticRecoveryHtml(diagnostic),
+    // D14 (batch 6b): what failed, why, what the platform checked and what
+    // it affects, then the ways forward. Rows appear only for fields the
+    // diagnostic carries.
+    '<dl class="workflow-error-card__chain">',
+    `<div><dt>报错</dt><dd><p class="workflow-error-card__summary">${escapeHtml(summary)}</p></dd></div>`,
+    cause ? `<div><dt>问题原因</dt><dd><p>${escapeHtml(cause)}</p></dd></div>` : "",
+    facts ? `<div><dt>我查了</dt><dd>${facts}</dd></div>` : "",
+    impact ? `<div><dt>影响</dt><dd><p>${escapeHtml(impact)}</p></dd></div>` : "",
+    "</dl>",
+    recovery,
+    diagnosticActionsHtml(diagnostic.actions, { hasRecovery: Boolean(recovery) }),
     diagnosticTechnicalHtml(diagnostic),
     "</section>",
   ].join("");
+}
+
+// B-line (2026-10-16 spec): the "已处理好" card. Every line comes from the
+// platform's execution record; a repair that failed its check says so.
+export function repairReportCardHtml(report, { undone = false, undoable: undoableOption = true } = {}) {
+  let undoable = undoableOption;
+  if (!isRecord(report)) return "";
+  const verified = report.verified === true;
+  const isUndone = undone || report.undone === true;
+  const title = isUndone
+    ? "已撤销这次处理"
+    : verified ? "遇到问题，已处理好" : "处理没成功，已还原";
+  const rows = [
+    ["发现", report.finding],
+    ["处理", report.action],
+    ["核对", report.verification],
+  ].filter(([, value]) => cleanText(value));
+  const undoCommand = cleanText(report.undo_command);
+  const log = Array.isArray(report.log) ? report.log.map(cleanText).filter(Boolean) : [];
+  // Data actions and environment overrides carry an audit entry: who, when,
+  // what changed and how to undo it. It goes into the log, not new captions.
+  if (isRecord(report.audit)) {
+    const audit = report.audit;
+    const who = cleanText(audit.actor?.label) || cleanText(audit.actor?.kind);
+    if (who || cleanText(audit.at)) log.push(`操作人：${who || "—"}，时间：${cleanText(audit.at) || "—"}`);
+    if (cleanText(audit.changed)) log.push(`改动：${cleanText(audit.changed)}`);
+    if (cleanText(audit.undo)) log.push(`撤销方式：${cleanText(audit.undo)}`);
+  }
+  // V2 workflow reports: the backend decides on read whether undo still applies.
+  if (report.undo_available === false) undoable = false;
+  return [
+    `<section class="workflow-repair-card${verified ? "" : " is-unverified"}${isUndone ? " is-undone" : ""}" role="status" aria-label="${escapeHtml(title)}"`
+      + `${report.repair_id ? ` data-repair-id="${escapeHtml(cleanText(report.repair_id))}"` : ""}>`,
+    '<header class="workflow-repair-card__header">',
+    `<span class="workflow-repair-card__icon" aria-hidden="true">${verified && !isUndone ? "✓" : "↺"}</span>`,
+    `<h3>${escapeHtml(title)}</h3>`,
+    "</header>",
+    '<dl class="workflow-repair-card__rows">',
+    ...rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(cleanText(value))}</dd></div>`),
+    "</dl>",
+    (undoCommand && verified && !isUndone && undoable) || log.length ? '<div class="workflow-repair-card__footer">' : "",
+    undoCommand && verified && !isUndone && undoable
+      ? `<button type="button" class="button compact" data-workflow-recovery-command="${escapeHtml(undoCommand)}">撤销</button>`
+      : "",
+    log.length
+      ? [
+        '<details class="workflow-repair-card__log">',
+        "<summary>查看日志</summary>",
+        "<ol>",
+        ...log.map((line) => `<li>${escapeHtml(line)}</li>`),
+        "</ol>",
+        "</details>",
+      ].join("")
+      : "",
+    (undoCommand && verified && !isUndone && undoable) || log.length ? "</div>" : "",
+    "</section>",
+  ].join("");
+}
+
+const PAST_CONFIRMATION_STAGES = new Set(["reproducibility", "metrics", "word_conclusion_draft"]);
+
+// Mirrors latest_undoable_report in marvis/agent/validation_repair.py.
+export function repairTimelineState(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  const undone = new Set(
+    list.map((item) => cleanText(item?.metadata?.repair_undo?.repair_id)).filter(Boolean),
+  );
+  let undoableId = "";
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const report = list[index]?.metadata?.repair_report;
+    if (!isRecord(report)) continue;
+    const repairId = cleanText(report.repair_id);
+    const later = list.slice(index + 1).some((item) => item?.role === "assistant"
+      && PAST_CONFIRMATION_STAGES.has(cleanText(item?.stage)));
+    if (repairId && cleanText(report.undo_command) && report.verified === true
+      && report.undo_available !== false && !undone.has(repairId) && !later) {
+      undoableId = repairId;
+    }
+    break;
+  }
+  return { undone, undoableId };
+}
+
+export function repairUndoNoticeHtml(undo) {
+  if (!isRecord(undo)) return "";
+  const finding = cleanText(undo.finding) || "已撤销这次自动处理。";
+  return `<p class="workflow-repair-undo" role="status"><span aria-hidden="true">↺</span>${escapeHtml(finding)}</p>`;
 }
 
 function noticeSeverityLabel(value) {
@@ -201,10 +307,24 @@ export function ingestNoticesHtml(notices) {
 // The callback remains responsible for trusted Markdown rendering; the default
 // fallback is escaped plain text. A structured diagnostic replaces the raw
 // exception body, while non-error notices are prepended and preserve it.
-export function workflowMessageContentHtml(message = {}, renderContent = escapedText) {
+// ``repairState`` comes from the whole timeline: which reports were undone,
+// and the one report that can still be undone (the newest, before a later
+// stage started). Without it a lone card keeps its own undo button.
+export function workflowMessageContentHtml(message = {}, renderContent = escapedText, { repairState = null } = {}) {
   const metadata = isRecord(message?.metadata) ? message.metadata : {};
+  if (isRecord(metadata.repair_report)) {
+    const repairId = cleanText(metadata.repair_report.repair_id);
+    return repairReportCardHtml(metadata.repair_report, {
+      undone: Boolean(repairId && repairState?.undone?.has?.(repairId)),
+      undoable: repairState ? Boolean(repairId) && repairState.undoableId === repairId : true,
+    });
+  }
+  if (isRecord(metadata.repair_undo)) return repairUndoNoticeHtml(metadata.repair_undo);
   const noticesHtml = ingestNoticesHtml(metadata.ingest_notices);
-  const diagnosticHtml = workflowErrorDiagnosticHtml(metadata.error_diagnostic);
+  // B-line extension: a strategy sample-design gap is a clarification, not a
+  // failed step, so its card is a status card under its own key.
+  const diagnosticHtml = workflowErrorDiagnosticHtml(metadata.error_diagnostic)
+    || workflowErrorDiagnosticHtml(metadata.sample_design_diagnostic, { role: "status" });
   const content = message?.content === undefined || message?.content === null
     ? ""
     : String(message.content);

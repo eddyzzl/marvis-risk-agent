@@ -39,6 +39,8 @@ INTENT_STRATEGY_WORKFLOW = "strategy_workflow"
 INTENT_ADHOC_CONFIRM = "adhoc_confirm"
 INTENT_ADHOC_REJECT = "adhoc_reject"
 INTENT_ADHOC_REVISE = "adhoc_revise"
+INTENT_SQL_QUERY = "sql_query"
+INTENT_MONITORING_SCHEDULE = "monitoring_schedule"
 
 ALL_SEMANTIC_INTENTS = frozenset(
     {
@@ -57,6 +59,8 @@ ALL_SEMANTIC_INTENTS = frozenset(
         INTENT_ADHOC_CONFIRM,
         INTENT_ADHOC_REJECT,
         INTENT_ADHOC_REVISE,
+        INTENT_SQL_QUERY,
+        INTENT_MONITORING_SCHEDULE,
     }
 )
 
@@ -96,6 +100,14 @@ _INTENT_DEFINITIONS = {
     INTENT_ADHOC_CONFIRM: "明确接受当前待确认的问数口径并授权执行。",
     INTENT_ADHOC_REJECT: "明确取消、拒绝或停止当前待确认的问数口径。",
     INTENT_ADHOC_REVISE: "明确修改当前待确认的问数分组、指标、筛选、月份或排序口径。",
+    INTENT_SQL_QUERY: (
+        "要求从已配置的 SQL 数据源取一份新数据到当前任务；只起草待确认查询，"
+        "不是对当前已加载数据的问数，也不授权执行。"
+    ),
+    INTENT_MONITORING_SCHEDULE: (
+        "要求定期自动监控已有模型或策略（多久一次、从何时开始、通知谁）；"
+        "只填写待确认的监控表单，不是立即运行一次监控。"
+    ),
 }
 
 _FIELDS = (
@@ -108,7 +120,9 @@ _FIELDS = (
     "requests_change",
     "withholds_action",
 )
-_QUESTION_SAFE_INTENTS = frozenset({INTENT_ADHOC_QUERY, INTENT_DATASET_ANALYSIS})
+_QUESTION_SAFE_INTENTS = frozenset(
+    {INTENT_ADHOC_QUERY, INTENT_DATASET_ANALYSIS, INTENT_SQL_QUERY, INTENT_MONITORING_SCHEDULE}
+)
 # DeepSeek V4 can consume completion budget as hidden reasoning even when the
 # saved profile disables visible thinking.  Production evidence includes a
 # length-finished empty reviewer response after all 1024 tokens were consumed

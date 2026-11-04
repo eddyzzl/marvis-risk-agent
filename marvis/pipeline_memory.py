@@ -48,7 +48,14 @@ def _memory_model_experience_payload(
         "task_id": task.id,
         "source_task_id": task.id,
         "model_name": results.get("model_name") or task.model_name,
-        "model_version": results.get("model_version") or task.model_version or "未标注",
+        # D-1: a delivered model's identity is its artifact (matching the
+        # modeling-side memory); the readable version is only a label.
+        "model_version": (
+            (getattr(task, "report_values", None) or {}).get("TEXT:source_artifact_id")
+            or results.get("model_version")
+            or task.model_version
+            or "未标注"
+        ),
         "scope": results.get("scope") or f"{task.model_name}验证任务",
         "channel": _memory_channel(task, results),
         "month": results.get("month") or _memory_latest_month(results) or "未标注",

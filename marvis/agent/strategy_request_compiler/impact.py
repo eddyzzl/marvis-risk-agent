@@ -5,6 +5,10 @@ import math
 import re
 from collections.abc import Mapping
 
+from marvis.agent.strategy_control_labels import (
+    join_control_labels as _join_control_labels,
+)
+
 from . import contracts as _contracts
 from . import grounding as _grounding
 from . import pool as _pool
@@ -265,11 +269,11 @@ def _ground_strategy_impact_cube_request(
         missing_controls.append("economics_inputs")
 
     if missing_controls:
-        rendered = "、".join(dict.fromkeys(missing_controls))
+        rendered = _join_control_labels(missing_controls, bare_value="当前策略 ID")
         return _contracts._clarification(
-            "统一 Strategy ImpactCube 只能使用用户原话中的 Pool 类型、分区、"
-            "精确维度列、当前策略 ID 和 typed economics_inputs；当前无法核对："
-            f"{rendered}。平台不会采用 LLM 猜测的引用、列、数字或指标。",
+            "策略影响测算只能使用原话里的策略池类型、分区、准确的维度列、"
+            "完整当前策略 ID 和明确给出的经济参数；当前无法核对："
+            f"{rendered}。平台不会替你猜测引用、列、数字或指标。",
             code="strategy_impact_cube_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
         )

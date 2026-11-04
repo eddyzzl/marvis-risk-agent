@@ -53,7 +53,11 @@ def model_history_context(*, task, evidence, memory_context):
     evidence = evidence if isinstance(evidence, dict) else {}
     current = agent_memory_dimensions_from_validation_results(evidence.get("validation_results"))
     current["model_name"] = task.model_name or current.get("model_name")
-    current["model_version"] = task.model_version or current.get("model_version")
+    current["model_version"] = (
+        (getattr(task, "report_values", None) or {}).get("TEXT:source_artifact_id")
+        or task.model_version
+        or current.get("model_version")
+    )
     family = normalize_model_family(current["model_name"])
     context = memory_context if isinstance(memory_context, dict) else {}
     records, references, seen = [], [], set()

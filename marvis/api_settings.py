@@ -14,11 +14,13 @@ from marvis.api_schemas import (
 from marvis.execution_environment import (
     ExecutionEnvironmentSettings,
     detect_execution_environment_options,
+    execution_settings_unreadable,
     load_execution_environment,
     save_execution_environment,
     validate_execution_environment,
 )
 from marvis.llm_client import test_llm_connection
+from marvis.local_execution import SETTINGS_UNREADABLE
 from marvis.llm_settings import (
     LLMSettingsError,
     load_llm_settings,
@@ -34,13 +36,28 @@ from marvis.memory_policy import (
 
 router = APIRouter()
 
+# Every text choice that is unknown when the settings file cannot be read.
+_UNKNOWN_TEXT_FIELDS = (
+    "execution_mode", "kernel_name", "conda_env_name", "python_executable",
+    "notebook_network_mode", "worker_isolation_mode",
+)
+
+
+def _public_settings(settings: ExecutionEnvironmentSettings) -> dict:
+    """Unknown choices are reported as placeholders, never as defaults."""
+    payload = asdict(settings)
+    if execution_settings_unreadable(settings):
+        payload.update(dict.fromkeys(_UNKNOWN_TEXT_FIELDS, SETTINGS_UNREADABLE))
+        payload.update(rss_memory_limit_mb=None, notebook_memory_limit_mb=None, settings_unreadable=True)
+    return payload
+
 
 @router.get("/settings/execution-environment")
 def get_execution_environment_settings(request: Request) -> dict:
     settings = load_execution_environment(request.app.state.settings.workspace)
     validation = validate_execution_environment(settings)
     return {
-        "settings": asdict(settings),
+        "settings": _public_settings(settings),
         "validation": asdict(validation),
     }
 
@@ -51,7 +68,7 @@ def get_execution_environment_options(request: Request) -> dict:
     validation = validate_execution_environment(settings)
     options = detect_execution_environment_options()
     return {
-        "settings": asdict(settings),
+        "settings": _public_settings(settings),
         "validation": asdict(validation),
         "options": [asdict(option) for option in options],
     }
@@ -66,6 +83,21 @@ def update_execution_environment_settings(
     # Preserve the plugin RSS limit, which this request never carries -- otherwise
     # saving a kernel selection would silently reset it to the default.
     current = load_execution_environment(workspace)
+    placeholder_fields = [name for name in _UNKNOWN_TEXT_FIELDS
+                          if getattr(payload, name, None) == SETTINGS_UNREADABLE]
+    explicit_modes = {"notebook_network_mode", "worker_isolation_mode"} <= payload.model_fields_set
+    if placeholder_fields or (execution_settings_unreadable(current) and not explicit_modes):
+        # Never persist the placeholder or fill an unknown choice with a default
+        # (the UI echoes defaults for unknown fields): the user must choose the
+        # Python environment and state both execution boundaries to repair it.
+        raise unprocessable({
+            "code": "execution_settings_unreadable",
+            "fields": placeholder_fields,
+            "message": (
+                "执行环境设置文件无法读取，本次未保存：请依次选择 Python 环境、Notebook 网络模式，"
+                "最后在「第三方工具执行边界」点「确认执行边界」，三项都明确后才会重写设置文件。"
+            ),
+        })
     settings = ExecutionEnvironmentSettings(
         execution_mode=payload.execution_mode,
         kernel_name=payload.kernel_name,

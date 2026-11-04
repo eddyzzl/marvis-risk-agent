@@ -10,8 +10,8 @@ numeric features, reusing the same deterministic detection as the modeling setup
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
+from marvis.agent.setup_context import dataset_file_name
 from marvis.agent.data_setup import reconcile_source_data_tables
 from marvis.agent.json_reply import load_json_object
 from marvis.data.data_dictionary import load_business_names, resolve_data_dictionary_id
@@ -126,7 +126,7 @@ def build_feature_proposal(
         if setup.target_candidates:
             raise FeatureTargetChoiceRequired(
                 dataset_id=dataset.id,
-                dataset_name=_dataset_name(dataset),
+                dataset_name=dataset_file_name(dataset),
                 candidates=list(setup.target_candidates),
             )
         raise FeatureSetupError(
@@ -136,7 +136,7 @@ def build_feature_proposal(
     selected = [str(item).strip() for item in requested if str(item).strip()]
     return FeatureProposal(
         dataset_id=dataset.id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=dataset_file_name(dataset),
         target_col=setup.target_col,
         features=list(setup.candidates),
         notes=list(setup.notes),
@@ -303,11 +303,6 @@ def _resolve_datasets(registry, task_id: str, source_dir):
         datasets,
         key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
     )
-
-
-def _dataset_name(dataset) -> str:
-    source = getattr(dataset, "source_path", None)
-    return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
 __all__ = [

@@ -90,3 +90,53 @@ def explicit_alias_span(utterance, start, end):
     prefix = r"(?:字段|特征|列|(?:客户|账户|借据)\s*(?:ID|id|编号)|时间|日期|月份|月龄|MOB|状态|余额权重|金额权重|[a-z][a-z0-9_]*(?:col|column|field|feature)|features|columns)\s*(?:为|是|=|:|：)?\s*$"
     suffix = r"^\s*(?:(?:作为|用作|是|为)\s*(?:字段|列|特征|时间|日期|月份|状态|余额(?:权重)?|金额权重|客户\s*ID)|(?:>=|<=|>|<|=|大于|小于|不超过|至少)\s*-?\d)"
     return bool(re.search(prefix, before, re.I) or re.search(suffix, after, re.I))
+
+
+# Table headers whose cells are physical field codes (feature analysis and
+# modeling result tables).
+FIELD_LABEL_COLUMNS = frozenset({"特征", "特征A", "特征B", "字段", "变量", "列", "feature", "field", "column"})
+
+
+def field_labels_for(codes, business_names: Mapping) -> dict:
+    """``{code: business name}`` for the given codes that have a confirmed name."""
+    if not isinstance(business_names, Mapping):
+        return {}
+    labels = {}
+    for code in codes or []:
+        name = business_names.get(code) if isinstance(code, str) else None
+        if isinstance(name, str) and name.strip() and name.strip() != code:
+            labels[code] = name.strip()
+    return labels
+
+
+def attach_field_labels(tables, business_names: Mapping) -> list:
+    """Return ``tables`` with ``field_labels`` naming the codes they show.
+
+    Display only (V3 5.7): cells keep the physical codes the platform computes
+    and selects with; a table gains ``{"field_labels": {code: business name}}``
+    for the codes in its field columns that the workspace has confirmed names
+    for. Tables without such codes are returned unchanged.
+    """
+    if not isinstance(business_names, Mapping) or not business_names:
+        return list(tables or [])
+    result = []
+    for table in tables or []:
+        if not isinstance(table, dict):
+            result.append(table)
+            continue
+        columns = table.get("columns", table.get("headers", []))
+        indexes = [
+            index for index, column in enumerate(columns if isinstance(columns, list) else [])
+            if str(column).strip() in FIELD_LABEL_COLUMNS or str(column).strip().casefold() in FIELD_LABEL_COLUMNS
+        ]
+        labels = {}
+        for row in table.get("rows") or []:
+            if not isinstance(row, list):
+                continue
+            for index in indexes:
+                code = row[index] if index < len(row) else None
+                name = business_names.get(code) if isinstance(code, str) else None
+                if isinstance(name, str) and name.strip() and name.strip() != code:
+                    labels[code] = name.strip()
+        result.append({**table, "field_labels": labels} if labels else table)
+    return result

@@ -10,6 +10,7 @@ from marvis.agent.presenters._shared import (
     format_value as _fmt,
     red_flag_table as _red_flag_table,
 )
+from marvis.agent.presenters.display_labels import document_kind_label
 
 _STRATEGY_DECISION_LABEL = {
     "approve": "通过",
@@ -1010,16 +1011,19 @@ def _render_challenger_report(o: dict):
     artifacts = [a for a in (o.get("artifacts") or []) if isinstance(a, dict)]
     if status == "no_baseline":
         return "**挑战者对比报告**：未提供基线（champion）策略，已跳过报告。", []
-    text = (
-        f"**挑战者对比报告已生成**：`{o.get('report_path', '')}`，"
-        f"登记 {len(artifacts)} 份交付物。"
-    )
+    text = f"**挑战者对比报告已生成**：登记 {len(artifacts)} 份交付物，可在本条结果下方下载。"
     tables = [
         {
             "title": "交付物",
-            "columns": ["类型", "路径"],
+            "columns": ["类型", "文件"],
             "rows": [
-                [str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts
+                [
+                    {"challenger_report_md": "挑战者对比报告"}.get(
+                        str(a.get("kind", "")), str(a.get("kind", ""))
+                    ),
+                    document_kind_label(a.get("path")) or "-",
+                ]
+                for a in artifacts
             ],
         }
     ]
@@ -1028,7 +1032,7 @@ def _render_challenger_report(o: dict):
 
 def _render_strategy_doc(o: dict):
     sections = [str(item) for item in (o.get("sections") or [])]
-    text = f"**策略文档已生成**：`{o.get('doc_path', '')}`，共 {len(sections)} 个章节。"
+    text = f"**策略文档已生成**：共 {len(sections)} 个章节。"
     tables = [
         {
             "title": "文档章节",
@@ -1119,7 +1123,7 @@ def _render_monitoring_report(o: dict):
     timeline = [row for row in (o.get("timeline") or []) if isinstance(row, dict)]
     overall = str(o.get("overall_level") or "")
     label = _MONITOR_LEVEL_LABEL.get(overall, overall) if overall else ""
-    head = f"**监控报告已生成**:`{o.get('report_path', '')}`"
+    head = "**监控报告已生成**"
     if label:
         head += f",最近总体判级【{label}】"
     head += f",历史监控 {len(timeline)} 次。"
@@ -1160,7 +1164,7 @@ def _render_mine_rules(o: dict):
     n_rows = o.get("n_rows")
     text = (
         f"**规则挖掘完成**:在 {_fmt(n_rows)} 行样本上提议 **{len(rules)}** 条候选拒绝规则"
-        "（按 lift 降序；决策树路径 + 单变量切点两通道）。请回复「选 1,3,5」/「去掉 2」/「全选」选定要采纳的规则集。"
+        "（按 lift 降序；决策树路径 + 单变量切点两通道）。说要采纳哪些规则，例如「选 1,3,5」「去掉 2」或「全选」。"
     )
     red_items = [flag for flag in red_flags if flag.get("level") == "red"]
     if red_items:

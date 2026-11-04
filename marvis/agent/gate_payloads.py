@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
+from marvis.agent.presenters.display_labels import recipe_label, screening_reason_label
+from marvis.data.contracts import key_selection_token
 from marvis.modeling_policy_signals import monotonic_policy_profile
 
 
@@ -132,23 +136,62 @@ def build_join_keys_payload(propose_o: dict | None) -> dict | None:
             }
             for pair in pairs
         ]
+        # Every data-resolved candidate pair is a selectable key option (the current key
+        # first, checked). One anchor column may have several feature-column candidates;
+        # its options then submit the pair token instead of the bare anchor column.
+        key_options = [{**key, "match_rate": pair.get("match_rate")} for key, pair in zip(current_keys, pairs)]
+        option_pairs = {(key["anchor_col"], key["feature_col"]) for key in key_options}
+        for candidate in diagnostics.get("key_candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            anchor_col = str(candidate.get("anchor_col") or "")
+            feature_col = str(candidate.get("feature_col") or "")
+            if not anchor_col or (anchor_col, feature_col) in option_pairs:
+                continue
+            option_pairs.add((anchor_col, feature_col))
+            key_options.append({
+                "anchor_col": anchor_col,
+                "feature_col": feature_col,
+                "match_method": str(candidate.get("match_method") or ""),
+                "match_rate": candidate.get("match_rate"),
+            })
+        per_anchor = Counter(option["anchor_col"] for option in key_options)
+        for option in key_options:
+            option["value"] = (
+                option["anchor_col"]
+                if per_anchor[option["anchor_col"]] == 1
+                else key_selection_token(option["anchor_col"], option["feature_col"])
+            )
+        value_of = {(option["anchor_col"], option["feature_col"]): option["value"] for option in key_options}
         alternatives = []
         for alt in diagnostics.get("key_alternatives") or []:
             if not isinstance(alt, dict):
                 continue
+            alt_pairs = [
+                [str(item) for item in pair[:2]]
+                for pair in (alt.get("key_pairs") or [])
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2
+            ]
             alternatives.append({
                 "anchor_cols": [str(pair[0]) for pair in (alt.get("key_pairs") or []) if isinstance(pair, (list, tuple)) and pair],
-                "key_pairs": [list(pair[:2]) for pair in (alt.get("key_pairs") or []) if isinstance(pair, (list, tuple)) and len(pair) >= 2],
+                "key_pairs": alt_pairs,
+                # The option values that select this alternative in the picker.
+                "values": [value_of.get((anchor_col, feature_col), anchor_col) for anchor_col, feature_col in alt_pairs],
                 "dropped": str(alt.get("dropped") or ""),
                 "match_rate": alt.get("match_rate"),
                 "feature_key_unique": bool(alt.get("feature_key_unique")),
                 "fan_out_detected": bool(alt.get("fan_out_detected")),
+                "kind": str(alt.get("kind") or "relaxation"),
             })
         features.append({
             "feature_id": str(join.get("feature_id") or ""),
             "feature_name": str(join.get("feature_name") or join.get("feature_id") or ""),
             "current_keys": current_keys,
+            "key_options": key_options,
             "selected_anchor_cols": [pair["anchor_col"] for pair in current_keys],
+            "selected_values": [
+                value_of[(pair["anchor_col"], pair["feature_col"])] for pair in current_keys
+            ],
             "current_match_rate": diagnostics.get("match_rate"),
             "current_unique": bool(diagnostics.get("feature_key_unique")),
             "current_fan_out": bool(diagnostics.get("fan_out_detected")),
@@ -290,7 +333,22 @@ def build_screen_payload(output: dict, dep) -> dict:
         # this is non-empty and otherwise renders unchanged (no dictionary = zero
         # visible change).
         "dictionary": o.get("dictionary") if isinstance(o.get("dictionary"), dict) else {},
+        # Display-only Chinese reading of each bucketed feature's reason; the
+        # raw reason stays in leakage/suspected/unusable for code and audit.
+        "reason_labels": _screen_reason_labels(o),
     }
+
+
+def _screen_reason_labels(output: dict) -> dict:
+    labels: dict = {}
+    for key, reason_index in (("leakage", 2), ("suspected", 2), ("unusable", 1)):
+        for item in output.get(key) or []:
+            if isinstance(item, (list, tuple)) and len(item) > reason_index:
+                reason = str(item[reason_index] or "")
+                label = screening_reason_label(reason)
+                if label and label != reason:
+                    labels.setdefault(str(item[0]), label)
+    return labels
 
 
 def build_modeling_setup_payload(
@@ -300,6 +358,8 @@ def build_modeling_setup_payload(
     split_output: dict | None = None,
     split_step=None,
     refined_output: dict | None = None,
+    split_source_role: str | None = None,
+    oot_requirement: str | None = None,
 ) -> dict | None:
     """Interactive modeling setup payload.
 
@@ -308,6 +368,12 @@ def build_modeling_setup_payload(
     safely adjust at that gate: sample-weight usage from already-detected
     candidates. Free-form explicit columns are handled earlier by task setup,
     where the full schema is available for validation.
+
+    ``split_source_role`` is the registry role of the dataset the split step
+    read (``"derived"`` for a platform-made frame), so the setup form can say
+    whether a passed-through partition column came from the user's sample.
+    ``oot_requirement`` is the task's own OOT success criterion (for example
+    ``"OOT KS ≥ 0.3"``); when present the form must not default to "no OOT".
     """
     o = output if isinstance(output, dict) else {}
     if not o:
@@ -316,7 +382,7 @@ def build_modeling_setup_payload(
     selected = str(o.get("sample_weight_col") or "").strip()
     if selected and selected not in candidates:
         candidates.insert(0, selected)
-    split_summary = _split_summary(split_output, split_step)
+    split_summary = _split_summary(split_output, split_step, source_role=split_source_role)
     original_feature_count = o.get("feature_count")
     refined_selected = (
         refined_output.get("selected")
@@ -354,6 +420,8 @@ def build_modeling_setup_payload(
         "warnings": [str(item) for item in (o.get("warnings") or []) if str(item)],
         "reason": str(o.get("reason") or ""),
         "split_summary": split_summary,
+        "oot_requested": bool(oot_requirement),
+        "oot_requirement": str(oot_requirement or ""),
         "sample_weight_col": selected,
         "sample_weight_candidates": candidates,
         "sample_weight_diagnostics": [
@@ -395,10 +463,10 @@ def build_model_delivery_payload(
     tool = str(getattr(getattr(dep, "tool_ref", None), "tool", "") or "")
     if tool not in {"compare_experiments", "select_experiment", "post_training_action"}:
         return None
-    capabilities = _capabilities(o.get("capabilities"))
     actions = _delivery_actions(o.get("actions"))
     candidates = _experiment_candidates(o.get("experiments"))
     selected_id = str(o.get("selected_experiment_id") or o.get("experiment_id") or "")
+    evaluation = _evaluation_evidence(o.get("evaluation_evidence"))
     recommended_id = str(
         recommended_experiment_id
         or o.get("recommended_experiment_id")
@@ -415,15 +483,60 @@ def build_model_delivery_payload(
     report = _report_summary(report_output, report_step)
     if selected_id:
         candidates = _mark_selected_candidate(candidates, selected_id)
+    evaluated_id = str(evaluation.get("experiment_id") or "")
+    if evaluated_id in candidate_ids and not any(item.get("selected") for item in candidates):
+        # A champion refit delivers a new experiment; the candidate row the
+        # user picked is still the selected one.
+        candidates = _mark_selected_candidate(candidates, evaluated_id)
     if recommended_id:
         candidates = _mark_recommended_candidate(candidates, recommended_id)
     selected_candidate = next((item for item in candidates if item.get("selected")), None)
-    policy_signals = (
-        dict(selected_candidate.get("policy_signals"))
-        if isinstance(selected_candidate, dict) and isinstance(selected_candidate.get("policy_signals"), dict)
-        else _policy_signals(o)
+    # Before a choice exists (compare step) the summary describes the candidate
+    # the gate pre-checks -- the recommendation, else the first row -- instead of
+    # the comparison output itself, which carries no model capabilities.
+    focus_candidate = selected_candidate
+    if focus_candidate is None and tool == "compare_experiments" and candidates:
+        focus_candidate = next((item for item in candidates if item.get("recommended")), candidates[0])
+    raw_capabilities = o.get("capabilities")
+    capabilities = _capabilities(
+        raw_capabilities
+        if isinstance(raw_capabilities, dict) and raw_capabilities
+        else (focus_candidate or {}).get("capabilities")
     )
+    if evaluation.get("metrics") and (evaluation.get("refit_applied") or focus_candidate is None):
+        # Approval and stability are judged on hold-out evidence, never on a
+        # refit model's fit-only metrics.
+        signal_row = {**o, "metrics": evaluation["metrics"]}
+        business_signals = _business_signals(signal_row)
+        if business_signals.get("feature_count") is None and focus_candidate is not None:
+            business_signals["feature_count"] = focus_candidate["business_signals"].get("feature_count")
+        policy_signals = _policy_signals(signal_row)
+        if evaluation.get("basis") == "pre_refit_heldout":
+            policy_signals["reasons"] = [
+                *policy_signals["reasons"],
+                "审批依据为所选实验的留出集指标；交付模型为 train+test 重新拟合版本",
+            ]
+    elif focus_candidate is not None:
+        business_signals = dict(focus_candidate["business_signals"])
+        policy_signals = dict(focus_candidate["policy_signals"])
+    else:
+        business_signals = _business_signals(o)
+        policy_signals = _policy_signals(o)
+    selection_reason = str(o.get("selection_reason") or "")
+    note = str(evaluation.get("note") or "")
+    if evaluation.get("refit_applied") and note and note not in selection_reason:
+        selection_reason = f"{selection_reason} {note}".strip()
     policy_decision = _policy_decision(o.get("policy_decision"))
+    # The delivery step's own output names no algorithm, target or feature
+    # count; its model card does (eval S4 showed 「算法 -」「特征数 -」).
+    card = o.get("model_card") if isinstance(o.get("model_card"), dict) else {}
+    card_feature_count = card.get("feature_count")
+    if (
+        business_signals.get("feature_count") is None
+        and isinstance(card_feature_count, int)
+        and not isinstance(card_feature_count, bool)
+    ):
+        business_signals = {**business_signals, "feature_count": card_feature_count}
     return {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
@@ -431,16 +544,14 @@ def build_model_delivery_payload(
         "selected_experiment_id": selected_id,
         "recommended_experiment_id": recommended_id,
         "artifact_id": str(o.get("artifact_id") or ""),
-        "recipe": str(o.get("recipe") or ""),
-        "target_type": str(o.get("target_type") or ""),
+        "recipe": str(o.get("recipe") or card.get("recipe") or ""),
+        "target_type": str(o.get("target_type") or card.get("target_type") or ""),
         "selection_metric": str(o.get("selection_metric") or ""),
-        "selection_reason": str(o.get("selection_reason") or ""),
+        "selection_reason": selection_reason,
+        "selection_origin": str(o.get("selection_origin") or ""),
         "metrics": _metrics(o.get("metrics")),
-        "business_signals": (
-            dict(selected_candidate.get("business_signals"))
-            if isinstance(selected_candidate, dict) and isinstance(selected_candidate.get("business_signals"), dict)
-            else _business_signals(o)
-        ),
+        "evaluation_evidence": evaluation,
+        "business_signals": business_signals,
         "policy_signals": policy_signals,
         "policy_decision": policy_decision,
         "capabilities": capabilities,
@@ -489,9 +600,16 @@ def build_model_delivery_payload(
     }
 
 
-def _split_summary(output: dict | None, split_step=None) -> dict | None:
+def _split_summary(
+    output: dict | None,
+    split_step=None,
+    *,
+    source_role: str | None = None,
+) -> dict | None:
     if not isinstance(output, dict):
         return None
+    split_inputs = getattr(split_step, "inputs", None) or {}
+    split_config = dict(split_inputs.get("split_config") or {})
     analysis = output.get("sample_analysis") if isinstance(output.get("sample_analysis"), dict) else {}
     split_counts = {
         str(key): int(value)
@@ -516,17 +634,143 @@ def _split_summary(output: dict | None, split_step=None) -> dict | None:
         warnings.append("缺少 OOT 样本，上线前建议补充时间外验证。")
     if total_rows and lowered.get("oot", 0) / total_rows < 0.05:
         warnings.append("OOT 占比低于 5%，稳定性结论需谨慎。")
+    available_columns = [str(item) for item in (output.get("available_columns") or []) if str(item)]
+    # The split step keeps its partition-column input even after a re-split
+    # overrides it, so "keep the existing partition" stays selectable.
+    existing_col = split_inputs.get("split_col")
+    existing_col = existing_col.strip() if isinstance(existing_col, str) else ""
+    existing_split = None
+    if existing_col and not existing_col.startswith("$ref:"):
+        existing_split = {
+            "column": existing_col,
+            # "uploaded": the column is in the user's own sample; "derived": the
+            # frame was made by the platform (setup auto-split or a join result).
+            "origin": (
+                "derived" if source_role == "derived"
+                else "uploaded" if source_role
+                else ""
+            ),
+        }
+    notes = [note for note in (_time_oot_note(output, split_config),) if note]
     return {
         "split_col": str(output.get("split_col") or ""),
         "split_counts": split_counts,
         "total_rows": total_rows,
         "holdout_values": holdout_values,
+        "has_oot": bool(holdout_values),
         "warnings": warnings,
-        "split_config": dict(
-            (getattr(split_step, "inputs", None) or {}).get("split_config") or {}
+        "notes": notes,
+        "split_config": split_config,
+        "existing_split": existing_split,
+        "available_columns": available_columns,
+        "time_column_candidates": _time_column_candidates(
+            available_columns,
+            split_config,
+            exclude={existing_col, str(output.get("split_col") or "")},
         ),
-        "available_columns": [str(item) for item in (output.get("available_columns") or []) if str(item)],
     }
+
+
+# Month-like business columns first (same aliases modeling setup uses for its
+# time-extrapolated OOT default), then any other month/date-named column.
+_PREFERRED_TIME_COLUMNS = (
+    "apply_month", "loan_month", "book_month", "申请月份", "放款月", "贷款月份",
+)
+_TIME_COLUMN_TOKENS = ("month", "date", "月份", "日期")
+
+
+def _time_column_candidates(
+    columns: list[str],
+    split_config: dict,
+    *,
+    exclude: set[str],
+) -> list[str]:
+    current = str(split_config.get("oot_by_time") or "").strip()
+    by_lower = {column.lower(): column for column in columns}
+    preferred = [
+        by_lower[alias.lower()]
+        for alias in _PREFERRED_TIME_COLUMNS
+        if alias.lower() in by_lower
+    ]
+    named = [
+        column
+        for column in columns
+        if any(token in column.lower() for token in _TIME_COLUMN_TOKENS)
+    ]
+    ordered = [current, *preferred, *named]
+    return [
+        column
+        for column in dict.fromkeys(ordered)
+        if column and column not in exclude
+    ]
+
+
+def _time_oot_note(output: dict, split_config: dict) -> str:
+    """Say plainly that a time OOT moves whole periods, not a row percentage.
+
+    ``_make_split`` ranks the time values and assigns every row of a period to
+    the same side, so the realised OOT share (e.g. 120 rows = 25%) can differ
+    from the requested ``oot_size`` (e.g. 20%).
+    """
+    time_col = split_config.get("oot_by_time")
+    if not isinstance(time_col, str) or not time_col.strip():
+        return ""
+    time_col = time_col.strip()
+    analysis = output.get("sample_analysis") if isinstance(output.get("sample_analysis"), dict) else {}
+    counts = {
+        str(key).lower(): int(value)
+        for key, value in (analysis.get("split_counts") or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    total = analysis.get("total_rows")
+    total = int(total) if isinstance(total, (int, float)) and not isinstance(total, bool) else sum(counts.values())
+    oot_rows = counts.get("oot", 0)
+    requested = split_config.get("oot_size")
+    if not isinstance(requested, (int, float)) or isinstance(requested, bool):
+        from marvis.packs.modeling.prepare import DEFAULT_OOT_SIZE
+
+        requested = DEFAULT_OOT_SIZE
+    monthly = "month" in time_col.lower() or "月" in time_col
+    period = "整月" if monthly else "整段时间"
+    distributions = analysis.get("group_distributions") if isinstance(analysis.get("group_distributions"), dict) else {}
+    by_split = distributions.get(time_col) if isinstance(distributions.get(time_col), dict) else {}
+    periods = sorted(str(item) for item in (by_split.get("oot") or {}))
+    period_text = ""
+    if periods:
+        period_text = "、".join(periods[:6]) + (" 等" if len(periods) > 6 else "") + "，"
+    actual = f"{oot_rows / total:.1%}" if total else "n/a"
+    unit = "同一个月" if monthly else "同一时间值"
+    return (
+        f"OOT 按 `{time_col}` {period}切分：{period_text}共 {oot_rows} 行进入 OOT，"
+        f"占 {actual}；填写的 {float(requested):.0%} 只是目标，{unit}的样本不会被拆开，"
+        "所以实际占比可能与填写的不同。"
+    )
+
+
+def split_adoption_note(split_output: dict | None, split_step=None) -> str:
+    """Deterministic one-paragraph summary of the split that was just adopted.
+
+    Used when the setup form's confirmation carries straight on to feature
+    screening, so the user still sees what the re-split actually produced.
+    """
+    summary = _split_summary(split_output, split_step)
+    if summary is None:
+        return ""
+    order = {"train": 0, "test": 1, "oot": 2}
+    counts = sorted(
+        summary["split_counts"].items(),
+        key=lambda item: (order.get(item[0].lower(), 3), item[0]),
+    )
+    total = summary["total_rows"]
+    parts = "、".join(
+        f"{'OOT' if label.lower() == 'oot' else label} {count} 行"
+        for label, count in counts
+    )
+    text = f"已按你确认的方案切分样本：{parts}（共 {total} 行）。"
+    extras = [*summary["notes"], *summary["warnings"]]
+    if extras:
+        text += " " + " ".join(extras)
+    return text
 
 
 def _modeling_override_guidance(
@@ -579,7 +823,7 @@ def _modeling_override_guidance(
                 "label": "算法组合",
                 "level": "info",
                 "message": (
-                    f"当前算法 {', '.join(recipes)} 均可导出 PMML；仍需一起比较效果、稳定性、特征复杂度和交付形态。"
+                    f"当前算法 {'、'.join(recipe_label(item) for item in recipes)} 均可导出 PMML；仍需一起比较效果、稳定性、特征复杂度和交付形态。"
                 ),
             })
     if disabled_algorithms:
@@ -600,15 +844,15 @@ def _modeling_override_guidance(
             # its own budget — total search cost is the SUM of each recipe's
             # n_trials, so surface that instead of a single scalar's guidance.
             total_budget = sum(int(v) for v in budgets.values())
-            budget_note = "、".join(f"{recipe}={value}" for recipe, value in budgets.items())
+            budget_note = "、".join(f"{recipe_label(recipe)} {value} 轮" for recipe, value in budgets.items())
             guidance.append({
                 "id": "n_trials",
                 "label": "调参预算",
                 "level": "info",
                 "message": (
                     f"多算法对比:按算法预算 {budget_note}；多算法总预算=Σ各配方预算={total_budget} 轮"
-                    "（树模型 lgb/xgb/catboost 默认各 40 轮两阶段搜索，lr/scorecard/mlp 默认各 12 轮；"
-                    "总预算越大，本步运行耗时越长，可按需在本门调整每个算法的预算）。"
+                    "（平台默认每个算法 1 轮，只试 1 组参数、用于先跑通流程；正式比较效果建议每个算法 40 轮起；"
+                    "总预算越大，本步运行耗时越长，可按需调整每个算法的预算）。"
                 ),
             })
         else:
@@ -783,6 +1027,21 @@ def _is_delivery_metric_key(key: str) -> bool:
     }
 
 
+def _evaluation_evidence(value) -> dict:
+    evidence = value if isinstance(value, dict) else {}
+    if not evidence:
+        return {}
+    return {
+        "basis": str(evidence.get("basis") or ""),
+        "experiment_id": str(evidence.get("experiment_id") or ""),
+        "artifact_id": str(evidence.get("artifact_id") or ""),
+        "delivered_experiment_id": str(evidence.get("delivered_experiment_id") or ""),
+        "refit_applied": bool(evidence.get("refit_applied")),
+        "metrics": _metrics(evidence.get("metrics")),
+        "note": str(evidence.get("note") or ""),
+    }
+
+
 def _capabilities(value) -> dict:
     caps = value if isinstance(value, dict) else {}
     calibration = caps.get("calibration") if isinstance(caps.get("calibration"), dict) else {}
@@ -930,6 +1189,15 @@ def _policy_signals(row: dict | None) -> dict:
     monotonic_declared = bool(monotonic_profile.get("monotonicity_declared"))
     stability = str(business.get("stability") or "")
     delivery = str(business.get("delivery") or "")
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else item
+    numeric_keys = [
+        str(key)
+        for key, value in metrics.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    fit_only = any(key.startswith("train_") for key in numeric_keys) and not any(
+        key.startswith(("test_", "oot_")) for key in numeric_keys
+    )
     reasons: list[str] = []
 
     if scorecard_like:
@@ -964,6 +1232,10 @@ def _policy_signals(row: dict | None) -> dict:
         approval = "不可审批"
         approval_status = "error"
         reasons.append("缺少可交付模型产物")
+    elif fit_only:
+        approval = "待评估"
+        approval_status = "warning"
+        reasons.append("缺少留出集（test/OOT）评估证据，不能仅凭训练指标给出审批建议")
     elif caps.get("handoff_supported") and delivery == "可移交" and monotonicity_status != "warning":
         approval = "建议可审批"
         approval_status = "ready"
@@ -1159,7 +1431,7 @@ def _delivery_readiness(
     readiness = [
         {
             "id": "native_model",
-            "label": "原生模型",
+            "label": "模型文件",
             "status": "ready" if native_path or capabilities.get("native_model_supported") else "missing",
             "artifact": native_path,
             "reason": "",
@@ -1184,7 +1456,7 @@ def _delivery_readiness(
     if challenger_action or challenger_task_id or challenger_package_markdown_path or challenger_package_path:
         readiness.append({
             "id": "challenger_backtest",
-            "label": "Challenger/Backtest",
+            "label": "挑战者回测",
             "status": challenger_action.get("status")
             or ("ready" if capabilities.get("handoff_supported") else "unsupported"),
             "artifact": (
@@ -1211,7 +1483,7 @@ def _delivery_readiness(
         insert_at = 2 if report is not None else 1
         readiness.insert(insert_at, {
             "id": "approval_package",
-            "label": "审批包",
+            "label": "审批材料包",
             "status": "ready",
             "artifact": approval_package_markdown_path or approval_package_path,
             "reason": "模型审批与交付证据已生成",
@@ -1255,7 +1527,7 @@ def _delivery_readiness(
         )
         readiness.insert(insert_at, {
             "id": "challenger_comparison",
-            "label": "Champion对比",
+            "label": "冠军/挑战者对比",
             "status": str(challenger_comparison.get("status") or "ready"),
             "artifact": challenger_comparison_markdown_path or challenger_comparison_path,
             "reason": str(challenger_comparison.get("recommendation") or "Champion/Challenger 对比已生成"),
@@ -1330,4 +1602,5 @@ __all__ = [
     "build_screen_payload",
     "build_special_value_payload",
     "screen_known_features",
+    "split_adoption_note",
 ]

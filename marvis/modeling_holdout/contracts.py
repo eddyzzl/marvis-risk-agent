@@ -24,6 +24,9 @@ class Intake(Contract):
     # User assertions remain declarations; custody cannot prove historical truth.
     historical_availability: Literal['unknown'] = 'unknown'
     label_maturity: Literal['unknown'] = 'unknown'
+    # Custodian's record of when the sealed labels became observable. It is a
+    # time fact (marvis.time_facts), not part of the immutable cohort contract.
+    label_available_at: str | None = Field(default=None, min_length=10, max_length=40)
 
     @field_validator('authority_basis')
     @classmethod
@@ -31,6 +34,9 @@ class Intake(Contract):
         if not value.strip():
             raise ValueError('authority basis required')
         return value.strip()
+
+
+FACT_FIELDS = frozenset({'label_available_at'})
 
 
 class Freeze(Contract):

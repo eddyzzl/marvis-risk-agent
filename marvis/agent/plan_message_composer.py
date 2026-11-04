@@ -13,12 +13,14 @@ from urllib.parse import quote, urlencode
 
 from marvis.api_report_helpers import driver_report_download_metadata
 from marvis.data.errors import DataLayerError
+from marvis.error_kinds import ErrorKind
 from marvis.agent.driver_turn import DriverMessage
 from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_payloads import build_model_delivery_payload
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gates.adapters import gate_editable_input_schema
 from marvis.agent.plan_utils import downstream_step_ids, find_step
+from marvis.agent.quick_replies import REPLY_HINT_KEY
 from marvis.agent.semantic_diagnostics import sanitize_diagnostics
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import (
@@ -35,8 +37,33 @@ from marvis.orchestrator.errors import requires_effect_reconciliation
 _RESULT_DATASET_PRESENTATION_BY_TOOL = {
     "define_label": ("标签数据集已生成", "下载标签结果"),
     "execute_join": ("拼接结果已生成", "下载拼接结果"),
+    "resolve_special_values": ("建模样本已生成", "下载建模样本"),
 }
 _DEFAULT_RESULT_DATASET_PRESENTATION = ("结果数据集已生成", "下载结果数据集")
+
+
+# V3 5.7: feature analysis and modeling result tables carry the workspace's
+# confirmed field business names as display labels (codes stay in the cells).
+_FIELD_LABEL_TOOLS = frozenset(
+    {
+        "compute_feature_metrics",
+        "analyze_feature_bins",
+        "screen_features",
+        "select_features",
+        "train_model",
+        "train_models",
+    }
+)
+
+# D-3: ``False`` = the sample data contradicts the authoritative score direction
+# and no person has confirmed it yet (absent = no conflict; ``True`` = confirmed).
+DIRECTION_CONFLICT_INPUT = "confirm_direction_conflict"
+
+
+def has_pending_direction_conflict(plan: Plan) -> bool:
+    return any(
+        (step.inputs or {}).get(DIRECTION_CONFLICT_INPUT) is False for step in plan.steps
+    )
 
 
 class PlanMessageComposer:
@@ -111,12 +138,17 @@ class PlanMessageComposer:
         lines = ["我已生成执行计划，会在每个关键节点停下与你确认:"]
         for phase in order:
             lines.append(f"**{phase}**:{' → '.join(by_phase[phase])}")
-        lines.append("手动模式请点击「开始执行」；Agent 模式请回复「开始」或「继续」。")
+        lines.append("确认没问题就开始执行。")
         meta = {
             "plan_id": plan.id,
             "kind": "plan_overview",
             "confirmation_snapshot": self._confirmation_snapshot(plan),
+            REPLY_HINT_KEY: "要先改哪一步，也可以直接说。",
         }
+        if has_pending_direction_conflict(plan):
+            # D-3: only a person may start a plan whose score direction the
+            # sample data contradicts; AUTO halts on this overview.
+            meta["human_decision_gate"] = "required"
         meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
         return DriverMessage("plan_overview", "\n".join(lines), meta)
 
@@ -139,6 +171,7 @@ class PlanMessageComposer:
             gate,
             lambda step_id: self._safe_plan_step_output(plan, step_id),
             render_output=trusted_renderer,
+            load_dataset=self._load_dataset,
         )
         parts = rendered.parts
         if not parts:
@@ -159,18 +192,16 @@ class PlanMessageComposer:
                 "这些值会改变缺失处理或特征集合，必须逐列选择「转为空值」「保留原值」"
                 "或「删除特征」；保留时还必须说明理由。"
             )
-        # The stored message is shared by both run modes. Manual-mode analysis
-        # strips this chat-only line and exposes its button; Agent mode keeps it
-        # and deliberately exposes no gate action buttons.
+        # The stored message is shared by both run modes, so the content stays
+        # mode-neutral. The Agent-mode-only instruction travels as a structured
+        # reply hint (2026-10-14 redesign); confirm actions come from the gate
+        # card and widgets, never from typed keywords.
+        reply_hint = None
         if rendered.special_values is not None:
-            parts.append(
-                "Agent 模式请在一条消息中完整说明每列策略，例如："
+            parts.append("这一步需要逐列做出选择，只确认不会越过这个人工决策节点。")
+            reply_hint = (
+                "也可以在一条消息里说明每列怎么处理，例如："
                 "「x1 转为空值；x2 删除；x3 保留，原因：业务约定值」。"
-                "仅回复「确认」不会越过此人工决策节点。"
-            )
-        else:
-            parts.append(
-                "Agent 模式请回复「继续」或「确认」；如需调整，直接用自然语言说明。"
             )
         meta = {
             "plan_id": plan.id,
@@ -180,6 +211,8 @@ class PlanMessageComposer:
             "kind": "gate",
             "confirmation_snapshot": self._confirmation_snapshot(plan, gate),
         }
+        if reply_hint:
+            meta[REPLY_HINT_KEY] = reply_hint
         # LT-2: the gate step's own source tool is the reliable signal for the
         # AUTO safety layer (production step_ids are opaque "{plan}-step-N"). Carry
         # it so gates/contracts.infer_gate_envelope can set risk_flags on forced
@@ -198,7 +231,7 @@ class PlanMessageComposer:
         if rendered.output_refs:
             meta["output_refs"] = rendered.output_refs
         if rendered.screen is not None:
-            meta["screen"] = rendered.screen
+            meta["screen"] = self._with_screen_field_labels(plan.task_id, rendered.screen)
         if rendered.dedup is not None:
             meta["dedup"] = rendered.dedup
         if rendered.join_keys is not None:
@@ -284,7 +317,7 @@ class PlanMessageComposer:
             if business_review:
                 acceptance = business_review["business_acceptance"]
                 labels = {"passed": "业务验收达标", "failed": "业务验收未达标",
-                          "insufficient_evidence": "业务验收证据不足", "not_configured": "未配置业务验收标准",
+                          "insufficient_evidence": "业务验收证据不足", "not_configured": "这次没有设置业务验收标准，所以只说明流程已跑完，不判断业务是否达标",
                           "not_applicable": "按验收合同本次不适用"}
                 parts.insert(1, labels[acceptance["status"]] + "。")
                 meta["business_acceptance_rows"] = acceptance_display_rows(acceptance)
@@ -622,7 +655,7 @@ class PlanMessageComposer:
             plan,
             gate,
             run_seq=run_seq,
-            text="收到。确认当前结果请回复「确认」继续。",
+            text="收到。确认当前结果没问题就继续，要改的话说明新的参数。",
         )
 
     def failed_message(self, plan: Plan, *, run_seq) -> DriverMessage:
@@ -921,7 +954,7 @@ class PlanMessageComposer:
                     [],
                 )
 
-        return render_tool_output(
+        text, tables = render_tool_output(
             step.tool_ref.tool,
             output,
             trusted_task_id=plan.task_id,
@@ -936,6 +969,42 @@ class PlanMessageComposer:
             ),
             presentation_state=presentation_state,
         )
+        if step.tool_ref.tool in _FIELD_LABEL_TOOLS:
+            tables = self._with_field_labels(plan.task_id, tables)
+        return text, tables
+
+    def _with_field_labels(self, task_id: str, tables: list[dict]) -> list[dict]:
+        """Business names from the task's data workspace, as display labels only."""
+
+        if self._db_path is None or not tables:
+            return tables
+        try:
+            from marvis.data.field_aliases import attach_field_labels
+            from marvis.repositories.data_workspace import DataWorkspaceRepository
+
+            snapshot = DataWorkspaceRepository(self._db_path).get_or_default(task_id)
+            return attach_field_labels(tables, dict(snapshot.semantic_mapping.business_names))
+        except Exception:  # labels are optional; results render without them
+            return tables
+
+    def _with_screen_field_labels(self, task_id: str, screen: dict) -> dict:
+        """The screen/select widget's codes with confirmed business names (display only)."""
+
+        if self._db_path is None or not isinstance(screen, dict):
+            return screen
+        try:
+            from marvis.data.field_aliases import field_labels_for
+            from marvis.repositories.data_workspace import DataWorkspaceRepository
+
+            snapshot = DataWorkspaceRepository(self._db_path).get_or_default(task_id)
+            codes = list(screen.get("selected") or [])
+            for key in ("ranked", "leakage", "suspected", "unusable"):
+                codes.extend(item[0] if isinstance(item, (list, tuple)) and item else item for item in screen.get(key) or [])
+            codes.extend((screen.get("scores") or {}).keys())
+            labels = field_labels_for(codes, dict(snapshot.semantic_mapping.business_names))
+        except Exception:  # labels are optional; the widget renders without them
+            return screen
+        return {**screen, "field_labels": labels} if labels else screen
 
     def _trusted_presenter_inputs(
         self,
@@ -1151,6 +1220,20 @@ def _step_failure_diagnostic(
         "retryable": failed is not None,
         "impact": "失败步骤之后的依赖步骤尚未执行。",
     }
+    if error_kind == ErrorKind.PMML_EXPORT_ENVIRONMENT:
+        # Retrying cannot succeed until the runtime is repaired, so the card must
+        # say "fix the environment first" instead of offering a blind retry. The
+        # code/phase stay generic: recovery chat only accepts known codes.
+        diagnostic.update({
+            "title": "PMML 导出环境不兼容",
+            "summary": f"「{step_title}」未完成：运行环境不满足 PMML 转换器要求；已完成步骤和中间结果均已保留。",
+            "actions": [
+                "按错误原因修复运行环境（依赖版本恢复到 pyproject.toml / uv.lock 锁定版本，或安装/配置 Java）。",
+                "修复并重启 MARVIS 后，再由 Agent 从当前失败步骤重试。",
+            ],
+            "agent_prompt": "运行环境修复后，是否由 Agent 从当前失败步骤重试？",
+            "auto_recoverable": False,
+        })
     from marvis.agent.workflow_error_diagnostics import (  # noqa: PLC0415
         enrich_workflow_error_diagnostic,
     )

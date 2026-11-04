@@ -100,6 +100,72 @@ def test_purge_preview_endpoint_lists_expected_counts_without_deleting(tmp_path)
     assert TaskRepository(settings.db_path).get_task(task["id"]).id == task["id"]
 
 
+def test_purge_preview_names_uploads_and_plan_templates_without_ids(tmp_path):
+    """V3 UI-4: the delete dialog names what goes (original upload names,
+    plan template names), never internal ids or content hashes."""
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    _upload_dataset(client, task["id"], pd.DataFrame({"acct_id": ["A1", "B2"]}), name="applications.csv")
+    with connect(settings.db_path) as conn:
+        conn.execute(
+            "INSERT INTO plans (id, task_id, goal, source, autonomy_level, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'template', 1, 'draft', '2026-10-28T00:00:00', '2026-10-28T00:00:00')",
+            ("plan_1", task["id"], "数据拼接: anchor_id=ds_0dd84908e9d945f0be7ea836392f20d7"),
+        )
+
+    body = client.get(f"/api/tasks/{task['id']}/purge-preview").json()
+
+    names = body["purge_names"]
+    assert names["datasets"] == ["applications.csv"]
+    assert names["plans"] == ["数据拼接"]
+    assert "ds_" not in str(names)
+    assert body["purge_summary"]["datasets"] == 1
+
+
+def test_purge_names_never_show_a_windows_or_posix_path():
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    for raw in ("C:\\Users\\x\\data.csv", "/Users/x/data.csv", "data.csv"):
+        assert PureWindowsPath(PurePosixPath(raw).name).name == "data.csv"
+
+
+def test_purge_names_skip_content_hash_stems(tmp_path):
+    from marvis.repositories.tasks import _task_purge_names
+
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    digest = "1d9c4856236c9023800b6dd98b96b0ea04ecf7ec7938871f120fdce320be2900"
+    with connect(settings.db_path) as conn:
+        conn.execute(
+            "INSERT INTO datasets (id, task_id, role, source_path, format, row_count, columns_json, has_target, created_at)"
+            " VALUES ('ds_hash', ?, 'sample', ?, 'parquet', 1, '[]', 0, '2026-10-28T00:00:00')",
+            (task["id"], f"_cas/{digest}/{digest}.parquet"),
+        )
+        names = _task_purge_names(conn, task["id"])
+
+    assert digest not in str(names)
+    assert names["datasets"] == []
+
+
+def test_purge_name_lists_counts_repeats_and_shortens():
+    from marvis.api_task_payloads import purge_name_lists
+
+    lists = purge_name_lists(
+        {
+            "datasets": ["a.csv"],
+            "derived_datasets": 2,
+            "plan_goals": ["模型开发: dataset_id=ds_1", "模型开发: dataset_id=ds_2", "无冒号的很长的计划目标文字超过了二十四个字的上限会被截断"],
+            "experiment_recipes": ["lr", "lr"],
+            "strategy_descriptions": [],
+        }
+    )
+
+    assert lists["plans"][0] == "模型开发 ×2"
+    assert lists["plans"][1].endswith("…") and len(lists["plans"][1]) == 24
+    assert lists["experiments"] == ["逻辑回归 ×2"]
+    assert lists["derived_datasets"] == 2
+
+
 def test_purge_preview_returns_404_for_unknown_task(tmp_path):
     client, _settings = _client(tmp_path)
 

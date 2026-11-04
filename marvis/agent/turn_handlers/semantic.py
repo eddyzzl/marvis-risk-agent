@@ -25,6 +25,8 @@ from marvis.agent.semantic_intent import INTENT_RISK_STANDARD_VINTAGE
 from marvis.agent.semantic_intent import INTENT_RISK_VTG_TERMINAL
 from marvis.agent.semantic_intent import INTENT_STRATEGY_SAMPLE_BINDING
 from marvis.agent.semantic_intent import INTENT_STRATEGY_WORKFLOW
+from marvis.agent.semantic_intent import INTENT_MONITORING_SCHEDULE
+from marvis.agent.semantic_intent import INTENT_SQL_QUERY
 from marvis.agent.strategy_setup import preview_strategy_dataset_context
 from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.domain import TASK_TYPE_DATA_JOIN
@@ -41,6 +43,7 @@ from marvis.repositories.tasks import TaskRepository
 from pathlib import Path
 import hashlib
 import json
+import re
 from . import adhoc as adhoc_lane
 from . import c1_state as c1_state_lane
 from . import contracts as contracts_lane
@@ -56,8 +59,15 @@ def _semantic_intent_clarification_response(
     reason: str,
     pending_adhoc: dict | None = None,
     diagnostics: dict | None = None,
+    about_results: bool = False,
 ) -> dict:
-    """Persist a fail-closed Agent turn without changing workflow state."""
+    """Persist a fail-closed Agent turn without changing workflow state.
+
+    ``about_results`` marks a question on a task whose plan already finished;
+    the reply then says where the answer lives and how to ask for new
+    analysis instead of listing workflow names.  The router's own rationale
+    stays in metadata only.
+    """
 
     safe_diagnostics = sanitize_diagnostics(diagnostics)
     repo.add_agent_message(
@@ -78,6 +88,13 @@ def _semantic_intent_clarification_response(
                 "或给出新的分组、指标和筛选条件。"
             )
             if pending_adhoc is not None
+            else (
+                "这是对已有结果的提问，我没有创建计划，也没有重新计算。"
+                "已算出的指标都在上方的结果卡里；这个问题我没法只凭这些结果直接回答。"
+                "如果需要新的分析，请直接说要做什么（例如“按产品拆开再算一次”），"
+                "我会先给出计划，再请你确认。"
+            )
+            if about_results
             else (
                 "我还不能安全确定这句话要进入哪条流程，因此没有创建计划、"
                 "执行工具或改变当前状态。请直接说明要继续当前步骤，还是要做风险收益、"
@@ -103,6 +120,171 @@ def _semantic_intent_clarification_response(
         "code": "semantic_intent_clarification",
         "messages": repo.list_agent_messages(task.id),
     }
+
+
+_RESULT_QUESTION_RE = re.compile(
+    r"[?？]|哪个|哪一|哪批|哪些|什么|为什么|为何|多少|第几|几期|是否|是不是|吗|呢|怎么样|如何"
+)
+_VINTAGE_RESULT_TOPIC_RE = re.compile(
+    r"最差|最好|最高|最低|最坏|最大|最小|质量|坏账|坏率|参考\s*MOB|MOB|mob|账龄|趋势|恶化|变差|改善|变好|批次|cohort|放款",
+)
+_VINTAGE_TREND_WORDS = {
+    "deteriorating": "在变差：最新一批在参考 MOB 的坏账率高于最早一批",
+    "improving": "在变好：最新一批在参考 MOB 的坏账率低于最早一批",
+    "stable": "基本持平：最新一批与最早一批在参考 MOB 的坏账率相同",
+}
+
+
+def _looks_like_question(text: str | None) -> bool:
+    return bool(_RESULT_QUESTION_RE.search(str(text or "")))
+
+
+def _latest_finished_plan(runtime: contracts_lane.DriverTurnRuntime, task: TaskRecord):
+    """The task's latest plan when it finished and nothing newer is running."""
+
+    plans = list(runtime.plan_repo.list_plans_for_task(task.id))
+    if not plans:
+        return None
+    latest = plans[-1]
+    status = getattr(latest.status, "value", latest.status)
+    return latest if status == "done" else None
+
+
+def _task_has_finished_results(
+    runtime: contracts_lane.DriverTurnRuntime, task: TaskRecord
+) -> bool:
+    try:
+        return _latest_finished_plan(runtime, task) is not None
+    except Exception:  # noqa: BLE001 - a copy hint must never break the turn
+        return False
+
+
+def _maybe_answer_result_question(
+    runtime: contracts_lane.DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    text: str,
+    conversation: list[dict],
+) -> dict | None:
+    """Answer a question about finished results from platform outputs only.
+
+    Read-only: no plan, no Tool, no LLM.  Every number is copied from the
+    stored step output; anything the output cannot answer falls through to
+    normal routing.
+    """
+
+    raw = str(text or "").strip()
+    if not raw or not _looks_like_question(raw):
+        return None
+    if (
+        shared_lane._active_plan(runtime.plan_repo, task.id) is not None
+        or shared_lane.latest_open_gate(conversation) is not None
+        or adhoc_lane._latest_adhoc_pending(conversation) is not None
+    ):
+        return None
+    try:
+        plan = _latest_finished_plan(runtime, task)
+    except Exception:  # noqa: BLE001 - unreadable history is not an answer
+        return None
+    if plan is None:
+        return None
+    answer = None
+    for step in plan.steps:
+        tool = getattr(getattr(step, "tool_ref", None), "tool", None)
+        if tool != "vintage_curve" or not _VINTAGE_RESULT_TOPIC_RE.search(raw):
+            continue
+        try:
+            output = runtime.plan_repo.load_bound_step_output(step.id)
+        except Exception:  # noqa: BLE001 - no bound output, no answer
+            continue
+        answer = _vintage_result_answer(output, step.inputs or {})
+        if answer is not None:
+            source_step_id = step.id
+            break
+    if answer is None:
+        return None
+    repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=raw,
+        metadata={"intent": "result_question"},
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=answer,
+        metadata={
+            "intent": "result_answer",
+            "kind": "result_answer",
+            "read_only": True,
+            "plan_id": plan.id,
+            "source_step_id": source_step_id,
+        },
+    )
+    return {
+        "task_id": task.id,
+        "status": "ok",
+        "messages": repo.list_agent_messages(task.id),
+    }
+
+
+def _vintage_result_answer(output: object, inputs: dict) -> str | None:
+    if not isinstance(output, dict):
+        return None
+    summary = output.get("summary") if isinstance(output.get("summary"), dict) else {}
+    at_ref = summary.get("at_ref") if isinstance(summary.get("at_ref"), dict) else {}
+    rates = {
+        str(cohort): float(value)
+        for cohort, value in at_ref.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if not rates:
+        return None
+    try:
+        ref_mob = int(inputs.get("ref_mob") or 6)
+    except (TypeError, ValueError):
+        return None
+    mob_axis = [
+        int(item)
+        for item in output.get("mob_axis") or []
+        if isinstance(item, (int, float)) and not isinstance(item, bool)
+    ]
+    snapshot = output.get("label_semantics") == "snapshot"
+    measure = "坏账率" if snapshot else "累计坏账率"
+    worst_rate = max(rates.values())
+    best_rate = min(rates.values())
+    worst = [cohort for cohort, rate in rates.items() if rate == worst_rate]
+    best = [cohort for cohort, rate in rates.items() if rate == best_rate]
+    numbering = "（数据里 MOB 从 0 开始编号）" if mob_axis and min(mob_axis) == 0 else ""
+    lines = [
+        "按平台已算出的 Vintage 结果回答（只读取已有结果，没有重新计算）：",
+        f"- 参考 MOB 是 MOB{ref_mob}{numbering}：各批次都取账龄 MOB{ref_mob} 时的{measure}"
+        "来比，避免把表现期还短的新批次误看成更好。",
+        f"- 资产质量最差：{'、'.join(worst)}，MOB{ref_mob} {measure} {_pct(worst_rate)}；"
+        f"最好：{'、'.join(best)}，{_pct(best_rate)}。",
+        "- 各批次 MOB"
+        + str(ref_mob)
+        + "："
+        + "、".join(f"{cohort} {_pct(rate)}" for cohort, rate in rates.items())
+        + "。",
+    ]
+    cohorts = [str(item) for item in output.get("cohorts") or []]
+    immature = [cohort for cohort in cohorts if cohort not in rates]
+    if immature:
+        lines.append(
+            f"- 还没到 MOB{ref_mob} 的批次没有参与比较：{'、'.join(immature)}。"
+        )
+    trend = _VINTAGE_TREND_WORDS.get(str(summary.get("trend") or ""))
+    if trend and len(rates) >= 2:
+        lines.append(f"- 整体趋势{trend}。")
+    return "\n".join(lines)
+
+
+def _pct(value: float) -> str:
+    return f"{value * 100:.1f}%"
 
 
 def _semantic_intent_state_snapshot(
@@ -414,5 +596,26 @@ def _semantic_intent_route_contract(
                 INTENT_RISK_STANDARD_VINTAGE,
             )
         )
+    allowed.extend(_conversation_action_intents(runtime, task))
     allowed.append(INTENT_NONE)
     return (context, tuple(allowed), None)
+
+
+def _conversation_action_intents(runtime, task: TaskRecord) -> tuple[str, ...]:
+    """D-6/D-8: draft-only intents, offered only when their inputs exist."""
+    from marvis.agent.conversation_sql import ready_sql_sources
+    from marvis.operations.conversation_schedule import schedule_form_options
+
+    if getattr(runtime, "settings", None) is None:
+        return ()
+    intents = []
+    principal = getattr(getattr(runtime, "local_principal", None), "id", None)
+    if principal and ready_sql_sources(runtime.settings, str(principal)):
+        intents.append(INTENT_SQL_QUERY)
+    try:
+        options = schedule_form_options(runtime.settings, task.id)
+    except Exception:  # noqa: BLE001 - unreadable choices offer no schedule form
+        options = {"targets": [], "datasets": []}
+    if options["targets"] and options["datasets"]:
+        intents.append(INTENT_MONITORING_SCHEDULE)
+    return tuple(intents)

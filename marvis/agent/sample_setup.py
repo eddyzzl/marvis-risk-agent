@@ -276,7 +276,7 @@ def detect_setup(
         more = f" 等共 {len(excluded_categorical)} 个" if len(excluded_categorical) > 8 else ""
         notes.append(
             f"{len(excluded_categorical)} 个类别列未入模:{preview}{more}；"
-            "如需使用，请先用 woe_encode_categorical 编码，或改用 catboost（原生支持类别列）。"
+            "如需使用，可以先对它做 WOE 编码，或改用 CatBoost（可直接使用类别列）。"
         )
 
     # -- counts / bad-rate (read only key columns in full) --------------------

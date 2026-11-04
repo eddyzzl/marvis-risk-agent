@@ -1,8 +1,11 @@
 """Private task-bound SQL source discovery, proposal and confirmation API."""
 from fastapi import APIRouter, Request
 from marvis.errors import bad_gateway, conflict, domain_error, forbidden, unprocessable
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
+from marvis.agent.conversation_sql import confirm_sql_in_conversation, draft_sql_in_conversation
 from marvis.agent.sql_import import SqlProposalError, _secret, confirm_sql_import, propose_sql_import
 from marvis.api_data_payloads import dataset_payload
 from marvis.data.errors import DatasetTooLargeError
@@ -13,6 +16,7 @@ from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.llm_outbound import OutboundContextError
 from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.repositories.data_workspace import DataWorkspaceRevisionConflict
+from marvis.repositories.tasks import TaskRepository
 from marvis.routers.data import _data_runtime, _data_workspace_payload, _require_task
 
 
@@ -31,6 +35,20 @@ class SqlProposalRequest(BaseModel):
 class SqlConfirmRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     proposal_token: StrictStr = Field(min_length=1, max_length=65536)
+
+
+class SqlConversationDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    question: StrictStr = Field(min_length=1, max_length=16384)
+    source_id: StrictStr = Field(min_length=1, max_length=64)
+    model_id: StrictStr | None = Field(default=None, max_length=128)
+
+
+class SqlConversationConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    message_id: StrictStr = Field(min_length=1, max_length=128)
+    # Execution needs this explicit literal; a missing flag is a 422 and runs nothing.
+    confirmed: Literal[True]
 
 
 def _actor(request, task_id):
@@ -98,5 +116,30 @@ def confirm(task_id: str, payload: SqlConfirmRequest, request: Request):
         dataset, snapshot, replayed = confirm_sql_import(settings, task_id=task_id, actor_id=actor, token=payload.proposal_token, registry=registry)
         return {"status": "completed", "dataset": dataset_payload(dataset), "workspace": _data_workspace_payload(snapshot),
             "replayed": replayed, "evidence": {"content_hash": dataset.content_hash, "row_count": dataset.row_count}}
+    except Exception as exc:
+        raise _failure(exc) from None
+
+
+@router.post("/conversation/drafts")
+def conversation_draft(task_id: str, payload: SqlConversationDraftRequest, request: Request):
+    actor = _actor(request, task_id)
+    settings = request.app.state.settings
+    try:
+        message = draft_sql_in_conversation(settings, TaskRepository(settings.db_path), task_id, actor_id=actor,
+            question=payload.question, source_id=payload.source_id, client=_llm(settings, payload.model_id))
+        return {"status": "needs_confirmation", "message": message, "execution_started": False}
+    except Exception as exc:
+        raise _failure(exc) from None
+
+
+@router.post("/conversation/confirm")
+def conversation_confirm(task_id: str, payload: SqlConversationConfirmRequest, request: Request):
+    actor = _actor(request, task_id)
+    settings = request.app.state.settings
+    try:
+        _, _, registry, _ = _data_runtime(request)
+        message, replayed = confirm_sql_in_conversation(settings, TaskRepository(settings.db_path), task_id, actor_id=actor,
+            message_id=payload.message_id, registry=registry)
+        return {"status": "completed", "message": message, "replayed": replayed}
     except Exception as exc:
         raise _failure(exc) from None

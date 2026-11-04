@@ -78,6 +78,9 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactNotFoundError,
     stable_task_artifact_id,
 )
+from marvis.data.file_identity import stable_file_stat as _stable_file_stat
+from marvis.packs.strategy.input_validation import dataset_evidence_binding as _dataset_evidence_binding
+from marvis.packs.strategy.input_validation import sample_design_v2_identity as _sample_design_v2_identity
 
 _StrategySampleDesignV2Binding = (
     StrategySampleDesignV2ArtifactBinding
@@ -871,19 +874,6 @@ def _require_pool_development_contract(
         )
 
 
-def _sample_design_v2_identity(
-    binding: _StrategySampleDesignV2Binding,
-) -> tuple[str, ...]:
-    return (
-        binding.task_id,
-        binding.membership_artifact_id,
-        binding.membership_artifact_content_hash,
-        binding.bundle_artifact_id,
-        binding.bundle_artifact_content_hash,
-        str(binding.bundle["bundle_id"]),
-        str(binding.bundle["sample_design"]["sample_design_id"]),
-        str(binding.bundle["sample_design"]["content_hash"]),
-    )
 
 
 def _load_current_strategy(
@@ -1230,16 +1220,6 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
     )
 
 
-def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-        int(value.st_nlink),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
 
 
 def _expression_fields(value: object) -> set[str]:
@@ -1297,22 +1277,6 @@ def _sample_design_evidence_ref(
     }
 
 
-def _dataset_evidence_binding(
-    sample: _StrategySampleDesignV2Binding,
-) -> dict[str, Any]:
-    source = sample.source_binding
-    return {
-        "task_id": source.task_id,
-        "dataset_id": source.dataset_id,
-        "dataset_content_hash": source.dataset_content_hash,
-        "dataset_source_path": source.dataset_source_path,
-        "dataset_registry_metadata_hash": (
-            source.dataset_registry_metadata_hash
-        ),
-        "workspace_revision": source.workspace_revision,
-        "workspace_generation": source.workspace_generation,
-        "semantic_mapping_hash": source.semantic_mapping_hash,
-    }
 
 
 def _require_dataset_unchanged(

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-from marvis.errors import conflict, unprocessable
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+import shutil
+
+from fastapi import APIRouter, File, Request, UploadFile
+from marvis.errors import conflict, payload_too_large, unprocessable
 
 from marvis.api_scan_helpers import (
     REQUIRED_SCAN_MATERIALS,
@@ -17,6 +21,7 @@ from marvis.api_task_payloads import task_payload
 from marvis.api_task_helpers import (
     dispatch_platform_hook,
     get_task_or_404,
+    reject_if_task_has_active_job,
     validation_batch_parent_id,
 )
 from marvis.repositories.tasks import TaskRepository
@@ -60,6 +65,57 @@ def _reject_validation_batch_task(
         )
 
 
+MATERIAL_SUPPLEMENT_MAX_FILES = 20
+MATERIAL_SUPPLEMENT_CHUNK_SIZE = 1024 * 1024
+_EXCEL_SUPPLEMENT_SUFFIXES = frozenset({".xls", ".xlsx", ".xlsm"})
+
+
+def _supplement_upload_dir_parent(request: Request, task: TaskRecord) -> Path | None:
+    """The task's own upload directory, when its materials were uploaded.
+
+    Only a directory the platform created under ``material_uploads`` accepts
+    supplementary files; a task bound to the user's own folder is never
+    written into (the user adds the file there and refreshes the list).
+    """
+    uploads_root = (
+        Path(request.app.state.settings.workspace).resolve() / "material_uploads"
+    )
+    try:
+        source_dir = Path(task.source_dir).resolve()
+    except (TypeError, ValueError, OSError):
+        return None
+    if source_dir == uploads_root or not source_dir.is_relative_to(uploads_root):
+        return None
+    return source_dir if source_dir.is_dir() else None
+
+
+def _material_payload_with_upload_flag(request: Request, task: TaskRecord, payload: dict) -> dict:
+    return {
+        **payload,
+        "supplement_upload_supported": _supplement_upload_dir_parent(request, task) is not None,
+    }
+
+
+def _new_supplement_dir(source_dir: Path) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for index in range(100):
+        name = f"补充材料-{stamp}" if index == 0 else f"补充材料-{stamp}-{index}"
+        candidate = source_dir / name
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return candidate
+    raise conflict("补充材料目录分配失败，请稍后重试。")
+
+
+def _supplement_file_name(raw_name: str | None) -> str:
+    name = PurePosixPath(str(raw_name or "").replace("\\", "/")).name.strip()
+    if not name or name in {".", ".."} or name.startswith("."):
+        raise unprocessable(f"文件名无效：{raw_name or ''}")
+    return name
+
+
 @router.get("/tasks/{task_id}/materials")
 def task_material_candidates(
     task_id: str, request: Request, pmml_path: str | None = None
@@ -68,9 +124,86 @@ def task_material_candidates(
     task = get_task_or_404(repo, task_id)
     _reject_validation_batch_task(repo, task)
     try:
-        return material_candidates_payload(task, pmml_path_override=pmml_path, source_admission=_material_source_admission(request, task))
+        payload = material_candidates_payload(task, pmml_path_override=pmml_path, source_admission=_material_source_admission(request, task))
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise unprocessable(f"source dir invalid: {exc}") from exc
+    return _material_payload_with_upload_flag(request, task, payload)
+
+
+@router.post("/tasks/{task_id}/materials/files", status_code=201)
+async def upload_task_supplement_materials(
+    task_id: str,
+    request: Request,
+    files: list[UploadFile] = File(...),
+) -> dict:
+    """Add corrected materials (e.g. a dictionary with importance) to a task.
+
+    Eval round 1 (S1): a failed material check said "补齐后重新上传", but the
+    task had nowhere to upload. Files land in a new 补充材料-<time> folder of
+    the task's upload directory, so earlier files stay untouched; selecting
+    them still goes through PUT /materials (which invalidates old evidence).
+    """
+    repo = _repo(request)
+    task = get_task_or_404(repo, task_id)
+    if task.task_type != TASK_TYPE_VALIDATION:
+        raise unprocessable("只有模型验证任务可以补传验证材料。")
+    _reject_validation_batch_task(repo, task)
+    reject_if_task_has_active_job(repo, task_id)
+    if task.status in {TaskStatus.RUNNING, TaskStatus.COMPUTING_METRICS}:
+        raise conflict(f"任务正在运行，不能补传材料：{task.status.value}")
+    source_dir = _supplement_upload_dir_parent(request, task)
+    if source_dir is None:
+        raise conflict("这个任务的材料来自本地目录；请把补好的文件放进该目录，再点「刷新列表」。")
+    if not files:
+        raise unprocessable("请至少选择一个文件。")
+    if len(files) > MATERIAL_SUPPLEMENT_MAX_FILES:
+        raise unprocessable(f"一次最多补传 {MATERIAL_SUPPLEMENT_MAX_FILES} 个文件。")
+    names = [_supplement_file_name(upload.filename) for upload in files]
+    if len(set(names)) != len(names):
+        raise unprocessable("同一次补传里有重名文件，请改名后再传。")
+    settings = request.app.state.settings
+    target_dir = _new_supplement_dir(source_dir)
+    saved: list[dict] = []
+    try:
+        for upload, name in zip(files, names):
+            limit = (
+                settings.max_excel_upload_bytes
+                if PurePosixPath(name).suffix.lower() in _EXCEL_SUPPLEMENT_SUFFIXES
+                else settings.max_csv_upload_bytes
+            )
+            destination = target_dir / name
+            size_bytes = 0
+            with destination.open("wb") as output:
+                while True:
+                    chunk = await upload.read(MATERIAL_SUPPLEMENT_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    size_bytes += len(chunk)
+                    if size_bytes > limit:
+                        raise payload_too_large(
+                            f"文件超过上传上限：{name}（上限 {limit // (1024 * 1024)} MB）"
+                        )
+                    output.write(chunk)
+            await upload.close()
+            saved.append({
+                "relative_path": destination.relative_to(source_dir).as_posix(),
+                "size_bytes": size_bytes,
+            })
+    except Exception:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+    task = repo.get_task(task_id)
+    try:
+        payload = material_candidates_payload(
+            task, source_admission=_material_source_admission(request, task)
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise unprocessable(f"source dir invalid: {exc}") from exc
+    return {
+        "files": saved,
+        "materials": _material_payload_with_upload_flag(request, task, payload),
+    }
 
 
 @router.put("/tasks/{task_id}/materials")

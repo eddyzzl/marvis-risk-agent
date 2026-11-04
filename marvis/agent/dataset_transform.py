@@ -263,7 +263,7 @@ def build_dataset_transform_request(
                 request=None,
                 clarification=(
                     f"字段 {labels} 是 target 或关键标识字段。"
-                    f"若仍要删除，请明确回复“确认删除 {labels}”。"
+                    f"若仍要删除，请说「确认删除 {labels}」。"
                 ),
                 operations=canonical_operations,
                 protected_fields=pending,

@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import gzip
 import socket
 
@@ -135,6 +137,69 @@ def test_web_search_parses_bounded_results(monkeypatch):
         {"title": "B", "url": "https://example.test/b", "snippet": "second"},
     ]
     assert fake.calls[0][0] == "get"
+
+
+_SENSITIVE_QUERIES = [
+    "scorecard api_key=TEST_ONLY_VALUE",
+    "读取 /Users/example/private/data.csv 的建模方法",
+    "访问 https://private.invalid/data 风控",
+    "客户姓名：测试姓名 授信评分",
+    "手机号为13812345678 的逾期记录",
+    'customer_name,balance\nTEST_ONLY_PERSON,42',
+]
+
+
+@pytest.mark.parametrize("query", _SENSITIVE_QUERIES)
+def test_web_search_rejects_sensitive_query_before_any_request(monkeypatch, query):
+    from marvis.drafts.errors import OutboundQueryError
+
+    fake = _FakeHttpx(_Response(payload={"results": []}))
+    # No connectivity probe, no search request: the real probe path would
+    # record a "head" call on the fake client.
+    monkeypatch.setattr("marvis.drafts.web_search._httpx", lambda: fake)
+
+    with pytest.raises(OutboundQueryError, match="未发送任何网络请求") as raised:
+        web_search(query)
+
+    assert fake.calls == []
+    for secret in ("TEST_ONLY_VALUE", "/Users/example", "private.invalid", "测试姓名", "13812345678"):
+        assert secret not in str(raised.value)
+
+
+def test_web_search_sends_approved_query_verbatim(monkeypatch):
+    fake = _FakeHttpx(_Response(payload={"results": []}))
+    monkeypatch.setattr("marvis.drafts.web_search._httpx", lambda: fake)
+    query = "评分卡 WOE 分箱，不要用 XGB，KS>0.3"
+
+    assert web_search(query, max_results=3) == []
+
+    assert [call[0] for call in fake.calls] == ["head", "get"]
+    assert fake.calls[1][2]["params"] == {"q": query, "n": 3}
+
+
+def test_web_search_tool_and_endpoint_fail_closed_on_sensitive_query(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from marvis.app import create_app
+    from marvis.drafts import tools
+    fake = _FakeHttpx(_Response(payload={"results": []}))
+    monkeypatch.setattr("marvis.drafts.web_search._httpx", lambda: fake)
+
+    # Review B6: the Tool returns a governed refusal instead of raising.
+    refused = tools.tool_web_search({"query": "DB_PASSWORD=TEST_ONLY_VALUE"}, None)
+    assert refused["results"] == [] and refused["refused"] is True
+    assert "未发送任何网络请求" in refused["guidance"] and "TEST_ONLY_VALUE" not in refused["guidance"]
+    from marvis.plugins.schema_validation import validate_against_schema
+    manifest = json.loads((Path(tools.__file__).parents[1] / "packs" / "drafts" / "manifest.json").read_text())
+    schema = next(tool["output_schema"] for tool in manifest["tools"] if tool["name"] == "web_search")
+    validate_against_schema(refused, schema, label="web_search")
+
+    client = TestClient(create_app(tmp_path))
+    response = client.post("/api/drafts/web-search", json={"query": "DB_PASSWORD=TEST_ONLY_VALUE"})
+    assert response.status_code == 422
+    assert "未发送任何网络请求" in response.json()["detail"]
+    assert "TEST_ONLY_VALUE" not in response.text
+    assert fake.calls == []
 
 
 def test_fetch_url_offline_and_http_errors(monkeypatch):

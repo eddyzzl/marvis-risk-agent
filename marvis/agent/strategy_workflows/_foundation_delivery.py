@@ -7,6 +7,7 @@ invokes a Tool or reaches into the legacy compiler/turn-handler implementation.
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -31,6 +32,7 @@ from .contracts import (
     deep_freeze,
     deep_thaw,
 )
+from marvis.agent.strategy_workflows.contracts import prepare_strategy_plan as _prepared_plan
 
 
 _PROJECT_CONTEXT_FIELD_PATH_RE = re.compile(
@@ -907,9 +909,12 @@ def _validate_sample_v2_time_ranges(
                 f"partitioning.ranges.{name} 字段无效。"
             )
         bounds = [
-            _strict_optional_iso_date(
+            None
+            if raw[field] is None
+            else _sample_v2_date_bound(
                 raw[field],
                 f"partitioning.ranges.{name}.{field}",
+                edge=field,
             )
             for field in ("start", "end")
         ]
@@ -1007,8 +1012,10 @@ def _validate_sample_v2_observation_window(value: object) -> dict[str, Any]:
     if status not in {"provided", "unavailable"}:
         raise StrategyWorkflowValidationError("observation_window.status 不受支持。")
     if status == "provided":
-        start = _strict_iso_date(value["start"], "observation_window.start")
-        end = _strict_iso_date(value["end"], "observation_window.end")
+        start = _sample_v2_date_bound(
+            value["start"], "observation_window.start", edge="start"
+        )
+        end = _sample_v2_date_bound(value["end"], "observation_window.end", edge="end")
         if start > end:
             raise StrategyWorkflowValidationError(
                 "observation_window.start 不能晚于 end。"
@@ -1580,17 +1587,6 @@ def _platform_evidence(
     return copied
 
 
-def _prepared_plan(
-    workflow_id: str,
-    template_id: str,
-    slots: Mapping[str, Any],
-) -> PreparedStrategyPlan:
-    return PreparedStrategyPlan(
-        workflow_id=workflow_id,
-        template_id=template_id,
-        slots=deep_freeze(slots),
-        success_criteria=(),
-    )
 
 
 def select_sample_design_v2_template(inputs: Mapping[str, Any]) -> str:
@@ -1780,8 +1776,30 @@ def _strict_iso_date(value: object, name: str) -> str:
     return value
 
 
-def _strict_optional_iso_date(value: object, name: str) -> str | None:
-    return None if value is None else _strict_iso_date(value, name)
+_SAMPLE_V2_MONTH_BOUND_RE = re.compile(r"(\d{4})-(\d{2})")
+
+
+def _sample_v2_date_bound(value: object, name: str, *, edge: str) -> str:
+    """An ISO day, or a month-only bound (``YYYY-MM``) covering the whole month.
+
+    D-2 按月口径: a month start bound opens on the month's first day and a month
+    end bound closes on its last day, so whole months enter the window.
+    """
+
+    message = f"{name} 必须是 YYYY-MM-DD 日期或 YYYY-MM 月份。"
+    if not isinstance(value, str):
+        raise StrategyWorkflowValidationError(message)
+    month = _SAMPLE_V2_MONTH_BOUND_RE.fullmatch(value)
+    try:
+        if month is None:
+            if date.fromisoformat(value).isoformat() != value:
+                raise ValueError(value)
+            return value
+        year, number = int(month.group(1)), int(month.group(2))
+        day = 1 if edge == "start" else calendar.monthrange(year, number)[1]
+        return date(year, number, day).isoformat()
+    except ValueError as exc:
+        raise StrategyWorkflowValidationError(message) from exc
 
 
 def _reject_fields(

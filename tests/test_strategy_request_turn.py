@@ -1122,9 +1122,10 @@ def test_approval_development_contract_persists_and_auto_runs_to_adoption_gate(
     )
     _install_llm(monkeypatch, llm)
 
+    # D-3: the request states the score direction; nothing defaults it.
     opened = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "开发审批策略，最大坏账率 20%"},
+        json={"content": "开发审批策略，最大坏账率 20%，score 越低风险越高"},
     )
     assert opened.status_code == 202, opened.text
     strategy_input = client.get(f"/api/tasks/{task_id}").json()["strategy_input"]

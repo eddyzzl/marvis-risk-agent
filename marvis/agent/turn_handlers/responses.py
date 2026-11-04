@@ -194,6 +194,7 @@ def _strategy_request_clarification_response(
         metadata["fields"] = normalized_fields
     if normalized_notices:
         metadata["ingest_notices"] = normalized_notices
+    metadata.update(_sample_design_diagnostic_metadata(repo, task, message))
     repo.add_agent_message(
         task.id,
         role="assistant",
@@ -212,3 +213,36 @@ def _strategy_request_clarification_response(
     if normalized_notices:
         response["ingest_notices"] = normalized_notices
     return response
+
+
+def _sample_design_diagnostic_metadata(repo: TaskRepository, task: TaskRecord, message: str) -> dict:
+    """B-line extension: a structured card for a strategy sample-design gap.
+
+    Stored under ``sample_design_diagnostic`` (not ``error_diagnostic``) so
+    the failure-recovery layer never treats a clarification as a failed step;
+    the corrected-utterance buttons ride on ``quick_replies``. The content
+    text is unchanged.
+    """
+
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from marvis.agent.quick_replies import with_quick_replies
+    from marvis.agent.workflow_repair import strategy_sample_design_diagnostic
+
+    db_path = Path(repo.db_path)
+    workspace = db_path.parent
+    settings = SimpleNamespace(
+        db_path=db_path, datasets_dir=workspace / "datasets", tasks_dir=workspace / "tasks"
+    )
+    try:
+        found = strategy_sample_design_diagnostic(
+            settings, task, message=message, messages=repo.list_agent_messages(task.id)
+        )
+    except Exception:  # noqa: BLE001 - the clarification text stays the source of truth
+        return {}
+    if found is None:
+        return {}
+    diagnostic, replies = found
+    metadata = {"sample_design_diagnostic": diagnostic}
+    return with_quick_replies(metadata, *replies) if replies else metadata

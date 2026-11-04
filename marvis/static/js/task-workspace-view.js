@@ -1,5 +1,5 @@
 import { workspaceGreetingForHour } from "./task-workspace-state.js";
-import { escapeHtml } from "./ui-utils.js";
+import { escapeHtml, setHtmlIfChanged, setTextIfChanged } from "./ui-utils.js";
 
 function defaultDocument() {
   return globalThis.document || null;
@@ -43,7 +43,7 @@ function snapshotItem(icon, label, value, iconHtml, options = {}) {
         `<strong>${escapeHtml(value)}</strong>`,
         "</button>",
       ].join("")
-    : `<strong>${escapeHtml(value)}</strong>`;
+    : `<strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong>`;
   return [
     '<div class="task-snapshot-item task-meta-tile">',
     iconHtml || metaIcon(icon),
@@ -70,8 +70,8 @@ export function renderTaskSnapshot({
     snapshot.textContent = "核心任务信息";
     return;
   }
-  snapshot.className = "workspace-task-meta";
-  snapshot.innerHTML = [
+  if (snapshot.className !== "workspace-task-meta") snapshot.className = "workspace-task-meta";
+  setHtmlIfChanged(snapshot, [
     '<div class="task-snapshot-list">',
     snapshotItem(
       "type",
@@ -84,7 +84,7 @@ export function renderTaskSnapshot({
       copy: selectedTask.source_dir,
     }),
     "</div>",
-  ].join("");
+  ].join(""));
 }
 
 export function renderCurrentTaskWorkspace({
@@ -132,8 +132,8 @@ export function renderCurrentTaskWorkspace({
     return;
   }
 
-  if (title) title.textContent = taskDisplayName?.(selectedTask) || "";
-  if (subtitle) subtitle.textContent = "";
+  setTextIfChanged(title, taskDisplayName?.(selectedTask) || "");
+  setTextIfChanged(subtitle, "");
   renderSnapshot();
   if (statusOverride) {
     setStatus(statusOverride.message, statusOverride.kind, statusOverride.detail);
