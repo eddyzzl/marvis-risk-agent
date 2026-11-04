@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1232" height="678" viewBox="0 0 1232 678" role="img" data-layout-mode="detail" aria-label="Automatic rule tree">
+<metadata>strategy.automatic-tree-visual.v1 asset_id=candidate-asset-eb99625548deebf7f45edfbc51c18f51 asset_hash=da0804d805c8f07d2799a8d43a2eedc57d096cfa6bec3961c0950b54cb28f348 font_sha256=3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22</metadata>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Noto Sans CJK SC','Microsoft YaHei','DejaVu Sans',sans-serif;font-size:12px;fill:#20242b}.edge-label{font-size:11px;font-weight:600;fill:#515967}.node-title{font-weight:600}</style>
+<rect width="1232" height="678" fill="#f7f8fa"/>
+<g id="edges">
+<path fill="none" stroke="#7b8491" stroke-width="2" data-parent-id="node-2b63841006d8788d3de4" data-child-id="node-3c9937d16edd310d9678" data-branch="left" d="M 612 202 C 612 232, 336 232, 336 262"/>
+<text class="edge-label" x="474" y="228" text-anchor="middle">L</text>
+<path fill="none" stroke="#7b8491" stroke-width="2" data-parent-id="node-2b63841006d8788d3de4" data-child-id="node-00d24492dac4338c9b88" data-branch="right" d="M 620 202 C 620 232, 896 232, 896 262"/>
+<text class="edge-label" x="758" y="228" text-anchor="middle">R</text>
+<path fill="none" stroke="#7b8491" stroke-width="2" data-parent-id="node-3c9937d16edd310d9678" data-child-id="leaf-0cb88b0c590bdabb48e9" data-branch="left" d="M 332 416 C 332 446, 196 446, 196 476"/>
+<text class="edge-label" x="264" y="442" text-anchor="middle">L</text>
+<path fill="none" stroke="#7b8491" stroke-width="2" data-parent-id="node-3c9937d16edd310d9678" data-child-id="leaf-6c2d43bafdc29e9262ce" data-branch="right" d="M 340 416 C 340 446, 476 446, 476 476"/>
+<text class="edge-label" x="408" y="442" text-anchor="middle">R</text>
+<path fill="none" stroke="#7b8491" stroke-width="2" data-parent-id="node-00d24492dac4338c9b88" data-child-id="leaf-86ef3ecc828ad405436d" data-branch="left" d="M 892 416 C 892 446, 756 446, 756 476"/>
+<text class="edge-label" x="824" y="442" text-anchor="middle">L</text>
+<path fill="none" stroke="#7b8491" stroke-width="2" data-parent-id="node-00d24492dac4338c9b88" data-child-id="leaf-f485a79ecc2bf7ac5bd0" data-branch="right" d="M 900 416 C 900 446, 1036 446, 1036 476"/>
+<text class="edge-label" x="968" y="442" text-anchor="middle">R</text>
+</g>
+<g id="nodes">
+<g class="node split" data-node-id="node-2b63841006d8788d3de4">
+<rect x="502" y="48" width="229" height="154" rx="8" fill="#e8eef6" stroke="#556987" stroke-width="2"/>
+<title>{"depth":0,"direction_diagnostic":{"basis":"unweighted","expected_direction":"decreasing","left":{"bad_rate":0.44808743169398907,"count":549,"weighted":{"status":"not_applicable"}},"primary_bad_rate_delta":-0.30911660245767314,"right":{"bad_rate":0.13897082923631596,"count":3051,"weighted":{"status":"not_applicable"}},"status":"consistent"},"feature":"score","kind":"split","left_child_id":"node-3c9937d16edd310d9678","metrics":{"unweighted":{"amount_pair_coverage":3600,"amount_pair_coverage_count":3600,"amount_pair_coverage_rate":1.0,"bad":670,"bad_capture":1.0,"bad_rate":0.18611111111111112,"good":2930,"lift":1.0,"loan_amount_coverage":3600,"loan_amount_coverage_count":3600,"loan_amount_coverage_rate":1.0,"loan_amount_total":88880000.0,"overdue_amount_coverage":3600,"overdue_amount_coverage_count":3600,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":7555376.38,"overdue_rate":0.08500648492349235,"paired_loan_amount_total":88880000.0,"paired_overdue_amount_total":7555376.38,"share":1.0,"total":3600},"weighted":{"status":"not_applicable"}},"missing_child":"right","node_id":"node-2b63841006d8788d3de4","path":[],"right_child_id":"node-00d24492dac4338c9b88","sklearn_threshold":543.5,"threshold":543.5,"threshold_adjustment":"none"}</title>
+<text x="514" y="72">
+<tspan x="514" dy="0" class="node-title" textLength="103.0" lengthAdjust="spacingAndGlyphs">Split · 2b638410</tspan>
+<tspan x="514" dy="18" textLength="86.0" lengthAdjust="spacingAndGlyphs">score ≤ 543.5</tspan>
+<tspan x="514" dy="18" textLength="165.0" lengthAdjust="spacingAndGlyphs">Missing → right · consistent</tspan>
+<tspan x="514" dy="18" textLength="154.0" lengthAdjust="spacingAndGlyphs">Samples 3,600 · bad 670</tspan>
+<tspan x="514" dy="18" textLength="161.0" lengthAdjust="spacingAndGlyphs">Bad rate 18.6% · lift 1.000</tspan>
+<tspan x="514" dy="18" textLength="196.0" lengthAdjust="spacingAndGlyphs">Share 100.0% · capture 100.0%</tspan>
+</text>
+</g>
+<g class="node split" data-node-id="node-3c9937d16edd310d9678">
+<rect x="222" y="262" width="229" height="154" rx="8" fill="#e8eef6" stroke="#556987" stroke-width="2"/>
+<title>{"depth":1,"direction_diagnostic":{"basis":"unweighted","expected_direction":"decreasing","left":{"bad_rate":0.5353159851301115,"count":269,"weighted":{"status":"not_applicable"}},"primary_bad_rate_delta":-0.1710302708443972,"right":{"bad_rate":0.36428571428571427,"count":280,"weighted":{"status":"not_applicable"}},"status":"consistent"},"feature":"score","kind":"split","left_child_id":"leaf-0cb88b0c590bdabb48e9","metrics":{"unweighted":{"amount_pair_coverage":549,"amount_pair_coverage_count":549,"amount_pair_coverage_rate":1.0,"bad":246,"bad_capture":0.36716417910447763,"bad_rate":0.44808743169398907,"good":303,"lift":2.407633961340837,"loan_amount_coverage":549,"loan_amount_coverage_count":549,"loan_amount_coverage_rate":1.0,"loan_amount_total":13692700.0,"overdue_amount_coverage":549,"overdue_amount_coverage_count":549,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":2814250.5599999996,"overdue_rate":0.20552926449860143,"paired_loan_amount_total":13692700.0,"paired_overdue_amount_total":2814250.5599999996,"share":0.1525,"total":549},"weighted":{"status":"not_applicable"}},"missing_child":"right","node_id":"node-3c9937d16edd310d9678","path":["left"],"right_child_id":"leaf-6c2d43bafdc29e9262ce","sklearn_threshold":510.5,"threshold":510.5,"threshold_adjustment":"none"}</title>
+<text x="234" y="286">
+<tspan x="234" dy="0" class="node-title" textLength="102.0" lengthAdjust="spacingAndGlyphs">Split · 3c9937d1</tspan>
+<tspan x="234" dy="18" textLength="86.0" lengthAdjust="spacingAndGlyphs">score ≤ 510.5</tspan>
+<tspan x="234" dy="18" textLength="165.0" lengthAdjust="spacingAndGlyphs">Missing → right · consistent</tspan>
+<tspan x="234" dy="18" textLength="142.0" lengthAdjust="spacingAndGlyphs">Samples 549 · bad 246</tspan>
+<tspan x="234" dy="18" textLength="161.0" lengthAdjust="spacingAndGlyphs">Bad rate 44.8% · lift 2.408</tspan>
+<tspan x="234" dy="18" textLength="180.0" lengthAdjust="spacingAndGlyphs">Share 15.2% · capture 36.7%</tspan>
+</text>
+</g>
+<g class="node leaf" data-node-id="leaf-0cb88b0c590bdabb48e9">
+<rect x="82" y="476" width="229" height="154" rx="8" fill="#edf3e9" stroke="#63785b" stroke-width="2"/>
+<title>{"depth":2,"kind":"leaf","metrics":{"unweighted":{"amount_pair_coverage":269,"amount_pair_coverage_count":269,"amount_pair_coverage_rate":1.0,"bad":144,"bad_capture":0.21492537313432836,"bad_rate":0.5353159851301115,"good":125,"lift":2.8763246962214946,"loan_amount_coverage":269,"loan_amount_coverage_count":269,"loan_amount_coverage_rate":1.0,"loan_amount_total":6839200.0,"overdue_amount_coverage":269,"overdue_amount_coverage_count":269,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":1655200.4000000001,"overdue_rate":0.24201666861621243,"paired_loan_amount_total":6839200.0,"paired_overdue_amount_total":1655200.4000000001,"share":0.07472222222222222,"total":269},"weighted":{"status":"not_applicable"}},"node_id":"leaf-0cb88b0c590bdabb48e9","path":["left","left"],"rule_id":"rule-0602765d9909770e9298"}</title>
+<text x="94" y="500">
+<tspan x="94" dy="0" class="node-title" textLength="99.0" lengthAdjust="spacingAndGlyphs">Leaf · 0cb88b0c</tspan>
+<tspan x="94" dy="18" textLength="102.0" lengthAdjust="spacingAndGlyphs">Rule · 0602765d</tspan>
+<tspan x="94" dy="18" textLength="142.0" lengthAdjust="spacingAndGlyphs">Samples 269 · bad 144</tspan>
+<tspan x="94" dy="18" textLength="161.0" lengthAdjust="spacingAndGlyphs">Bad rate 53.5% · lift 2.876</tspan>
+<tspan x="94" dy="18" textLength="172.0" lengthAdjust="spacingAndGlyphs">Share 7.5% · capture 21.5%</tspan>
+</text>
+</g>
+<g class="node leaf" data-node-id="leaf-6c2d43bafdc29e9262ce">
+<rect x="362" y="476" width="229" height="154" rx="8" fill="#edf3e9" stroke="#63785b" stroke-width="2"/>
+<title>{"depth":2,"kind":"leaf","metrics":{"unweighted":{"amount_pair_coverage":280,"amount_pair_coverage_count":280,"amount_pair_coverage_rate":1.0,"bad":102,"bad_capture":0.15223880597014924,"bad_rate":0.36428571428571427,"good":178,"lift":1.9573560767590616,"loan_amount_coverage":280,"loan_amount_coverage_count":280,"loan_amount_coverage_rate":1.0,"loan_amount_total":6853500.0,"overdue_amount_coverage":280,"overdue_amount_coverage_count":280,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":1159050.1600000001,"overdue_rate":0.16911799226672505,"paired_loan_amount_total":6853500.0,"paired_overdue_amount_total":1159050.1600000001,"share":0.07777777777777778,"total":280},"weighted":{"status":"not_applicable"}},"node_id":"leaf-6c2d43bafdc29e9262ce","path":["left","right"],"rule_id":"rule-1346910e380139c831e6"}</title>
+<text x="374" y="500">
+<tspan x="374" dy="0" class="node-title" textLength="99.0" lengthAdjust="spacingAndGlyphs">Leaf · 6c2d43ba</tspan>
+<tspan x="374" dy="18" textLength="101.0" lengthAdjust="spacingAndGlyphs">Rule · 1346910e</tspan>
+<tspan x="374" dy="18" textLength="142.0" lengthAdjust="spacingAndGlyphs">Samples 280 · bad 102</tspan>
+<tspan x="374" dy="18" textLength="161.0" lengthAdjust="spacingAndGlyphs">Bad rate 36.4% · lift 1.957</tspan>
+<tspan x="374" dy="18" textLength="172.0" lengthAdjust="spacingAndGlyphs">Share 7.8% · capture 15.2%</tspan>
+</text>
+</g>
+<g class="node split" data-node-id="node-00d24492dac4338c9b88">
+<rect x="782" y="262" width="229" height="154" rx="8" fill="#e8eef6" stroke="#556987" stroke-width="2"/>
+<title>{"depth":1,"direction_diagnostic":{"basis":"unweighted","expected_direction":"decreasing","left":{"bad_rate":0.21619365609348914,"count":1198,"weighted":{"status":"not_applicable"}},"primary_bad_rate_delta":-0.127148863864671,"right":{"bad_rate":0.08904479222881813,"count":1853,"weighted":{"status":"not_applicable"}},"status":"consistent"},"feature":"score","kind":"split","left_child_id":"leaf-86ef3ecc828ad405436d","metrics":{"unweighted":{"amount_pair_coverage":3051,"amount_pair_coverage_count":3051,"amount_pair_coverage_rate":1.0,"bad":424,"bad_capture":0.6328358208955224,"bad_rate":0.13897082923631596,"good":2627,"lift":0.7467089332100558,"loan_amount_coverage":3051,"loan_amount_coverage_count":3051,"loan_amount_coverage_rate":1.0,"loan_amount_total":75187300.0,"overdue_amount_coverage":3051,"overdue_amount_coverage_count":3051,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":4741125.82,"overdue_rate":0.06305753524863907,"paired_loan_amount_total":75187300.0,"paired_overdue_amount_total":4741125.82,"share":0.8475,"total":3051},"weighted":{"status":"not_applicable"}},"missing_child":"right","node_id":"node-00d24492dac4338c9b88","path":["right"],"right_child_id":"leaf-f485a79ecc2bf7ac5bd0","sklearn_threshold":622.5,"threshold":622.5,"threshold_adjustment":"none"}</title>
+<text x="794" y="286">
+<tspan x="794" dy="0" class="node-title" textLength="103.0" lengthAdjust="spacingAndGlyphs">Split · 00d24492</tspan>
+<tspan x="794" dy="18" textLength="86.0" lengthAdjust="spacingAndGlyphs">score ≤ 622.5</tspan>
+<tspan x="794" dy="18" textLength="165.0" lengthAdjust="spacingAndGlyphs">Missing → right · consistent</tspan>
+<tspan x="794" dy="18" textLength="154.0" lengthAdjust="spacingAndGlyphs">Samples 3,051 · bad 424</tspan>
+<tspan x="794" dy="18" textLength="161.0" lengthAdjust="spacingAndGlyphs">Bad rate 13.9% · lift 0.747</tspan>
+<tspan x="794" dy="18" textLength="180.0" lengthAdjust="spacingAndGlyphs">Share 84.8% · capture 63.3%</tspan>
+</text>
+</g>
+<g class="node leaf" data-node-id="leaf-86ef3ecc828ad405436d">
+<rect x="642" y="476" width="229" height="154" rx="8" fill="#edf3e9" stroke="#63785b" stroke-width="2"/>
+<title>{"depth":2,"kind":"leaf","metrics":{"unweighted":{"amount_pair_coverage":1198,"amount_pair_coverage_count":1198,"amount_pair_coverage_rate":1.0,"bad":259,"bad_capture":0.38656716417910447,"bad_rate":0.21619365609348914,"good":939,"lift":1.1616375551291953,"loan_amount_coverage":1198,"loan_amount_coverage_count":1198,"loan_amount_coverage_rate":1.0,"loan_amount_total":29378600.0,"overdue_amount_coverage":1198,"overdue_amount_coverage_count":1198,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":2857267.65,"overdue_rate":0.09725676683027781,"paired_loan_amount_total":29378600.0,"paired_overdue_amount_total":2857267.65,"share":0.3327777777777778,"total":1198},"weighted":{"status":"not_applicable"}},"node_id":"leaf-86ef3ecc828ad405436d","path":["right","left"],"rule_id":"rule-41c1b06f2fe5201f8652"}</title>
+<text x="654" y="500">
+<tspan x="654" dy="0" class="node-title" textLength="93.0" lengthAdjust="spacingAndGlyphs">Leaf · 86ef3ecc</tspan>
+<tspan x="654" dy="18" textLength="97.0" lengthAdjust="spacingAndGlyphs">Rule · 41c1b06f</tspan>
+<tspan x="654" dy="18" textLength="154.0" lengthAdjust="spacingAndGlyphs">Samples 1,198 · bad 259</tspan>
+<tspan x="654" dy="18" textLength="161.0" lengthAdjust="spacingAndGlyphs">Bad rate 21.6% · lift 1.162</tspan>
+<tspan x="654" dy="18" textLength="180.0" lengthAdjust="spacingAndGlyphs">Share 33.3% · capture 38.7%</tspan>
+</text>
+</g>
+<g class="node leaf" data-node-id="leaf-f485a79ecc2bf7ac5bd0">
+<rect x="922" y="476" width="229" height="154" rx="8" fill="#edf3e9" stroke="#63785b" stroke-width="2"/>
+<title>{"depth":2,"kind":"leaf","metrics":{"unweighted":{"amount_pair_coverage":1853,"amount_pair_coverage_count":1853,"amount_pair_coverage_rate":1.0,"bad":165,"bad_capture":0.2462686567164179,"bad_rate":0.08904479222881813,"good":1688,"lift":0.47844962988618694,"loan_amount_coverage":1853,"loan_amount_coverage_count":1853,"loan_amount_coverage_rate":1.0,"loan_amount_total":45808700.0,"overdue_amount_coverage":1853,"overdue_amount_coverage_count":1853,"overdue_amount_coverage_rate":1.0,"overdue_amount_total":1883858.17,"overdue_rate":0.041124462602082135,"paired_loan_amount_total":45808700.0,"paired_overdue_amount_total":1883858.17,"share":0.5147222222222222,"total":1853},"weighted":{"status":"not_applicable"}},"node_id":"leaf-f485a79ecc2bf7ac5bd0","path":["right","right"],"rule_id":"rule-217278c738b41a8c6c2d"}</title>
+<text x="934" y="500">
+<tspan x="934" dy="0" class="node-title" textLength="95.0" lengthAdjust="spacingAndGlyphs">Leaf · f485a79e</tspan>
+<tspan x="934" dy="18" textLength="101.0" lengthAdjust="spacingAndGlyphs">Rule · 217278c7</tspan>
+<tspan x="934" dy="18" textLength="154.0" lengthAdjust="spacingAndGlyphs">Samples 1,853 · bad 165</tspan>
+<tspan x="934" dy="18" textLength="153.0" lengthAdjust="spacingAndGlyphs">Bad rate 8.9% · lift 0.478</tspan>
+<tspan x="934" dy="18" textLength="180.0" lengthAdjust="spacingAndGlyphs">Share 51.5% · capture 24.6%</tspan>
+</text>
+</g>
+</g>
+</svg>

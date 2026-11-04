@@ -83,24 +83,58 @@ for the full changes and acceptance boundaries.*
 
 ## Why risk teams use MARVIS
 
-<table>
-  <tr>
-    <td width="25%"><strong>Work in business language</strong><br />Start with the decision you need, not a hand-built chain of scripts and notebooks.</td>
-    <td width="25%"><strong>Trust the numbers</strong><br />KS, AUC, PSI, bad rate, approval rate, profit, and impact are calculated by deterministic platform code—not guessed by an LLM.</td>
-    <td width="25%"><strong>Keep data close</strong><br />Files, task state, evidence, and outputs stay in a controlled local workspace by default.</td>
-    <td width="25%"><strong>Retain human responsibility</strong><br />High-impact actions pause for confirmation, and key governed results carry lineage and audit evidence.</td>
-  </tr>
-</table>
+Risk teams need to turn a change in risk into a considered response, retain the
+reasoning behind it, and repeat the work without rebuilding the same analysis.
+MARVIS brings those needs into one governed workspace. The aim is to put AI
+at the center of workflow coordination, with people supervising risk boundaries
+and consequential decisions, while each round of work adds traceable, reusable
+knowledge to the organization.
 
-Agent mode and the Manual Workbench share the same validated workflows, tools,
-schemas, and deterministic calculation kernels.
+**Develop a targeted response when risk changes.** When a customer segment
+deteriorates or new fraud-attack signals emerge, teams need to understand the
+affected populations, variables, and rules before trading off approval, risk,
+and return. MARVIS connects data investigation, feature analysis, candidate
+strategies, backtesting, and impact measurement in one task. The goal is to
+shorten analysis and iteration, giving teams evidence for selective adjustments
+instead of relying only on blanket tightening. The current workflow supports
+local analysis, validation, and human confirmation; live blocking still requires
+institution integration, deployment, and authorization.
 
-| A fragmented workflow | With MARVIS |
-|---|---|
-| Requirements, scripts, notebooks, screenshots, and reports live in different places. | The request, plan, execution evidence, decisions, and deliverables stay in one task. |
-| Analysts manually reconnect data, feature, model, strategy, and report steps. | Governed workflows carry task ownership, data fingerprints, parameters, and artifacts forward. |
-| AI can explain an answer, but it is hard to prove where the number came from. | Agent explanations point back to deterministic evidence and auditable memory references. |
-| A result is copied into a document and loses its lineage. | Reports and code are generated from structured, versioned platform results. |
+**Keep risk knowledge and experience within the organization.** Metric
+definitions, field meanings, historical performance, and lessons learned should
+remain useful beyond an individual script or conversation. Tasks retain
+materials, parameters, results, deliverables, and decision records. Memory
+reuses bounded preferences, field definitions, and historical experience with
+source references, so a new task can revisit the basis for an earlier judgment.
+Teams still review whether that context applies: historical explanations cannot
+overwrite current calculations, and experience does not establish business
+performance on new data.
+
+**Reduce repetitive engineering so business users can cover more work.** Start
+with a business objective. The Agent asks for missing materials and definitions,
+then organizes a reviewable plan. Existing workflows connect data preparation,
+model comparison, strategy assessment, and reporting, reducing repeated script
+assembly and manual transfers between steps. Business users can advance more
+analysis, modeling, and strategy work within supported capabilities and
+governance boundaries, while specialists retain responsibility for definitions,
+assumptions, consequential choices, and acceptance.
+
+Workflows organize the steps; Tools expose callable capabilities. Plugins
+register tools and permissions, while Hooks connect follow-up actions to events
+such as step completion and report generation. A Skill is a user-authored
+Workflow template for reusing established practices. Agent-driven progress,
+manual confirmation, and result review share task materials and evidence. Key
+metrics are computed by platform code; consequential actions require
+confirmation, and materials and evidence stay in the local workspace by default.
+
+**Package domain experience as reusable capabilities.** A risk workflow brings
+together task knowledge, trusted tools, input contracts, exception handling,
+checks, and deliverable templates. Institutions can adapt supported Workflow
+templates to their own definitions while retaining platform validation and
+permissions. Memory adds source-linked experience; plans and execution records
+make the work inspectable. This combination of credit-risk practice,
+deterministic calculation, governance, and a dedicated workbench is MARVIS's
+core value beyond general-purpose Agent orchestration.
 
 ## One workbench for end-to-end local risk analysis and development
 
@@ -130,6 +164,26 @@ Processing rather than as a separate top-level task.
 See [docs/capability-status.md](docs/capability-status.md) for the canonical,
 layer-by-layer acceptance status; implementation is not treated as browser,
 real-data, sign-off, or production proof.
+
+## A closer look at the workbench
+
+**Compare model experiments.** Candidate metrics, the selected model, and report
+delivery stay together in one task.
+
+<p align="center">
+  <img src="docs/readme-assets/screenshots/marvis-v3-modeling-en.png" alt="MARVIS V3 model development workspace with measured candidate comparisons, final model metrics, and workflow progress" width="100%" />
+</p>
+
+**Inspect the rules behind a strategy.** This decision tree is an actual MARVIS
+export: each branch shows its threshold, sample size, bad rate, and lift. Full
+field names, identifiers, and unrounded evidence remain in the exported files.
+
+<p align="center">
+  <a href="docs/readme-assets/screenshots/marvis-v3-strategy-tree.svg"><img src="docs/readme-assets/screenshots/marvis-v3-strategy-tree.png" alt="MARVIS native decision-tree export showing risk separation across four leaves, with measured sample sizes, bad rates, and lift" width="100%" /></a>
+</p>
+
+*The examples use synthetic data and actual platform calculations. They
+illustrate the workflow and deliverables, not performance on a real portfolio.*
 
 ## Strategy development, end to end
 
