@@ -6,6 +6,7 @@ import signal
 import socket
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import threading
 import time
 from pathlib import Path
@@ -1663,11 +1664,9 @@ def test_invoke_adhoc_cannot_bypass_registered_module_through_hardlink(
     monkeypatch,
 ):
     runner = _runner(tmp_path)
-    strategy_module = (
-        Path(__file__).parents[1] / "marvis" / "packs" / "strategy" / "tools.py"
-    )
-    alias_module = tmp_path / "strategy_tools_alias.py"
-    alias_module.hardlink_to(strategy_module)
+    repo_root = Path(__file__).resolve().parents[1]
+    packs_root = repo_root / "marvis" / "packs"
+    strategy_module = packs_root / "strategy" / "tools.py"
     monkeypatch.setattr(
         "marvis.plugins.runner.subprocess.Popen",
         lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -1675,24 +1674,33 @@ def test_invoke_adhoc_cannot_bypass_registered_module_through_hardlink(
         ),
     )
 
-    result = runner.invoke_adhoc(
-        module=alias_module,
-        entrypoint="tool_adopt_strategy",
-        inputs={
-            "strategy_id": "strategy-1",
-            "backtest_id": "backtest-1",
-            "adoption_reason": "alias bypass attempt",
-        },
-        input_schema={"type": "object"},
-        output_schema={"type": "object"},
-        timeout_seconds=10,
-        task_id="task-1",
-        mode="draft",
-    )
+    # CI may mount /tmp separately from the checkout. Keep the real hardlink
+    # on the source filesystem, outside trusted packs, and clean it on failure.
+    with TemporaryDirectory(prefix=".pytest-hardlink-", dir=repo_root) as alias_dir:
+        alias_module = Path(alias_dir) / "strategy_tools_alias.py"
+        alias_module.hardlink_to(strategy_module)
+        assert alias_module.samefile(strategy_module)
+        assert not alias_module.is_symlink()
+        assert not alias_module.is_relative_to(packs_root)
 
-    assert result.ok is False
-    assert result.error_kind == "authorization"
-    assert "manifest-aware" in result.error
+        result = runner.invoke_adhoc(
+            module=alias_module,
+            entrypoint="tool_adopt_strategy",
+            inputs={
+                "strategy_id": "strategy-1",
+                "backtest_id": "backtest-1",
+                "adoption_reason": "alias bypass attempt",
+            },
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            timeout_seconds=10,
+            task_id="task-1",
+            mode="draft",
+        )
+
+        assert result.ok is False
+        assert result.error_kind == "authorization"
+        assert "manifest-aware" in result.error
 
 
 def test_tool_runner_denies_network_for_adhoc_without_network_side_effect(tmp_path):
