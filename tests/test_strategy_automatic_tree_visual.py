@@ -179,7 +179,8 @@ def test_svg_is_valid_xml_with_exact_topology_and_escaped_cjk_labels() -> None:
         item["node_id"] for item in asset["tree_result"]["tree"]["nodes"]
     }
     text = "".join(root.itertext())
-    assert '风险&<变量>"' in text
+    evidence_nodes = [json.loads(item.text) for item in root.findall(".//svg:title", namespace)]
+    assert any(item.get("feature") == '风险&<变量>"' for item in evidence_nodes)
     root_metrics = asset["tree_result"]["tree"]["nodes"][0]["metrics"]["unweighted"]
     assert f"Bad rate {root_metrics['bad_rate']:.1%}" in text
     assert f"lift {root_metrics['lift']:.3f}" in text
