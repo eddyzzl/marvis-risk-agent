@@ -329,7 +329,7 @@ jobs:
 
       - name: Run native isolation tests (skips fail the lane)
         run: |
-          uv run python -m pytest -q -rs \
+          uv run python -m pytest -v -rs --tb=short -x \
             --junitxml=native-isolation.xml \
             tests/test_local_execution_network.py \
             tests/test_local_execution_journeys.py \
