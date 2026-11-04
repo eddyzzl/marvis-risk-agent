@@ -612,10 +612,15 @@ bundle = {str(tmp_path)!r} + "/Fake.app/Contents/MacOS"
 os.makedirs(bundle, exist_ok=True)
 copy = os.path.join(bundle, "py")
 shutil.copy2(os.path.realpath(sys.executable), copy)
-raise SystemExit(subprocess.call([copy, "-c", sys.argv[1], sys.argv[2]]))
+# Relocated standalone Python cannot infer its original standard-library root.
+# Keep the interpreter runnable so this probes the inherited network boundary,
+# rather than passing/failing before urllib can make the protected API request.
+env = {{**os.environ, "PYTHONHOME": sys.base_prefix}}
+raise SystemExit(subprocess.call([copy, "-c", sys.argv[1], sys.argv[2]], env=env))
 '''
     result = subprocess.run(loopback_only_command([sys.executable, "-c", code, _API_PROBE, live_marvis_api]),
                             capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (result.stdout, result.stderr)
     assert "status 403" in result.stdout, (result.stdout, result.stderr)
 
 

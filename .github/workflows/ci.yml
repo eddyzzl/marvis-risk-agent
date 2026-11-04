@@ -348,6 +348,21 @@ jobs:
               sys.exit("native isolation tests must run on macOS; skipped tests do not count as passes")
           PY
 
+      - name: Diagnose native socket failures without changing the test verdict
+        if: failure()
+        timeout-minutes: 4
+        run: uv run python scripts/diagnose_native_network.py --output native-network-diagnostics.json
+
+      - name: Preserve native isolation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-isolation-diagnostics
+          path: |
+            native-isolation.xml
+            native-network-diagnostics.json
+          if-no-files-found: ignore
+
   security:
     runs-on: ubuntu-latest
     timeout-minutes: 20
