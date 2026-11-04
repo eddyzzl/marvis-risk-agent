@@ -789,7 +789,7 @@ body[data-theme="dark"] .workflow-error-card__technical pre {
   font-weight: 600;
 }
 
-.agent-markdown a {
+.agent-markdown a:not(.button) {
   color: inherit;
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);

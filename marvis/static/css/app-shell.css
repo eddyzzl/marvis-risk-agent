@@ -287,6 +287,7 @@ body[data-theme="dark"] .validation-workspace {
   background: var(--fill);
   cursor: pointer;
   font-weight: 600;
+  text-decoration: none;
   white-space: nowrap;
   transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
 }

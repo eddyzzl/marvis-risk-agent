@@ -143,17 +143,19 @@ body[data-theme="dark"] .task-thread-filter button[aria-checked="true"] {
 }
 
 /* Downloads are a quiet action on the file, not the page's primary call. */
-.result-dataset-download .button.primary {
+.result-dataset-download .button.primary:not(:disabled) {
   border-color: transparent;
   background: var(--surface);
   color: var(--text);
 }
 
-.result-dataset-download .button.primary:hover:not(:disabled) {
+.result-dataset-download .button.primary:hover:not(:disabled),
+.result-dataset-download .button.primary:focus-visible:not(:disabled) {
   background: var(--fill-2);
+  color: var(--text);
 }
 
-body[data-theme="dark"] .result-dataset-download .button.primary {
+body[data-theme="dark"] .result-dataset-download .button.primary:not(:disabled) {
   background: var(--fill-2);
 }
 
