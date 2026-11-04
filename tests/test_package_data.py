@@ -108,6 +108,27 @@ def test_static_es_modules_are_declared_as_package_data():
     assert "packs/*/manifest.json" in package_data
 
 
+def test_all_runtime_static_assets_are_covered_by_package_data():
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["marvis"]
+    package_root = Path("marvis")
+    declared_files = {
+        path
+        for pattern in package_data
+        for path in package_root.glob(pattern)
+        if path.is_file()
+    }
+    static_files = {
+        path
+        for path in (package_root / "static").rglob("*")
+        if path.is_file()
+        and not any(part.startswith(".") for part in path.relative_to(package_root).parts)
+    }
+
+    missing = sorted(str(path) for path in static_files - declared_files)
+    assert not missing, f"Runtime static assets missing from package data: {missing}"
+
+
 def test_default_validation_report_template_is_declared_as_package_data():
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     package_data = pyproject["tool"]["setuptools"]["package-data"]["marvis"]
