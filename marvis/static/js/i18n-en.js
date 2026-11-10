@@ -2,6 +2,18 @@
 // Keys with {name} placeholders are templates; {name|t} translates the capture too.
 // Regenerate the inventory with scripts/ui_i18n_inventory.py --missing.
 export const EN_UI = Object.freeze({
+  // Home card: several models start one validation batch (2026-11-10).
+  "每个模型的名称和四份材料": "each model's name and four materials",
+  "还缺：": "Missing: ",
+  "模型（{0}）": "Models ({0})",
+  "模型 {0} 名称": "Model {0} name",
+  "移除模型 {0}": "Remove model {0}",
+  "移除模型": "Remove model",
+  "一次最多验证 {0} 个模型。": "Up to {0} models per batch.",
+  "没认出属于哪个模型：{0}。请在对应模型里添加。": "Couldn't tell which model these belong to: {0}. Add them under the right model.",
+  "有同名文件：{0}。同名文件上传后只会保留一份；不同模型的材料请点「添加模型」分开放。": "Duplicate file names: {0}. Only one copy is kept on upload; use “Add model” to keep each model's materials separate.",
+  "有同名文件：{0}。同名文件上传后只会保留一份。": "Duplicate file names: {0}. Only one copy is kept on upload.",
+  "批量验证这 3 个模型并出汇总报告": "Validate these 3 models as a batch with a summary report",
   // Plan rail and status header (phase names come from the backend plan).
   "数据准备": "Data preparation",
   "{0}等 {1} 个子任务": "{0} and more, {1} subtasks",
@@ -1788,7 +1800,6 @@ export const EN_UI = Object.freeze({
   "固定条件下批准人群的估算，不是实际现金流": "An estimate for the approved population under fixed conditions, not actual cash flow",
   "固定条件估算": "Fixed-condition estimate",
   "在 validation 或 OOT 实际样本上复核当前 Pool": "Recheck the current Pool on the validation or OOT sample",
-  "在「高级设置」里逐个添加模型": "Add models one by one under “Advanced settings”",
   "在声明口径下已成熟": "Mature under the declared definition",
   "在尚未读取样本时继续": "Continue before the sample is read",
   "在当前 Pool 规则中确定性枚举 n-of-k 组合": "Deterministically enumerate n-of-k combinations of the current Pool rules",
@@ -4709,7 +4720,6 @@ export const EN_UI = Object.freeze({
   "表现窗口状态与天数不一致。": "The performance window status and days do not match.",
   "表现窗（月）": "Performance window (months)",
   "被授权身份编号": "Grantee identity ID",
-  "要一次验证多个模型，请在「高级设置」里逐个添加模型和材料。": "To validate several models at once, add each model and its materials under “Advanced settings”.",
   "要求单调性约束": "Require monotonic constraints",
   "要求可导出 PMML": "Require PMML export",
   "要求可移交验证": "Require hand-over to validation",

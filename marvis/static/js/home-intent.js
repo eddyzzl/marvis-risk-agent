@@ -4,6 +4,8 @@
 // confirms or changes it; it never runs anything. Ambiguous sentences come back
 // with low confidence so the card asks instead of guessing.
 
+import { validationModelsReady } from "./home-validation-models.js";
+
 // Only a strong collections intent counts (same rule as the backend's
 // turn_handlers/collections_guidance.py): 催收 next to collections work, or a
 // verb asking for it; in English "collections <work>" or "debt collection".
@@ -81,7 +83,7 @@ export function parseScopeNotes(text) {
   };
 }
 
-const MULTI_MODEL = /([2-9两三四五六七八九十]|多)\s*个模型|这些模型|几个模型|批次/;
+const MULTI_MODEL = /([2-9两三四五六七八九十]|多)\s*个模型|这些模型|几个模型|批次|批量|一批模型|全部模型|所有模型|各个模型/;
 
 export function inferTaskType(text) {
   const value = String(text || "");
@@ -206,6 +208,7 @@ export const HOME_EXAMPLES = Object.freeze([
   { text: "检查在贷组合的客户和渠道集中度", taskType: "portfolio" },
   { text: "测算存量组合的预期损失", taskType: "portfolio" },
   { text: "比较不同月份的存量组合风险分布", taskType: "portfolio" },
+  { text: "批量验证这 3 个模型并出汇总报告", taskType: "validation" },
 ]);
 
 export const HOME_EXAMPLE_COUNT = 5;
@@ -270,8 +273,9 @@ export const HOME_TEMPLATES = Object.freeze({
     "，选 ", { slot: "2026年3月" }, " 之后的样本做 OOT，train/test 按 ", { slot: "7:3" }, " 分，算法用 ", { slot: "LGB" }, "。",
   ],
   validation: [
-    "帮我验证", { slot: "贷前A卡" }, "模型，材料是 ", { file: "notebook", label: "Notebook" }, "、",
-    { file: "pmml", label: "PMML" }, "、", { file: "sample", label: "样本" }, "和", { file: "dictionary", label: "数据字典" },
+    "帮我验证", { slot: "贷前A卡" }, "模型，材料是 ", { file: "notebook", label: "Notebook", multiple: true }, "、",
+    { file: "pmml", label: "PMML", multiple: true }, "、", { file: "sample", label: "样本", multiple: true }, "和",
+    { file: "dictionary", label: "数据字典", multiple: true },
     "，验证人员是 ", { slot: "张三", key: "validator" }, "，出一份 Word 验证报告。",
   ],
   feature_analysis: [
@@ -307,9 +311,9 @@ const HOME_TEMPLATES_EN = Object.freeze({
     ", and the ", { slot: "LGB" }, " algorithm.",
   ],
   validation: [
-    "Validate the ", { slot: "Application A-card" }, " model using ", { file: "notebook", label: "Notebook" }, ", ",
-    { file: "pmml", label: "PMML" }, ", ", { file: "sample", label: "Sample", role: "样本" }, " and ",
-    { file: "dictionary", label: "Data dictionary", role: "数据字典" }, ". The validator is ",
+    "Validate the ", { slot: "Application A-card" }, " model using ", { file: "notebook", label: "Notebook", multiple: true }, ", ",
+    { file: "pmml", label: "PMML", multiple: true }, ", ", { file: "sample", label: "Sample", role: "样本", multiple: true }, " and ",
+    { file: "dictionary", label: "Data dictionary", role: "数据字典", multiple: true }, ". The validator is ",
     { slot: "Jane Doe", key: "validator" }, ". Write a Word validation report.",
   ],
   feature_analysis: [
@@ -473,10 +477,13 @@ export function parseRiskAnalysis(text) {
 // dialog's contract); the card asks only for what is still missing.
 export function draftMissingFields(draft, { deferredMaterials = false } = {}) {
   const missing = [];
+  // Two or more models are one batch: each model brings its own name and
+  // materials, and the batch is named by date and model count.
+  const batch = draft?.taskType === "validation" && Array.isArray(draft?.models) && draft.models.length >= 2;
   if (!draft?.taskType) missing.push("taskType");
-  if (!String(draft?.name || "").trim()) missing.push("name");
+  if (!batch && !String(draft?.name || "").trim()) missing.push("name");
   if (!String(draft?.validator || "").trim()) missing.push("validator");
-  const needsMaterials = !(deferredMaterials && draft?.runMode === "agent");
+  const needsMaterials = !batch && !(deferredMaterials && draft?.runMode === "agent");
   if (needsMaterials && !(Array.isArray(draft?.files) && draft.files.length)) missing.push("files");
   // Collections runs in the strategy task's own workspace, not a strategy
   // development, so it needs no approval/bad-rate limits.
@@ -487,8 +494,11 @@ export function draftMissingFields(draft, { deferredMaterials = false } = {}) {
     }
   }
   if (draft?.taskType === "vintage" && !draft?.analysis) missing.push("riskAnalysis");
-  // Several models need one row of materials each: only the dialog has that.
-  if (draft?.taskType === "validation" && draft?.multiModel) missing.push("multiModel");
+  // Several models need a name and four materials each; a sentence that asks
+  // for several models waits until the card holds them.
+  if (draft?.taskType === "validation" && (batch ? !validationModelsReady(draft.models) : draft?.multiModel)) {
+    missing.push("models");
+  }
   if (draft?.taskType === "modeling" && draft?.runMode === "manual"
     && !(Array.isArray(draft?.algorithms) && draft.algorithms.length)) {
     missing.push("algorithms");

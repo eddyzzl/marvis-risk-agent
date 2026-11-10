@@ -44,7 +44,6 @@ import {
 } from "./js/agent-conversation-mount.js";
 import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
-import { createValidationBatchCreateController } from "./js/validation-batch-create.js";
 import {
   bindDialogBackdropDismissal,
   createMaterialSourceController,
@@ -469,18 +468,6 @@ const validationBatchPanelController = createValidationBatchPanelController({
   confirmAllReportDrafts: confirmAllValidationBatchReportDrafts,
   onError: (message) => {
     setActionStatus(validationBatchErrorTitle, "error", message);
-  },
-});
-const validationBatchCreateController = createValidationBatchCreateController({
-  api,
-  getElementById: $,
-  onCreated: async (payload) => {
-    const parentTaskId = payload && payload.batch ? payload.batch.parent_task_id : "";
-    if (!parentTaskId) throw new Error("批次创建响应缺少父任务 ID。");
-    await refreshTasks();
-    const parentTask = findTaskInCache(parentTaskId);
-    if (!parentTask) throw new Error("批次已创建，但任务列表中尚未找到父任务。");
-    selectTask(parentTask);
   },
 });
 const dataWorkspaceController = createDataWorkspaceController();
@@ -1038,8 +1025,6 @@ function pickWelcomeTaskType(event) {
 function openTaskTypeWelcome() {
   const taskDialog = $("taskDialog");
   if (taskDialog?.open) closeTaskDialog();
-  const batchCreateDialog = $("validationBatchCreateDialog");
-  if (batchCreateDialog?.open) validationBatchCreateController.close();
   if (taskSession.taskId || taskSession.task) {
     deselectCurrentTask();
     return;
@@ -10504,7 +10489,6 @@ function agentAcceptanceModeValue() {
   return agentAcceptanceMode;
 }
 bindRunModeDeselectableCards();
-validationBatchCreateController.bind();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
 materialBindingDialog.bind();

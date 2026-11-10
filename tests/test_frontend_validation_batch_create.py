@@ -260,17 +260,18 @@ assert.equal(rows[1].uploadCache, null);
     )
 
 
-def test_batch_create_dialog_and_welcome_card_are_wired_as_an_independent_flow():
+def test_batch_validation_has_one_entry_through_the_create_contract():
+    # 2026-11-10: the separate batch dialog had no opener; several models are
+    # created from the home 模型验证 card or the create dialog's 添加模型,
+    # both through the create dialog's batch contract.
     index_html = _read_static('index.html')
+    assert 'id="validationBatchCreateDialog"' not in index_html
+    assert 'validation-batch-create.css' not in index_html
     assert 'id="welcomeValidationBatchCard"' not in index_html
-    assert 'data-task-kind="validation_batch"' not in index_html
-    assert '<strong>批量模型验证</strong>' not in index_html
     assert 'id="addValidationModelRowButton"' in index_html
-    assert 'id="validationBatchCreateDialog"' in index_html
-    assert 'id="validationBatchCreateForm"' in index_html
-    assert 'id="validationBatchRows"' in index_html
-    assert 'id="addValidationBatchRowButton"' in index_html
-    assert 'static/css/validation-batch-create.css' in index_html
+    assert not (STATIC_DIR / "css" / "validation-batch-create.css").exists()
+    app_js = _read_static('app.js')
+    assert 'createValidationBatchCreateController' not in app_js
 
 
 def test_classify_validation_batch_files_maps_roles_without_reusing_the_same_file():
@@ -307,10 +308,3 @@ assert.equal(byPath.valid, true);
 assert.deepEqual(byPath.rowErrors, {});
 """
     )
-
-
-
-
-def test_batch_create_dialog_declares_four_explicit_file_roles_and_limits():
-    create_css = _read_static('css/validation-batch-create.css')
-    assert '.validation-batch-create' in create_css

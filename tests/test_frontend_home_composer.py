@@ -206,8 +206,8 @@ process.stdout.write(JSON.stringify({
     assert data["strategyOne"] == []
     assert data["manualModeling"] == ["algorithms"]
     assert data["agentModeling"] == []
-    # Several models need a material row each, which only the dialog has.
-    assert data["multiModel"] == ["multiModel"]
+    # A sentence that asks for several models waits until the card holds them.
+    assert data["multiModel"] == ["models"]
 
 
 def test_continue_list_puts_waiting_work_first_then_running_then_failed():
@@ -591,7 +591,9 @@ process.stdout.write(JSON.stringify({ picked, rewritten, vague }));
     assert (data["vague"]["taskType"], data["vague"]["confidence"], data["vague"]["showTypes"]) == ("strategy", "low", True)
 
 
-def test_multi_model_validation_waits_for_advanced_settings_or_one_model():
+def test_multi_model_sentence_lists_models_and_waits_for_their_materials():
+    # 2026-11-10: several models are added on the card itself (添加模型), not
+    # through 高级设置; 只验证一个模型 still falls back to one model.
     data = _run_module(
         _CONTROLLER_HARNESS
         + """
@@ -599,17 +601,91 @@ await els.homeExamples.fire("click", { target: target("[data-home-example]", { d
 await els.homeComposerFileInput.fire("change", { target: { files: [{ name: "m.pmml", size: 5, lastModified: 2 }], value: "" } });
 await els.homeComposer.fire("submit");
 const html = els.homeDraft.innerHTML;
+const models = composer.getDraft().models.map((model) => model.items.map((item) => item.file.name));
 await els.homeDraft.fire("submit");
 const blocked = created.length;
 await els.homeDraft.fire("click", { target: target("[data-home-draft-single]", {}) });
+const single = { models: composer.getDraft().models, files: composer.getDraft().files.map((item) => item.file.name) };
 await els.homeDraft.fire("submit");
-process.stdout.write(JSON.stringify({ html, blocked, created: created.map((draft) => draft.multiModel) }));
+process.stdout.write(JSON.stringify({ html, models, blocked, single, created: created.map((draft) => [draft.multiModel, draft.models]) }));
 """
     )
-    assert "开始前还需要：在「高级设置」里逐个添加模型。" in data["html"]
+    assert "共 2 个模型" in data["html"]
+    assert "开始前还需要：每个模型的名称和四份材料。" in data["html"]
+    assert 'data-home-model-name="1"' in data["html"]
+    assert "data-home-model-add" in data["html"]
     assert "data-home-draft-single" in data["html"]
+    assert "高级设置」里逐个添加" not in data["html"]
+    assert data["models"] == [["m.pmml"], []]
     assert data["blocked"] == 0
-    assert data["created"] == [False]
+    assert data["single"] == {"models": None, "files": ["m.pmml"]}
+    assert data["created"] == [[False, None]]
+
+
+def test_dropped_materials_of_several_models_create_one_batch():
+    data = _run_module(
+        _CONTROLLER_HARNESS
+        + """
+const file = (name) => ({ name, size: 5, lastModified: 3 });
+els.homeComposerInput.value = "帮我验证模型并出报告";
+await els.homeComposerFileInput.fire("change", { target: { files: [
+  file("A卡_notebook.ipynb"), file("A卡_model.pmml"), file("A卡_sample.csv"),
+  file("B卡.ipynb"), file("B卡.pmml"), file("B卡_样本.csv"), file("数据字典.xlsx"),
+], value: "" } });
+await els.homeComposer.fire("submit");
+const draft = composer.getDraft();
+const html = els.homeDraft.innerHTML;
+const before = { runMode: draft.runMode, models: draft.models.map((model) => [model.name, model.items.length]) };
+await els.homeDraft.fire("submit");
+const sent = created[0];
+process.stdout.write(JSON.stringify({ html, before, created: created.length,
+  sent: sent && { models: sent.models.map((model) => [model.name, model.items.map((item) => item.file.name)]), runMode: sent.runMode } }));
+"""
+    )
+    assert data["before"] == {"runMode": "agent", "models": [["A卡", 4], ["B卡", 4]]}
+    assert "模型（2）" in data["html"]
+    # A batch runs under Agent auto-review: the manual chip is disabled.
+    assert 'data-home-draft-mode="manual" aria-pressed="false" disabled' in data["html"]
+    # No single-model name field: the batch is named by date and model count.
+    assert 'data-home-draft-field="name"' not in data["html"]
+    assert data["created"] == 1
+    assert data["sent"]["runMode"] == "agent"
+    assert data["sent"]["models"] == [
+        ["A卡", ["A卡_notebook.ipynb", "A卡_model.pmml", "A卡_sample.csv", "数据字典.xlsx"]],
+        ["B卡", ["B卡.ipynb", "B卡.pmml", "B卡_样本.csv", "数据字典.xlsx"]],
+    ]
+
+
+def test_card_adds_names_and_removes_models():
+    data = _run_module(
+        _CONTROLLER_HARNESS
+        + """
+const file = (name) => ({ name, size: 5, lastModified: 4 });
+els.homeComposerInput.value = "验证这个模型";
+await els.homeComposerFileInput.fire("change", { target: { files: [file("a.ipynb"), file("a.pmml"), file("a.csv"), file("dict.csv")], value: "" } });
+await els.homeComposer.fire("submit");
+const single = composer.getDraft().models;
+const name = composer.getDraft().name;
+await els.homeDraft.fire("click", { target: target("[data-home-model-add]", { disabled: false }) });
+const afterAdd = composer.getDraft().models.map((model) => model.items.length);
+await els.homeDraft.fire("input", { target: target("[data-home-model-name]", { dataset: { homeModelName: "1" }, value: "B卡" }) });
+await els.homeDraft.fire("change", { target: { matches: (selector) => selector === "[data-home-model-files]", dataset: { homeModelFiles: "1" },
+  files: [file("b.ipynb"), file("b.pmml"), file("b.csv"), file("b_dict.csv")] } });
+const filled = composer.getDraft().models.map((model) => [model.name, model.items.length]);
+const lead = els.homeDraft.innerHTML.includes("都齐了");
+await els.homeDraft.fire("click", { target: target("[data-home-model-remove]", { dataset: { homeModelRemove: "1" } }) });
+const after = composer.getDraft();
+process.stdout.write(JSON.stringify({ single, name, afterAdd, filled, lead,
+  collapsed: { models: after.models, files: after.files.map((item) => item.file.name) } }));
+"""
+    )
+    assert data["single"] is None
+    assert data["afterAdd"] == [4, 0]
+    # Model 1 keeps the card's name and files; model 2 gets its own.
+    assert data["filled"] == [[data["name"], 4], ["B卡", 4]]
+    assert data["name"]
+    assert data["lead"] is True
+    assert data["collapsed"] == {"models": None, "files": ["a.ipynb", "a.pmml", "a.csv", "dict.csv"]}
 
 
 def test_home_templates_name_tasks_from_their_slots_and_strip_owner_phrases():

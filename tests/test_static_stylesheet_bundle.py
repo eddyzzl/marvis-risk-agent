@@ -33,7 +33,6 @@ def test_browser_stylesheet_bundle_is_ordered_unique_and_complete() -> None:
         "static/css/v2-workflow-gates.css",
         "static/css/v2-task-setup.css",
         "static/css/validation-batch.css",
-        "static/css/validation-batch-create.css",
         "static/css/business-acceptance.css",
         "static/css/operations.css",
         "static/css/production-governance.css",
@@ -64,7 +63,6 @@ def test_browser_stylesheet_bundle_exposes_all_existing_semantic_surfaces() -> N
     assert ".feature-binning-option" in css
     assert "#metricPreview" in css
     assert ".validation-batch-panel" in css
-    assert ".validation-batch-create-dialog" in css
 
 
 def test_candidate_lab_field_grids_share_a_shrink_safe_layout() -> None:

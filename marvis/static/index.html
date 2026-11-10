@@ -29,7 +29,6 @@
     <link rel="stylesheet" href="static/css/v2-workflow-gates.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/v2-task-setup.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/validation-batch.css?v=__MARVIS_STATIC_VERSION__" />
-    <link rel="stylesheet" href="static/css/validation-batch-create.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/business-acceptance.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/operations.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/production-governance.css?v=__MARVIS_STATIC_VERSION__" />
@@ -478,43 +477,6 @@
           <span id="createModelCount" class="create-model-count" role="status"></span>
           <button id="createTaskButton" class="button primary" type="button">创建任务</button>
           <div id="statusMessage" class="status" role="status" aria-live="polite"></div>
-        </footer>
-      </form>
-    </dialog>
-
-    <dialog id="validationBatchCreateDialog" class="validation-batch-create-dialog" aria-labelledby="validationBatchCreateTitle">
-      <form id="validationBatchCreateForm" class="validation-batch-create-panel" novalidate>
-        <header class="dialog-head">
-          <h2 id="validationBatchCreateTitle">创建批量模型验证</h2>
-          <p class="dialog-subtitle">每个模型独立上传四份材料；创建后先核对输入合同，再由你启动批次。</p>
-          <button id="closeValidationBatchCreateButton" class="button compact secondary dialog-close-button" type="button" aria-label="关闭" title="关闭">
-            <span aria-hidden="true">&times;</span>
-          </button>
-        </header>
-        <div class="validation-batch-create-body">
-          <section class="validation-batch-create-intro" aria-label="批次信息">
-            <label>
-              <span>批次名称<em>必填</em></span>
-              <input id="validationBatchName" type="text" autocomplete="off" required placeholder="例如：2026 Q3 贷前模型集中验证" />
-            </label>
-            <label>
-              <span>验证人员<em>必填</em></span>
-              <input id="validationBatchValidator" type="text" autocomplete="off" required placeholder="填写验证人员姓名" />
-            </label>
-          </section>
-          <div class="validation-batch-create-toolbar">
-            <div class="validation-batch-create-toolbar-copy">
-              <h3>模型与材料</h3>
-              <span id="validationBatchRowCount">1 / 10</span>
-            </div>
-            <button id="addValidationBatchRowButton" class="button compact secondary" type="button">添加模型</button>
-          </div>
-          <div id="validationBatchRows" class="validation-batch-create-rows"></div>
-        </div>
-        <footer class="validation-batch-create-actions">
-          <div id="validationBatchCreateStatus" class="status" role="status" aria-live="polite"></div>
-          <button id="cancelValidationBatchCreateButton" class="button secondary" type="button">取消</button>
-          <button id="createValidationBatchButton" class="button primary" type="submit">创建批次</button>
         </footer>
       </form>
     </dialog>

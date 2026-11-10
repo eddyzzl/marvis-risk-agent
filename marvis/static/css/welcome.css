@@ -1043,6 +1043,106 @@ body[data-theme="dark"] .home-draft-limit input {
   text-decoration: underline;
 }
 
+.home-draft-link:disabled {
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: not-allowed;
+}
+
+/* Several models on the 模型验证 card (2026-11-10): one flat block per model
+   (number, name, materials, what it still lacks), then 添加模型. */
+.home-draft-row:has(> .home-draft-models) {
+  align-items: start;
+}
+
+.home-draft-row:has(> .home-draft-models) > .home-draft-label {
+  padding-top: 6px;
+}
+
+.home-draft-models {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.home-draft-model {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--sep);
+}
+
+body[data-theme="dark"] .home-draft-model {
+  background: var(--fill);
+}
+
+.home-draft-model-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.home-draft-model-index {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--fill);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-draft-row .home-draft-model-head input[type="text"] {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.home-draft-model-remove {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.home-draft-model-remove:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+
+.home-draft-model .home-file-chips {
+  padding: 0;
+}
+
+.home-draft-model-foot,
+.home-draft-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.home-draft-model-gaps {
+  color: var(--warning-strong, var(--text-secondary));
+  font-size: var(--fs-xs);
+}
+
 .home-draft-link:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

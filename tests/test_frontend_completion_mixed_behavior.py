@@ -1,7 +1,6 @@
 """Business interactions previously mixed into HTML/CSS source-contract tests."""
 
-from tests.javascript_source import slice_function
-from tests.test_frontend_completion_behavior import APP, ROOT, _run
+from tests.test_frontend_completion_behavior import APP, _run
 
 
 def test_quick_reply_click_uses_composer_send_and_structured_metadata_marks_results():
@@ -101,21 +100,21 @@ assert.match(panel.innerHTML,/data-report-draft-task-id="task"/);assert.match(pa
 ''', 'function renderReportDraftWorkspace(')
 
 
-def test_batch_upload_file_roles_and_bounds_come_from_the_rendered_controller():
-    source = (ROOT / 'marvis/static/js/validation-batch-create.js').read_text(encoding='utf-8')
-    declarations = slice_function(source, 'function fileInputMarkup(') + slice_function(source, 'function rowMarkup(')
+def test_batch_upload_file_roles_and_bounds_and_single_file_roles():
     _run(r'''
-import {MIN_VALIDATION_BATCH_ROWS,MAX_VALIDATION_BATCH_ROWS,VALIDATION_BATCH_FILE_RULES} from './marvis/static/js/validation-batch-create.js';
+import {MIN_VALIDATION_BATCH_ROWS,MAX_VALIDATION_BATCH_ROWS,VALIDATION_BATCH_FILE_RULES,validationFileRole} from './marvis/static/js/validation-batch-create.js';
 assert.equal(MIN_VALIDATION_BATCH_ROWS,2);assert.equal(MAX_VALIDATION_BATCH_ROWS,10);
 assert.deepEqual(Object.keys(VALIDATION_BATCH_FILE_RULES),['notebook','sample','pmml','dictionary']);
 assert.equal(VALIDATION_BATCH_FILE_RULES.notebook.accept,'.ipynb');
 assert.equal(VALIDATION_BATCH_FILE_RULES.pmml.accept,'.pmml');
 assert.match(VALIDATION_BATCH_FILE_RULES.sample.accept,/\.parquet/);
 assert.match(VALIDATION_BATCH_FILE_RULES.dictionary.accept,/\.xlsx/);
-const html=rowMarkup('row');
-for(const role of ['notebook','sample','pmml','dictionary'])assert.match(html,new RegExp('data-batch-file-role="'+role+'"'));
-assert.equal((html.match(/type="file" required/g)||[]).length,4);
-''', declarations=declarations)
+assert.equal(validationFileRole({name:'a.ipynb'}),'notebook');
+assert.equal(validationFileRole({name:'a.PMML'}),'pmml');
+assert.equal(validationFileRole({name:'数据字典.xlsx'}),'dictionary');
+assert.equal(validationFileRole({name:'train.csv'}),'sample');
+assert.equal(validationFileRole({name:'notes.txt'}),'');
+''')
 
 
 def test_input_contract_failure_loads_single_task_diagnostic_and_batch_success_keeps_child_binding():
@@ -155,18 +154,6 @@ const row=taskRowInnerHtml({task_type:'validation_batch',model_name:'<用户原�
 assert.match(row,/class="task-row-name" translate="no">&lt;用户原始名称&gt;/);
 assert.doesNotMatch(row,/task-row-meta|task-row-date/);assert.match(row,/data-kind="validation"/);
 ''', 'function taskKindIconKind(', 'function taskKindIconHtml(', 'function taskRowInnerHtml(', declarations=glyphs)
-
-
-def test_batch_dialog_creation_callback_selects_only_the_returned_parent():
-    source = APP.split('const validationBatchCreateController =',1)[1].split('const dataWorkspaceController =',1)[0]
-    callback = source.split('onCreated: ',1)[1].rsplit(',\n});',1)[0]
-    _run(r'''
-const refreshTasks=async()=>calls.push('refresh');const findTaskInCache=id=>id==='parent'?{id}:null;
-const selectTask=task=>calls.push(['selected',task.id]);
-await created({batch:{parent_task_id:'parent'}});assert.deepEqual(calls,['refresh',['selected','parent']]);
-await assert.rejects(created({}),/父任务 ID/);
-await assert.rejects(created({batch:{parent_task_id:'missing'}}),/尚未找到父任务/);
-''', declarations=f"const created={callback};\n")
 
 
 def test_metric_preview_consumer_keeps_original_detail_table_inside_native_summary_card():

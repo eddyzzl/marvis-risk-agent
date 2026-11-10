@@ -29,6 +29,12 @@ import {
   parseScopeNotes,
   parseStrategyLimits,
 } from "./home-intent.js";
+import {
+  VALIDATION_ROLE_LABELS,
+  groupValidationModels,
+  modelMaterialGaps,
+} from "./home-validation-models.js";
+import { MAX_VALIDATION_BATCH_ROWS, validationFileRole } from "./validation-batch-create.js";
 
 const MATERIAL_HINTS = {
   validation: "Notebook、样本、PMML 和数据字典",
@@ -48,7 +54,7 @@ const MISSING_LABELS = {
   strategyLimits: "通过率下限或坏率上限",
   algorithms: "建模算法",
   riskAnalysis: "分析类型",
-  multiModel: "在「高级设置」里逐个添加模型",
+  models: "每个模型的名称和四份材料",
 };
 
 const CONTINUE_LIMIT = 3;
@@ -194,6 +200,7 @@ export function createHomeComposer({
   let templateActive = false;
   let roleTarget = null;
   let defaultInputSource = null;
+  let modelSeq = 0;
 
   const definitionOf = (taskType) => taskTypeDefinitions?.[taskType] || null;
   const labelOf = (taskType) => definitionOf(taskType)?.label || "";
@@ -262,7 +269,20 @@ export function createHomeComposer({
     renderFiles();
     refreshFileSlots();
     if (draft) {
+      if (draft.models) {
+        // Files dropped on the page while the model list is open: regroup
+        // when they make a clear set of models, otherwise leave them unplaced.
+        const grouped = groupValidationModels(files);
+        if (grouped) {
+          draft.models = grouped.models.map((model) => newModel(model.name, model.items));
+          draft.unassigned = grouped.unassigned;
+        } else {
+          const placed = new Set(modelPoolItems().map(fileKey));
+          draft.unassigned = [...(draft.unassigned || []), ...files.filter((item) => !placed.has(fileKey(item)))];
+        }
+      }
       draft.files = files.slice();
+      syncValidationModels();
       renderDraft();
     }
   }
@@ -461,6 +481,94 @@ export function createHomeComposer({
     if (box) box.hidden = mode !== "draft";
   }
 
+  // ---------- several models (batch validation) ----------
+
+  const newModel = (name = "", items = []) => ({ id: `home-model-${++modelSeq}`, name, items: items.slice() });
+  const isBatch = () => draft?.taskType === "validation" && Array.isArray(draft?.models) && draft.models.length >= 2;
+
+  // Validation only: files that hold two or more models, or a sentence that
+  // asks for several, turn the card into a model list. "只验证一个模型"
+  // (draft.single) keeps it a single model.
+  function syncValidationModels() {
+    if (!draft) return;
+    if (draft.taskType !== "validation") {
+      draft.models = null;
+      draft.unassigned = [];
+      return;
+    }
+    if (draft.models || draft.single) return;
+    const grouped = groupValidationModels(draft.files);
+    if (grouped) {
+      draft.models = grouped.models.map((model) => newModel(model.name, model.items));
+      draft.unassigned = grouped.unassigned;
+    } else if (draft.multiModel) {
+      draft.models = [newModel("", draft.files), newModel()];
+      draft.unassigned = [];
+    } else {
+      return;
+    }
+    // Several models run as one batch under Agent auto-review.
+    draft.runMode = "agent";
+  }
+
+  function modelPoolItems() {
+    if (!draft?.models) return draft?.files || [];
+    const seen = new Set();
+    const pool = [];
+    for (const item of [...draft.models.flatMap((model) => model.items), ...(draft.unassigned || [])]) {
+      const key = fileKey(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pool.push(item);
+    }
+    return pool;
+  }
+
+  // Back to one model: its files (and anything unplaced) become the card's.
+  function collapseToSingleModel(model) {
+    const kept = model ? [...model.items, ...(draft.unassigned || [])] : modelPoolItems();
+    if (model?.name && !draft.nameEdited) draft.name = model.name;
+    draft.models = null;
+    draft.unassigned = [];
+    draft.multiModel = false;
+    draft.single = true;
+    files = kept.slice();
+    draft.files = files.slice();
+    renderFiles();
+  }
+
+  function addModel() {
+    draft.single = false;
+    if (!draft.models) {
+      draft.models = [newModel(draft.name, draft.files), newModel()];
+      draft.unassigned = [];
+    } else if (draft.models.length >= MAX_VALIDATION_BATCH_ROWS) {
+      draft.error = `一次最多验证 ${MAX_VALIDATION_BATCH_ROWS} 个模型。`;
+      return;
+    } else {
+      draft.models.push(newModel());
+    }
+    draft.runMode = "agent";
+    draft.error = "";
+  }
+
+  function addModelFiles(index, list) {
+    const model = draft?.models?.[index];
+    if (!model) return;
+    const known = new Set(model.items.map(fileKey));
+    for (const entry of Array.from(list || [])) {
+      const item = fileItem(entry);
+      if (!item.file || known.has(fileKey(item))) continue;
+      model.items.push(item);
+      known.add(fileKey(item));
+    }
+    files = modelPoolItems().slice();
+    draft.files = files.slice();
+    draft.error = "";
+    renderFiles();
+    renderDraft();
+  }
+
   function startDraft() {
     const input = $("homeComposerInput");
     const text = String(input?.value || "").trim();
@@ -496,8 +604,12 @@ export function createHomeComposer({
       featureMetrics: parseFeatureMetrics(text),
       analysis: parseRiskAnalysis(text),
       ...scopeNotesOf(text),
+      models: null,
+      unassigned: [],
+      single: false,
       error: "",
     };
+    syncValidationModels();
     setMode("draft");
     renderDraft();
     focusFirstGap();
@@ -515,9 +627,17 @@ export function createHomeComposer({
       files: "[data-home-draft-files]",
       strategyLimits: "[data-home-draft-limit]",
       algorithms: "[data-home-draft-algorithm]",
-      multiModel: "[data-home-draft-advanced]",
+      models: firstModelGapSelector(),
     }[first] || "[data-home-draft-create]";
     box?.querySelector?.(selector)?.focus?.();
+  }
+
+  function firstModelGapSelector() {
+    if (!draft?.models) return "[data-home-model-add]";
+    const unnamed = draft.models.findIndex((model) => !String(model.name || "").trim());
+    if (unnamed >= 0) return `[data-home-model-name="${unnamed}"]`;
+    const incomplete = draft.models.findIndex((model) => modelMaterialGaps(model.items).length);
+    return incomplete >= 0 ? `[data-home-model-files="${incomplete}"]` : "[data-home-model-add]";
   }
 
   function missing() {
@@ -545,7 +665,10 @@ export function createHomeComposer({
   function runModeHtml() {
     const definition = definitionOf(draft.taskType);
     const agentAvailable = hasEnabledAgent() || definition?.manualEnabled === false;
-    const options = [["agent", "Agent", agentAvailable], ["manual", "手动", definition?.manualEnabled !== false]];
+    const options = [
+      ["agent", "Agent", agentAvailable || isBatch()],
+      ["manual", "手动", definition?.manualEnabled !== false && !isBatch()],
+    ];
     return options.map(([mode, label, enabled]) => (
       `<button type="button" class="home-draft-chip" data-home-draft-mode="${mode}" aria-pressed="${draft.runMode === mode}"${enabled ? "" : " disabled"}>${label}</button>`
     )).join("");
@@ -622,15 +745,86 @@ export function createHomeComposer({
         : "这是哪一类工作？选一下，我按它准备。";
     }
     const label = labelOf(draft.taskType);
-    const understood = draft.confidence === "low"
-      ? `我猜是「${escapeHtml(label)}」，不对的话换一个。`
-      : `我理解为「${escapeHtml(label)}」任务。`;
+    const understood = isBatch()
+      ? `我理解为「${escapeHtml(label)}」任务，共 ${draft.models.length} 个模型，由 Agent 逐个自动审查，另出一份汇总 Excel。`
+      : draft.confidence === "low"
+        ? `我猜是「${escapeHtml(label)}」，不对的话换一个。`
+        : `我理解为「${escapeHtml(label)}」任务。`;
     const pending = gaps.filter((field) => field !== "taskType").map((field) => MISSING_LABELS[field]);
     const ready = draft.runMode === "manual"
       ? "都齐了，确认后就创建，接下来按步骤逐项确认。"
       : "都齐了，确认后就开始；字段和口径我会在对话里再跟你确认。";
     const ask = pending.length ? `开始前还需要：${pending.join("、")}。` : ready;
     return `${understood}${ask}`;
+  }
+
+  function materialsRowHtml(materialHint) {
+    const duplicates = duplicateFileNames(draft.files);
+    return [
+      '<div class="home-draft-row"><span class="home-draft-label">材料</span><div class="home-draft-files">',
+      draft.files.length ? `<div class="home-file-chips">${filesChipsHtml(draft.files, { removable: true })}</div>` : "",
+      '<div class="home-draft-file-actions">',
+      `<label class="home-draft-add">添加文件<input type="file" multiple class="visually-hidden" data-home-draft-files /></label>`,
+      draft.taskType === "validation"
+        ? '<button type="button" class="home-draft-link" data-home-model-add>添加模型</button>'
+        : "",
+      "</div>",
+      `<small>${escapeHtml(materialHint)}</small>`,
+      duplicates.length
+        ? `<small class="home-draft-warning" role="note">有同名文件：${escapeHtml(duplicates.join("、"))}。同名文件上传后只会保留一份${draft.taskType === "validation" ? "；不同模型的材料请点「添加模型」分开放" : ""}。</small>`
+        : "",
+      "</div></div>",
+    ].join("");
+  }
+
+  function modelFileChipsHtml(items, modelIndex) {
+    return items.map((item, index) => {
+      const role = VALIDATION_ROLE_LABELS[validationFileRole(item.file)] || "";
+      return [
+        `<span class="home-file-chip" title="${escapeHtml(item.relativePath)}">`,
+        role ? `<span class="home-file-chip-role">${escapeHtml(role)}</span>` : "",
+        `<span class="home-file-chip-name">${escapeHtml(item.file?.name || item.relativePath)}</span>`,
+        `<button type="button" class="home-file-chip-remove" data-home-model-file-remove="${modelIndex}:${index}" aria-label="移除 ${escapeHtml(item.relativePath)}">×</button>`,
+        "</span>",
+      ].join("");
+    }).join("");
+  }
+
+  // Two or more models: one row each (name, its materials, what it still
+  // lacks), then 添加模型. The batch is named by date and model count.
+  function modelsRowHtml() {
+    const rows = draft.models.map((model, index) => {
+      const gaps = modelMaterialGaps(model.items);
+      return [
+        `<div class="home-draft-model" data-home-model="${index}">`,
+        '<div class="home-draft-model-head">',
+        `<span class="home-draft-model-index" aria-hidden="true">${index + 1}</span>`,
+        `<input type="text" data-home-model-name="${index}" value="${escapeHtml(model.name)}" placeholder="模型名称" maxlength="80" aria-label="模型 ${index + 1} 名称" />`,
+        `<button type="button" class="home-draft-model-remove" data-home-model-remove="${index}" aria-label="移除模型 ${index + 1}" title="移除模型">×</button>`,
+        "</div>",
+        model.items.length ? `<div class="home-file-chips">${modelFileChipsHtml(model.items, index)}</div>` : "",
+        '<div class="home-draft-model-foot">',
+        gaps.length
+          ? `<small class="home-draft-model-gaps">还缺：${gaps.map((role) => `<span>${escapeHtml(VALIDATION_ROLE_LABELS[role])}</span>`).join("、")}</small>`
+          : "",
+        `<label class="home-draft-add">添加文件<input type="file" multiple class="visually-hidden" data-home-model-files="${index}" /></label>`,
+        "</div>",
+        "</div>",
+      ].join("");
+    });
+    const unassigned = draft.unassigned || [];
+    return [
+      `<div class="home-draft-row"><span class="home-draft-label">模型（${draft.models.length}）</span><div class="home-draft-models">`,
+      rows.join(""),
+      unassigned.length
+        ? `<small class="home-draft-warning" role="note">没认出属于哪个模型：${escapeHtml(unassigned.map((item) => item.file?.name || item.relativePath).join("、"))}。请在对应模型里添加。</small>`
+        : "",
+      '<div class="home-draft-file-actions">',
+      `<button type="button" class="home-draft-link" data-home-model-add${draft.models.length >= MAX_VALIDATION_BATCH_ROWS ? " disabled" : ""}>添加模型</button>`,
+      '<button type="button" class="home-draft-link" data-home-draft-single>只验证一个模型</button>',
+      "</div>",
+      "</div></div>",
+    ].join("");
   }
 
   function renderDraft() {
@@ -662,30 +856,21 @@ export function createHomeComposer({
       `<div class="home-draft-chips" role="group" aria-label="工作类型">${typeChipsHtml()}</div></div>`,
       draft.taskType
         ? [
-          `<label class="home-draft-row"><span class="home-draft-label">${escapeHtml(nameLabel)}</span>`,
-          `<input type="text" data-home-draft-field="name" value="${escapeHtml(draft.name)}" maxlength="80" /></label>`,
+          isBatch()
+            ? ""
+            : [
+              `<label class="home-draft-row"><span class="home-draft-label">${escapeHtml(nameLabel)}</span>`,
+              `<input type="text" data-home-draft-field="name" value="${escapeHtml(draft.name)}" maxlength="80" /></label>`,
+            ].join(""),
           `<label class="home-draft-row"><span class="home-draft-label">${escapeHtml(validatorLabel)}</span>`,
           `<input type="text" data-home-draft-field="validator" value="${escapeHtml(draft.validator)}" placeholder="填写姓名" maxlength="40" /></label>`,
           draft.taskType === "vintage" ? riskAnalysisHtml() : "",
-          '<div class="home-draft-row"><span class="home-draft-label">材料</span><div class="home-draft-files">',
-          draft.files.length ? `<div class="home-file-chips">${filesChipsHtml(draft.files, { removable: true })}</div>` : "",
-          `<label class="home-draft-add">添加文件<input type="file" multiple class="visually-hidden" data-home-draft-files /></label>`,
-          `<small>${escapeHtml(materialHint)}</small>`,
-          duplicateFileNames(draft.files).length
-            ? `<small class="home-draft-warning" role="note">有同名文件：${escapeHtml(duplicateFileNames(draft.files).join("、"))}。同名文件上传后只会保留一份；多个模型的材料请在「高级设置」里按模型分别添加。</small>`
-            : "",
-          "</div></div>",
+          isBatch() ? modelsRowHtml() : materialsRowHtml(materialHint),
           draft.taskType === "strategy" && !draft.collections ? strategyLimitsHtml() : "",
           scopeNotesHtml(),
           '<div class="home-draft-row"><span class="home-draft-label">执行方式</span>',
           `<div class="home-draft-chips" role="group" aria-label="执行方式">${runModeHtml()}</div></div>`,
           draft.taskType === "modeling" && draft.runMode === "manual" ? algorithmsHtml() : "",
-          draft.multiModel && draft.taskType === "validation"
-            ? [
-              '<p class="home-draft-note">要一次验证多个模型，请在「高级设置」里逐个添加模型和材料。',
-              '<button type="button" class="home-draft-link" data-home-draft-single>只验证一个模型</button></p>',
-            ].join("")
-            : "",
         ].join("")
         : "",
       draft.error ? `<p class="home-draft-error" role="alert">${escapeHtml(draft.error)}</p>` : "",
@@ -796,6 +981,7 @@ export function createHomeComposer({
         draft.runMode = defaultRunMode(taskType);
       }
       draft.error = "";
+      syncValidationModels();
       renderDraft();
       return;
     }
@@ -832,8 +1018,39 @@ export function createHomeComposer({
       return;
     }
     if (target.closest?.("[data-home-draft-single]")) {
+      collapseToSingleModel(draft.models?.[0] || null);
       draft.multiModel = false;
       draft.error = "";
+      renderDraft();
+      return;
+    }
+    const modelAdd = target.closest?.("[data-home-model-add]");
+    if (modelAdd && !modelAdd.disabled) {
+      addModel();
+      renderDraft();
+      draft.models && $("homeDraft")?.querySelector?.(`[data-home-model-name="${draft.models.length - 1}"]`)?.focus?.();
+      return;
+    }
+    const modelRemove = target.closest?.("[data-home-model-remove]");
+    if (modelRemove && draft.models) {
+      draft.models.splice(Number(modelRemove.dataset.homeModelRemove), 1);
+      if (draft.models.length < 2) collapseToSingleModel(draft.models[0] || null);
+      else {
+        files = modelPoolItems().slice();
+        draft.files = files.slice();
+        renderFiles();
+      }
+      draft.error = "";
+      renderDraft();
+      return;
+    }
+    const modelFileRemove = target.closest?.("[data-home-model-file-remove]");
+    if (modelFileRemove && draft.models) {
+      const [modelIndex, fileIndex] = String(modelFileRemove.dataset.homeModelFileRemove).split(":").map(Number);
+      draft.models[modelIndex]?.items.splice(fileIndex, 1);
+      files = modelPoolItems().slice();
+      draft.files = files.slice();
+      renderFiles();
       renderDraft();
       return;
     }
@@ -981,6 +1198,13 @@ export function createHomeComposer({
         syncLead();
         return;
       }
+      const modelName = event.target.closest?.("[data-home-model-name]");
+      if (modelName && draft.models) {
+        const model = draft.models[Number(modelName.dataset.homeModelName)];
+        if (model) model.name = modelName.value;
+        syncLead();
+        return;
+      }
       const field = event.target.closest?.("[data-home-draft-field]");
       if (!field) return;
       draft[field.dataset.homeDraftField] = field.value;
@@ -988,7 +1212,12 @@ export function createHomeComposer({
       syncLead();
     });
     draftBox?.addEventListener("change", (event) => {
-      if (!draft || !event.target.matches?.("[data-home-draft-files]")) return;
+      if (!draft) return;
+      if (event.target.matches?.("[data-home-model-files]")) {
+        addModelFiles(Number(event.target.dataset.homeModelFiles), event.target.files);
+        return;
+      }
+      if (!event.target.matches?.("[data-home-draft-files]")) return;
       addFiles(event.target.files);
     });
     draftBox?.addEventListener("submit", (event) => {

@@ -402,13 +402,19 @@ export function createCreateTaskDialogController({
     return Number.isFinite(value) ? String(Number((value / 100).toFixed(6))) : raw;
   }
 
-  // draft: {taskType, name, validator, runMode, files, strategy, algorithms}.
+  // draft: {taskType, name, validator, runMode, files, models, strategy, algorithms}.
   // Files go through the dialog's own upload path, so the create contract
   // stays the dialog's. Strategy limits from the card mean a full strategy
   // development constrained on bad rate; algorithms are binary recipe ids.
+  // Two or more validation models (draft.models: [{name, items}]) fill the
+  // primary model and one extra model row each, which creates a batch.
   function prefillTaskDialog(draft = {}, { show = false } = {}) {
     prepareTaskDialog(draft.taskType || defaultTaskType);
-    if (draft.name) $("modelName").value = draft.name;
+    const models = draft.taskType === "validation" && Array.isArray(draft.models) && draft.models.length >= 2
+      ? draft.models
+      : null;
+    if (models) $("modelName").value = models[0].name || "";
+    else if (draft.name) $("modelName").value = draft.name;
     if (draft.validator) $("validator").value = draft.validator;
     if (draft.runMode) {
       const radio = document.querySelector(`input[name="runMode"][value="${draft.runMode}"]`);
@@ -419,13 +425,27 @@ export function createCreateTaskDialogController({
         updateAlgorithmFieldVisibility();
       }
     }
-    if (Array.isArray(draft.files) && draft.files.length) {
+    const primaryFiles = models ? models[0].items : draft.files;
+    if (Array.isArray(primaryFiles) && primaryFiles.length) {
       materialSourceController.setMode("upload");
       // {file, relativePath} items (a dropped folder keeps its paths); bare
       // File objects are accepted too.
       materialSourceController.captureFileItems(
-        draft.files.map((entry) => (entry?.file ? entry : { file: entry })),
+        primaryFiles.map((entry) => (entry?.file ? entry : { file: entry })),
       );
+    }
+    for (const model of models ? models.slice(1) : []) {
+      const row = addValidationModelRow();
+      if (!row) break;
+      const nameInput = document.querySelector(
+        `[data-validation-extra-row-id="${row.id}"] [data-extra-model-field="name"]`,
+      );
+      if (nameInput) {
+        nameInput.value = model.name || "";
+        // Refreshes the row's narrative defaults from the model name.
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      row.material.setFiles(model.items);
     }
     const limits = draft.strategy || {};
     // D-7: a collections request opens the strategy task for its collections
@@ -866,6 +886,12 @@ export function createCreateTaskDialogController({
       mode: () => state.mode,
       selectedFiles: () => [...state.files],
       sourceDir: () => root.querySelector('[data-extra-model-field="source-dir"]')?.value.trim() || "",
+      // The home card's per-model materials ({file} items or bare Files).
+      setFiles(items = []) {
+        setMode("upload");
+        state.files = Array.from(items || []).map((item) => item?.file || item).filter(Boolean);
+        renderStatus();
+      },
     };
   }
 
@@ -923,18 +949,18 @@ export function createCreateTaskDialogController({
   function addValidationModelRow() {
     if (extraValidationModelRows.length + 1 >= MAX_VALIDATION_BATCH_ROWS) {
       setCreateStatus("一次最多验证 10 个模型。", "error");
-      return;
+      return null;
     }
     extraValidationRowSequence += 1;
     const rowId = `validation-extra-${extraValidationRowSequence}`;
     const container = $("validationCreateExtraModels");
-    if (!container) return;
+    if (!container) return null;
     const ordinal = extraValidationModelRows.length + 2;
     container.querySelectorAll("details.validation-create-model-card").forEach((card) => { card.open = false; });
     if ($("validationPrimaryModel")) $("validationPrimaryModel").open = false;
     container.insertAdjacentHTML("beforeend", validationExtraModelCardMarkup(rowId, ordinal));
     const article = container.querySelector(`[data-validation-extra-row-id="${rowId}"]`);
-    if (!article) return;
+    if (!article) return null;
     const nameInput = article.querySelector('[data-extra-model-field="name"]');
     const updateNarrativeDefaults = () => {
       for (const [field, value] of Object.entries(extraNarrativeDefaults(nameInput?.value))) {
@@ -944,7 +970,8 @@ export function createCreateTaskDialogController({
     updateNarrativeDefaults();
     nameInput?.addEventListener("input", updateNarrativeDefaults);
     const material = bindExtraModelMaterialSource(article);
-    extraValidationModelRows.push({ id: rowId, material });
+    const row = { id: rowId, material };
+    extraValidationModelRows.push(row);
     updateCreateModelSummary();
     nameInput?.focus();
     article.querySelector("[data-remove-validation-extra-row]")?.addEventListener("click", () => {
@@ -953,6 +980,7 @@ export function createCreateTaskDialogController({
       renumberValidationExtraModels();
       updateCreateModelSummary();
     });
+    return row;
   }
 
   function collectPrimaryValidationModel(payload) {
